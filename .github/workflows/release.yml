@@ -1,0 +1,95 @@
+name: Release Life
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            args: --linux --x64
+          - platform: windows-x64
+            runner: windows-latest
+            args: --win --x64
+          - platform: macos-arm64
+            runner: macos-latest
+            args: --mac --arm64
+          - platform: macos-x64
+            runner: macos-15-intel
+            args: --mac --x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx electron-builder ${{ matrix.args }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: life-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.exe
+            release/*.dmg
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Publish installers and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd installers
+          sha256sum Life-* > SHA256SUMS.txt
+          cat > release-notes.md <<'NOTES'
+          Life is a desktop workspace for Codex and Claude Code over SSH.
+
+          - Projects and threads, streamed conversations, and agent approval requests.
+          - Remote file previews, Git changes, and an interactive SSH terminal.
+          - SSH private key, agent, and password authentication with host-key verification.
+
+          Install the package for your platform. Agent CLIs must be installed and signed in on the remote Linux or macOS machine. These initial builds are unsigned; macOS users may need to use Open Anyway in System Settings, and Windows may show an unrecognized publisher prompt.
+          NOTES
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "Life $RELEASE_TAG" --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" Life-* SHA256SUMS.txt --clobber

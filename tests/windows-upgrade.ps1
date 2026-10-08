@@ -10,6 +10,11 @@ param(
 # https://www.electron.build/docs/nsis/
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+trap {
+    [Console]::Error.WriteLine("Life installer upgrade test failed: $($_.Exception.Message)")
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    throw $_
+}
 if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true') {
     throw 'Run this installer upgrade test only on a disposable GitHub Actions Windows runner.'
 }
@@ -23,6 +28,9 @@ if (-not $ExpectedVersion) {
 if ($ExpectedVersion -eq '0.1.0') { throw 'The upgrade must target a version newer than 0.1.0.' }
 
 function Read-RegistryValue($Record, [string]$Name) {
+    # An empty registry key makes Get-ItemProperty return no object. Unrelated
+    # uninstall keys can be empty; skip them before inspecting adapted members.
+    if ($null -eq $Record) { return '' }
     $property = $Record.PSObject.Properties[$Name]
     if ($null -eq $property) { return '' }
     return [string]$property.Value

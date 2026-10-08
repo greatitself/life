@@ -92,7 +92,14 @@ function Assert-SingleLifeInstallation([string]$Version) {
         throw "Installed Life executable or location could not be resolved: $($registration | ConvertTo-Json -Compress)"
     }
     $binaryVersion = (Get-Item -LiteralPath $registration.Executable).VersionInfo.ProductVersion
-    if ($binaryVersion -ne $Version) {
+    # Life.exe uses Windows' four-part ProductVersion (e.g. 0.1.0.0), while
+    # package.json and the uninstall registration use the three-part release version.
+    # Compare the release components without mistaking the numeric build for a patch.
+    $releaseVersion = $binaryVersion
+    if ($binaryVersion -match '^(\d+\.\d+\.\d+)\.\d+$') {
+        $releaseVersion = $Matches[1]
+    }
+    if ($releaseVersion -ne $Version) {
         throw "Registry says Life $Version, but the installed executable reports '$binaryVersion'."
     }
     return $registration

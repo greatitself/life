@@ -59,6 +59,7 @@ import { ExtensionDialog } from './components/ExtensionDialog'
 import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
 import { readProjects } from './research'
+import { LIFE_VERSION } from '../shared/version'
 import './enhancements.css'
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
@@ -122,7 +123,7 @@ export function App() {
   const [updatesOpen, setUpdatesOpen] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({
     status: 'unsupported',
-    currentVersion: '0.2.0',
+    currentVersion: LIFE_VERSION,
     message: 'Updates are available in the installed desktop app.',
   })
   const platform =
@@ -491,7 +492,7 @@ export function App() {
             .apply({ theme: config.theme === 'dark' ? 'light' : 'dark' })
             .catch((error) => setToast(errorText(error)))
         }}
-        version="0.2.0"
+        version={LIFE_VERSION}
       />
       {replacement ? (
         <div className="extension-replacement">
@@ -716,7 +717,7 @@ export function App() {
                 {updateState.status === 'available' || updateState.status === 'downloaded' ? (
                   <span className="status-dot online" />
                 ) : (
-                  <span>v0.2.0</span>
+                  <span>v{LIFE_VERSION}</span>
                 )}
               </button>
               <div className="sidebar-credit">

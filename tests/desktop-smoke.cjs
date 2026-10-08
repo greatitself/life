@@ -3,7 +3,7 @@
  * Native Electron smoke coverage; no provider accounts or inference are used.
  * Run after npm run build. LIFE_ELECTRON_BINARY selects an unpacked packaged app;
  * LIFE_TEST_SOURCE=1 uses the development Electron binary even when a package exists.
- * Linux uses xvfb-run automatically when DISPLAY is absent. Root's --no-sandbox
+ * Linux uses xvfb-run automatically when DISPLAY is absent. Linux --no-sandbox
  * is confined to this test launcher; application webPreferences remain sandboxed.
  */
 const assert = require('node:assert/strict')
@@ -81,6 +81,11 @@ async function run() {
       ? packagedBinary
       : undefined)
   const executablePath = selectedBinary || require('electron')
+  const smokeLaunchArgs = [
+    ...(selectedBinary ? [] : [repository]),
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+    '--disable-dev-shm-usage',
+  ]
   const rendererErrors = []
   let application
   let page
@@ -89,11 +94,7 @@ async function run() {
   const launch = async () => {
     application = await electron.launch({
       executablePath,
-      args: [
-        ...(selectedBinary ? [] : [repository]),
-        ...(process.platform === 'linux' && process.getuid?.() === 0 ? ['--no-sandbox'] : []),
-        '--disable-dev-shm-usage',
-      ],
+      args: smokeLaunchArgs,
       cwd: repository,
       env: {
         ...process.env,
@@ -860,38 +861,44 @@ async function run() {
     await extensionFrame()
       .getByRole('heading', { name: 'Whole workspace counter', exact: true })
       .waitFor()
-    const secondary = spawn(
-      executablePath,
-      [
-        ...(selectedBinary ? [] : [repository]),
-        ...(process.platform === 'linux' && process.getuid?.() === 0 ? ['--no-sandbox'] : []),
-        '--disable-dev-shm-usage',
-      ],
-      {
-        cwd: repository,
-        env: {
-          ...process.env,
-          XDG_CONFIG_HOME: configurationRoot,
-          ...(process.platform === 'win32' ? { APPDATA: configurationRoot } : {}),
-        },
-        stdio: 'ignore',
+    const secondary = spawn(executablePath, smokeLaunchArgs, {
+      cwd: repository,
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: configurationRoot,
+        ...(process.platform === 'win32' ? { APPDATA: configurationRoot } : {}),
       },
-    )
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let secondaryStderr = ''
+    secondary.stderr.setEncoding('utf8')
+    secondary.stderr.on('data', (data) => {
+      secondaryStderr = (secondaryStderr + data).slice(-16 * 1024)
+    })
+    const secondaryDiagnostics = () =>
+      `Secondary Electron stderr (last 16384 characters):\n${secondaryStderr || '(empty)'}`
     const secondaryExit = await new Promise((resolveExit, rejectExit) => {
       const timeout = setTimeout(() => {
-        secondary.kill()
-        rejectExit(new Error('The second app instance did not exit.'))
+        secondary.kill('SIGKILL')
+        rejectExit(new Error(`The second app instance did not exit.\n${secondaryDiagnostics()}`))
       }, 15000)
       secondary.once('error', (error) => {
         clearTimeout(timeout)
-        rejectExit(error)
+        rejectExit(
+          new Error(
+            `The second app instance failed to launch: ${error.message}\n${secondaryDiagnostics()}`,
+            { cause: error },
+          ),
+        )
       })
       secondary.once('close', (code, signal) => {
         clearTimeout(timeout)
         resolveExit({ code, signal })
       })
-    })
-    assert.deepEqual(secondaryExit, { code: 0, signal: null })
+    }).finally(() =>
+      writeFile(join(artifacts, 'desktop-secondary-stderr.log'), secondaryStderr).catch(() => {}),
+    )
+    assert.deepEqual(secondaryExit, { code: 0, signal: null }, secondaryDiagnostics())
     assert.equal((await extensions()).extensions[0]?.enabled, true)
     await extensionFrame().getByRole('button', { name: 'Increment', exact: true }).click()
     await extensionFrame().getByText('Count: 1', { exact: true }).waitFor()

@@ -4,6 +4,7 @@ import type { AgentEvent, AgentQuestion, ModelOption, Provider, StartInput } fro
 import { shellQuote } from '../shared/validation'
 import { SSHConnection } from './ssh'
 import { JsonLines } from './json-lines'
+import { LIFE_VERSION } from '../shared/version'
 
 type Wire = Record<string, unknown>
 const object = (value: unknown): Wire => (value && typeof value === 'object' ? (value as Wire) : {})
@@ -148,7 +149,7 @@ export class Agents {
       })
       try {
         await rpc.request('initialize', {
-          clientInfo: { name: 'life_desktop', title: 'Life', version: '0.2.0' },
+          clientInfo: { name: 'life_desktop', title: 'Life', version: LIFE_VERSION },
           capabilities: { experimentalApi: false },
         })
         if (this.generation !== generation) throw new Error('SSH connection cancelled')

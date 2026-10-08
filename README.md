@@ -10,7 +10,7 @@ Download installers from [GitHub Releases](https://github.com/greatitself/life/r
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.0**, open **Updates** to check, download, and restart into subsequent releases. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 release, upgrades it, and checks that the installation identity and saved data survive.
+From **0.2.1**, open **Updates** to check, download, and restart into subsequent releases. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 release, upgrades it, and checks that the installation identity and saved data survive.
 
 ## Two views, two monochrome themes
 

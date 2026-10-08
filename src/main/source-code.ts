@@ -16,7 +16,6 @@ import {
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { Worker } from 'node:worker_threads'
 import { applyPatch, createTwoFilesPatch, diffChars } from 'diff'
 import {
   parseSourceExtensionBundle,
@@ -172,22 +171,35 @@ const defaultState = (): SavedState => ({
   failed: [],
 })
 
-const tailwindWorker = String.raw`
-const { parentPort, workerData } = require('node:worker_threads')
+// Native CSS packages run in a separate process, never in an Electron worker.
+// Oxide 4.3.3 can execute unloaded native code when a Windows worker exits
+// (tailwindlabs/tailwindcss#20470). Process isolation also keeps native crashes
+// and runaway package code outside the application and its recovery host.
+const tailwindProcess = String.raw`
 const { createRequire } = require('node:module')
 const { join } = require('node:path')
 ;(async () => {
   try {
-    const load = createRequire(join(workerData.modules, '@tailwindcss/postcss/package.json'))
+    const chunks = []
+    let bytes = 0
+    for await (const chunk of process.stdin) {
+      bytes += chunk.length
+      if (bytes > 8 * 1024 * 1024) throw new Error('Tailwind compiler input exceeds 8 MB.')
+      chunks.push(chunk)
+    }
+    const input = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    const load = createRequire(join(input.modules, '@tailwindcss/postcss/package.json'))
     const postcssModule = load('postcss')
     const tailwindModule = load('@tailwindcss/postcss')
     const postcss = postcssModule.default || postcssModule
     const tailwind = tailwindModule.default || tailwindModule
-    const result = await postcss([tailwind({ base: workerData.base, optimize: false })])
-      .process(workerData.css, { from: workerData.filename, map: false })
-    parentPort.postMessage({ css: result.css })
+    const result = await postcss([tailwind({ base: input.base, optimize: false })])
+      .process(input.css, { from: input.filename, map: false })
+    if (typeof result.css !== 'string') throw new Error('Tailwind returned no compiled stylesheet.')
+    process.stdout.write(JSON.stringify({ css: result.css }) + '\n')
   } catch (error) {
-    parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) })
+    process.stdout.write(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }) + '\n')
+    process.exitCode = 1
   }
 })()
 `
@@ -1306,31 +1318,103 @@ export class SourceCodeStore {
     signal: AbortSignal,
   ): Promise<string> {
     signal.throwIfAborted()
+    const input = JSON.stringify({ css, filename, base: join(base, 'src'), modules })
+    if (Buffer.byteLength(input) > 8 * 1024 * 1024)
+      throw new Error(
+        'Tailwind compiler input exceeds 8 MB. Split the stylesheet into smaller files.',
+      )
     return new Promise<string>((done, failed) => {
-      const worker = new Worker(tailwindWorker, {
-        eval: true,
-        workerData: { css, filename, base: join(base, 'src'), modules },
+      // process.execPath is Life.exe in the installed Windows application. The
+      // same executable provides its bundled Node runtime without a system install.
+      const child = spawn(process.execPath, ['-e', tailwindProcess], {
+        cwd: base,
+        windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // A separate POSIX group lets cancellation stop compiler descendants
+        // that inherited the output pipes, even after their parent has exited.
+        detached: process.platform !== 'win32',
       })
+      const output: Buffer[] = []
+      let outputBytes = 0
+      let errorOutput = ''
+      let stopped: Error | undefined
       let settled = false
+      let exited = false
+      let forceStop: ReturnType<typeof setTimeout> | undefined
+      let hardStop: ReturnType<typeof setTimeout> | undefined
+      let exitDrain: ReturnType<typeof setTimeout> | undefined
+      let windowsTreeKillStarted = false
       const finish = (value?: string, error?: Error) => {
         if (settled) return
         settled = true
+        // Releasing inherited pipes can cause close before the TERM escalation
+        // timer runs. Stop the remaining group before clearing that timer.
+        if (error || process.platform !== 'win32') killTree('SIGKILL')
         clearTimeout(timeout)
+        clearTimeout(forceStop)
+        clearTimeout(hardStop)
+        clearTimeout(exitDrain)
         signal.removeEventListener('abort', abort)
-        void worker.terminate()
         error ? failed(error) : done(value!)
       }
+      const destroyPipes = () => {
+        child.stdin.destroy()
+        child.stdout.destroy()
+        child.stderr.destroy()
+      }
+      const killTree = (killSignal: NodeJS.Signals) => {
+        if (child.pid === undefined) return
+        if (process.platform !== 'win32') {
+          try {
+            process.kill(-child.pid, killSignal)
+          } catch {
+            if (!exited) child.kill(killSignal)
+          }
+          return
+        }
+        if (windowsTreeKillStarted) {
+          if (!exited) child.kill(killSignal)
+          return
+        }
+        windowsTreeKillStarted = true
+        // taskkill is part of Windows, so tree cancellation needs no separately
+        // installed runtime. Run it before killing the parent directly; once the
+        // parent has exited, Windows may no longer find all of its descendants.
+        const taskkill = spawn(
+          join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/PID', String(child.pid), '/T', '/F'],
+          { windowsHide: true, stdio: 'ignore' },
+        )
+        const killParent = () => {
+          if (!exited) child.kill('SIGKILL')
+        }
+        taskkill.once('error', killParent)
+        taskkill.once('close', killParent)
+        taskkill.unref()
+      }
+      const stop = (error: Error) => {
+        if (stopped || settled) return
+        stopped = error
+        killTree('SIGTERM')
+        forceStop = setTimeout(() => killTree('SIGKILL'), 1500)
+        // A descendant can keep inherited pipes open after the direct child is
+        // gone. Never allow that to extend a timeout or recovery indefinitely.
+        hardStop = setTimeout(() => {
+          killTree('SIGKILL')
+          destroyPipes()
+          finish(undefined, stopped)
+        }, 2000)
+      }
       const abort = () =>
-        finish(
-          undefined,
+        stop(
           signal.reason instanceof Error
             ? signal.reason
             : new Error('Life Tailwind compilation was cancelled.'),
         )
       const timeout = setTimeout(
         () =>
-          finish(
-            undefined,
+          stop(
             new Error(
               'Life Tailwind compilation timed out. Simplify the stylesheet or source scan.',
             ),
@@ -1338,21 +1422,89 @@ export class SourceCodeStore {
         Math.min(this.options.compilerTimeoutMs ?? 60_000, 30_000),
       )
       signal.addEventListener('abort', abort, { once: true })
-      worker.once('message', (result: { css?: string; error?: string }) => {
-        if (result.error)
-          finish(undefined, new Error(`Tailwind/PostCSS failed in ${filename}: ${result.error}`))
-        else if (typeof result.css === 'string') finish(result.css)
-        else finish(undefined, new Error('Tailwind/PostCSS returned no compiled stylesheet.'))
-      })
-      worker.once('error', (error) => finish(undefined, error))
-      worker.once('exit', (code) => {
-        if (!settled)
-          finish(
-            undefined,
-            new Error(`Tailwind/PostCSS stopped before compiling the stylesheet (exit ${code}).`),
+      child.stdout.on('data', (chunk: Buffer) => {
+        outputBytes += chunk.length
+        if (outputBytes > 16 * 1024 * 1024) {
+          stop(
+            new Error(
+              'Tailwind compiler output exceeds 16 MB. Reduce generated utilities or source scanning.',
+            ),
           )
+          return
+        }
+        if (!stopped) output.push(chunk)
       })
+      child.stderr.on('data', (chunk: Buffer) => {
+        errorOutput = (errorOutput + chunk.toString('utf8')).slice(-30_000)
+      })
+      child.stdin.on('error', (error) => {
+        if (!stopped && (error as NodeJS.ErrnoException).code !== 'EPIPE')
+          stop(new Error(`Life Tailwind compiler input failed: ${explain(error)}`))
+      })
+      child.once('error', (error) => {
+        const failure = new Error(`Life Tailwind compiler process failed: ${explain(error)}`)
+        // A failed spawn never held the staging directory. Once a child exists,
+        // wait for its close event before the caller removes its build inputs.
+        if (child.pid === undefined) finish(undefined, failure)
+        else stop(failure)
+      })
+      child.once('exit', () => {
+        exited = true
+        // Usually close follows exit immediately after buffered output drains.
+        // An inherited pipe held by another process must not block settlement.
+        exitDrain = setTimeout(() => {
+          if (settled) return
+          if (!stopped)
+            stop(
+              new Error(
+                'Tailwind/PostCSS compiler exited but its output pipes remained open. Its dependency may have left a helper process running.',
+              ),
+            )
+          killTree('SIGKILL')
+          destroyPipes()
+          finish(undefined, stopped)
+        }, 500)
+      })
+      child.once('close', (code, exitSignal) => {
+        if (stopped) return finish(undefined, stopped)
+        let result: unknown
+        try {
+          // Dependency diagnostics may use stdout. The compiler protocol is the
+          // final JSON line, after any incidental package messages.
+          const lines = Buffer.concat(output).toString('utf8').trim().split(/\r?\n/)
+          result = JSON.parse(lines.at(-1) || '')
+        } catch {
+          return finish(
+            undefined,
+            new Error(
+              `Tailwind/PostCSS failed in ${filename}: compiler exited without a valid result (exit ${code}, signal ${exitSignal || 'none'}).${errorOutput ? `\n${errorOutput}` : ''}`,
+            ),
+          )
+        }
+        const response = result as { css?: unknown; error?: unknown } | null
+        if (typeof response?.error === 'string')
+          return finish(
+            undefined,
+            new Error(`Tailwind/PostCSS failed in ${filename}: ${response.error.slice(0, 30_000)}`),
+          )
+        if (code !== 0 || exitSignal)
+          return finish(
+            undefined,
+            new Error(
+              `Tailwind/PostCSS failed in ${filename}: compiler process crashed or failed (exit ${code}, signal ${exitSignal || 'none'}).${errorOutput ? `\n${errorOutput}` : ''}`,
+            ),
+          )
+        if (typeof response?.css !== 'string')
+          return finish(
+            undefined,
+            new Error(`Tailwind/PostCSS failed in ${filename}: compiler returned no stylesheet.`),
+          )
+        finish(response.css)
+      })
+      // A cancellation that arrived immediately after spawn must still terminate
+      // the child before any expensive native work can begin.
       if (signal.aborted) abort()
+      if (!stopped) child.stdin.end(input)
     })
   }
 }

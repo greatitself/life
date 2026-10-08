@@ -4,7 +4,8 @@
  * Run after npm run build. Built source is the default; LIFE_ELECTRON_BINARY selects
  * an unpacked packaged app, or LIFE_TEST_SOURCE=0 chooses an existing Linux package.
  * LIFE_TEST_PACKAGED=1 selects that package; LIFE_TEST_TAILWIND=1 also checks its
- * optional npm-installed Tailwind compiler and native worker dependencies.
+ * optional npm-installed Tailwind compiler and its isolated native child process.
+ * LIFE_TEST_ARTIFACTS_DIR and LIFE_TEST_SCREENSHOTS_DIR isolate parallel run outputs.
  * Linux uses xvfb-run automatically when DISPLAY is absent. Linux --no-sandbox
  * is confined to this test launcher; application webPreferences remain sandboxed.
  */
@@ -19,8 +20,8 @@ const { _electron: electron } = require('playwright')
 const { build } = require('esbuild')
 
 const repository = resolve(__dirname, '..')
-const artifacts = join(repository, 'output', 'playwright')
-const screenshots = join(repository, 'docs', 'images')
+const artifacts = resolve(repository, process.env.LIFE_TEST_ARTIFACTS_DIR || 'output/playwright')
+const screenshots = resolve(repository, process.env.LIFE_TEST_SCREENSHOTS_DIR || 'docs/images')
 
 if (process.platform === 'linux' && !process.env.DISPLAY) {
   const probe = spawnSync('xvfb-run', ['--help'], { stdio: 'ignore' })
@@ -57,7 +58,7 @@ async function run() {
     mkdir(artifacts, { recursive: true }),
     mkdir(screenshots, { recursive: true }),
   ])
-  const bundledFixture = join(repository, 'output', 'desktop-ssh-fixture.cjs')
+  const bundledFixture = join(artifacts, 'desktop-ssh-fixture.cjs')
   await build({
     entryPoints: [join(repository, 'tests/helpers/ssh-fixture.ts')],
     outfile: bundledFixture,
@@ -2643,10 +2644,31 @@ export function activityLabel(activity: ThreadActivity): string {
     )
 
     let tailwindVerified = false
+    let tailwindCompilerProcessVerified = false
     if (process.env.LIFE_TEST_TAILWIND === '1') {
       phase =
-        'packaged Electron compiles optional Tailwind with real npm and native worker bindings'
+        'Electron compiles optional Tailwind with real npm and an isolated native child process'
       const beforeTailwind = await sourceCode()
+      const installedPackages = await readdir(join(beforeTailwind.path, 'packages')).catch(
+        (error) => {
+          if (error.code === 'ENOENT') return []
+          throw error
+        },
+      )
+      assert.ok(
+        installedPackages.every(
+          (directory) =>
+            !existsSync(
+              join(
+                beforeTailwind.path,
+                'packages',
+                directory,
+                'node_modules/@tailwindcss/postcss/package.json',
+              ),
+            ),
+        ),
+        'The native Tailwind proof must start without a previously installed Tailwind cache.',
+      )
       const tailwindPatch = {
         summary:
           'Verify optional Tailwind utilities and directives in the actual Electron source compiler',
@@ -2679,11 +2701,77 @@ export function activityLabel(activity: ThreadActivity): string {
           },
         ],
       }
-      const tailwindState = await page.evaluate(
-        (patch) => window.relay.sourceCode.apply(patch),
-        tailwindPatch,
-      )
+      // Observe the actual compiler launch in Electron main without replacing its
+      // implementation, inputs or output. Keep generated code and CSS out of logs.
+      await application.evaluate(() => {
+        const childProcess = process.getBuiltinModule('node:child_process')
+        const originalSpawn = childProcess.spawn
+        const proof = {
+          mainPid: process.pid,
+          executablePath: process.execPath,
+          calls: [],
+          originalSpawn,
+        }
+        globalThis.__lifeCompilerProof = proof
+        childProcess.spawn = function (executable, args, options) {
+          const child = Reflect.apply(originalSpawn, this, arguments)
+          if (
+            args?.[0] === '-e' &&
+            typeof args[1] === 'string' &&
+            args[1].includes('@tailwindcss/postcss')
+          ) {
+            const call = {
+              executable,
+              pid: child.pid,
+              cwd: options.cwd,
+              runAsNode: options.env.ELECTRON_RUN_AS_NODE,
+              windowsHide: options.windowsHide,
+              closed: false,
+            }
+            proof.calls.push(call)
+            child.once('close', (code, signal) => {
+              call.closed = true
+              call.code = code
+              call.signal = signal
+            })
+          }
+          return child
+        }
+      })
+      let tailwindState
+      let compilerProcess
+      try {
+        tailwindState = await page.evaluate(
+          (patch) => window.relay.sourceCode.apply(patch),
+          tailwindPatch,
+        )
+      } finally {
+        compilerProcess = await application.evaluate(() => {
+          const proof = globalThis.__lifeCompilerProof
+          process.getBuiltinModule('node:child_process').spawn = proof.originalSpawn
+          delete globalThis.__lifeCompilerProof
+          return {
+            mainPid: proof.mainPid,
+            executablePath: proof.executablePath,
+            calls: proof.calls,
+            parentAlive: process.pid === proof.mainPid,
+          }
+        })
+      }
       assert.equal(tailwindState.error, undefined)
+      assert.equal(compilerProcess.parentAlive, true)
+      assert.ok(compilerProcess.calls.length > 0, 'Tailwind must launch its own compiler process.')
+      for (const call of compilerProcess.calls) {
+        assert.equal(call.executable, compilerProcess.executablePath)
+        assert.ok(Number.isInteger(call.pid) && call.pid !== compilerProcess.mainPid)
+        assert.ok(call.cwd.startsWith(beforeTailwind.path))
+        assert.equal(call.runAsNode, '1')
+        assert.equal(call.windowsHide, true)
+        assert.equal(call.closed, true, 'The compiler must close before source apply completes.')
+        assert.equal(call.code, 0)
+        assert.equal(call.signal, null)
+      }
+      tailwindCompilerProcessVerified = true
       const tailwindReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
       await page.evaluate(() => window.relay.sourceCode.reload())
       await tailwindReload
@@ -2719,6 +2807,9 @@ export function activityLabel(activity: ThreadActivity): string {
         JSON.stringify(
           {
             packaged: Boolean(selectedBinary),
+            version: metadata.version,
+            coldInstall: true,
+            compilerProcess,
             source: await sourceCode(),
             computed: computedTailwind,
           },
@@ -2861,6 +2952,7 @@ export function activityLabel(activity: ThreadActivity): string {
           platform: process.platform,
           version: metadata.version,
           tailwindVerified,
+          tailwindCompilerProcessVerified,
           projectCount: projects.length,
           providerLogEntries: (await fixture.log()).length,
           rendererErrors,
@@ -2912,7 +3004,7 @@ export function activityLabel(activity: ThreadActivity): string {
             'real npm dependency installation and bundled renderer compilation in Electron',
             ...(tailwindVerified
               ? [
-                  'optional npm-installed Tailwind utilities and directives compile through the native Electron worker and render real styles',
+                  'cold npm-installed Tailwind utilities and directives compile in a separate Electron Node child, close cleanly and render real styles',
                 ]
               : []),
             'source compile failure preserves the active application and repairs the same conversation',
@@ -2946,7 +3038,7 @@ export function activityLabel(activity: ThreadActivity): string {
       application = undefined
     }
     console.log(
-      `Native Electron smoke passed (${selectedBinary ? 'packaged' : 'built source'}): research, themes, native controls, config aliases, real SSH/SFTP, both providers, customization, executable extensions, hot reload, rollback and emergency recovery. Screenshots: docs/images/life{,-light,-workspace}.png`,
+      `Native Electron smoke passed (${selectedBinary ? 'packaged' : 'built source'}): research, themes, native controls, config aliases, real SSH/SFTP, both providers, customization, executable extensions, hot reload, rollback and emergency recovery. Screenshots: ${screenshots}`,
     )
   } catch (error) {
     failed = true

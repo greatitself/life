@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, writeSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { SourceCodeStore } from '../src/main/source-code'
+
+let currentStage = 'starting verification'
+let failedStage: string | undefined
+
+function stage(name: string) {
+  currentStage = name
+  // Synchronous stderr preserves the last phase even if a native module crashes.
+  writeSync(2, `[Life runtime proof] ${name}\n`)
+}
 
 /**
  * This entry is bundled and shipped as a release-verification tool. It deliberately
@@ -12,6 +21,7 @@ import { SourceCodeStore } from '../src/main/source-code'
  * a system Node/npm/esbuild installation to hide a broken Windows package.
  */
 async function run() {
+  stage('verify packaged executable and resources')
   const startedAt = new Date().toISOString()
   const resources = resolve(process.argv[2] || '')
   const proofPath = process.argv[3] ? resolve(process.argv[3]) : undefined
@@ -29,6 +39,7 @@ async function run() {
   )
   assert(existsSync(join(nodeModulesDir, 'npm', 'bin', 'npm-cli.js')), 'Bundled npm is missing')
   // Spaces also exercise Windows npm/esbuild argument handling and junction paths.
+  stage('create isolated source extension store')
   const directory = await mkdtemp(join(tmpdir(), 'life packaged source proof '))
   const options = {
     sourceDir,
@@ -41,8 +52,10 @@ async function run() {
   const checks: string[] = []
   let assetDigest = ''
   try {
+    stage('initialize source extension store')
     const initial = await store.init()
     assert.equal(initial.enabled, false)
+    stage('read packaged renderer source')
     const context = await store.getContext({ paths: ['src/renderer/main.tsx'] })
     const main = context.files[0].content
     assert.equal(
@@ -50,6 +63,7 @@ async function run() {
       2,
       'The packaged renderer entry must contain the real app',
     )
+    stage('compile initial source extension with npm dependencies and Tailwind')
     const active = await store.apply({
       summary: 'Verify packaged live React, npm, and Tailwind source customization',
       baseRevision: context.revision,
@@ -88,10 +102,12 @@ export function RuntimeProof() {
         },
       ],
     })
+    stage('export compiled source extension')
     assert.equal(active.enabled, true)
     assert.equal(active.extensions.length, 1, 'The source change was not installed as an extension')
     const portable = await store.exportExtension(active.extensions[0].id)
     assert.equal(portable.format, 'life-source-extension')
+    stage('verify compiled React bundle and generated Tailwind CSS')
     assert(active.active?.css, 'The committed generation has no CSS asset')
     const jsPath = store.assetPath(active.active.js)
     const cssPath = store.assetPath(active.active.css)
@@ -117,11 +133,12 @@ export function RuntimeProof() {
       'Full packaged renderer compiled with a new React component and an npm-installed dependency',
     )
     checks.push(
-      'Bundled Electron npm, native esbuild, Tailwind PostCSS worker, native scanner and dependency junction succeeded',
+      'Bundled Electron npm, native esbuild, isolated Tailwind PostCSS process, native scanner and dependency junction succeeded',
     )
     checks.push('Tailwind @theme, @apply and inline source utilities emitted real browser CSS')
 
     const beforeInvalid = store.get()
+    stage('compile invalid source extension and verify atomic failure')
     await assert.rejects(
       store.apply({
         summary: 'Deliberately invalid proposal must preserve the active application',
@@ -143,8 +160,10 @@ export function RuntimeProof() {
       'A failed compilation retained the previous active revision and its immutable assets',
     )
 
+    stage('close store before restart')
     await store.close()
     store = new SourceCodeStore(options)
+    stage('reopen store and verify persisted source extension')
     const reopened = await store.init()
     assert.equal(reopened.enabled, true, 'A clean restart disabled the committed customization')
     assert.equal(reopened.recovered, false)
@@ -153,34 +172,46 @@ export function RuntimeProof() {
     assert(preserved.files[0].content.includes('Life packaged live source runtime proof'))
     checks.push('A clean store restart preserved the active source, dependency metadata and assets')
 
+    stage('roll back source extension to built-in interface')
     const rolledBack = await store.rollback()
     assert.equal(rolledBack.enabled, false)
     assert.equal(rolledBack.active, undefined)
     checks.push('Rollback restored the built-in application')
+    stage('import exported source extension and compile')
     const imported = await store.importExtension(portable)
     assert.equal(imported.enabled, true)
     assert.equal(imported.extensions[0].id, portable.id)
     checks.push(
       'An exported source extension installed independently from the built-in application',
     )
+    stage('disable imported source extension')
     const disabled = await store.setExtensionEnabled(portable.id, false)
     assert.equal(disabled.enabled, false)
     assert.equal(disabled.extensions[0].enabled, false)
+    stage('enable imported source extension and compile')
     const reenabled = await store.setExtensionEnabled(portable.id, true)
     assert.equal(reenabled.enabled, true)
     assert.equal(reenabled.extensions[0].enabled, true)
     checks.push('Per-extension disable and enable recomposed the packaged interface')
+    stage('remove source extension')
     const removed = await store.removeExtension(portable.id)
     assert.equal(removed.enabled, false)
     assert.equal(removed.extensions.length, 0)
+    stage('close store after source extension removal')
     await store.close()
     store = new SourceCodeStore(options)
+    stage('reopen store and verify persisted source extension removal')
     const afterRemoval = await store.init()
     assert.equal(afterRemoval.enabled, false)
     assert.equal(afterRemoval.extensions.length, 0)
     checks.push('Extension removal restored the built-in interface and persisted across restart')
+  } catch (error) {
+    failedStage = currentStage
+    throw error
   } finally {
+    stage('close source extension store for cleanup')
     await store.close()
+    stage('remove isolated source extension store')
     await rm(directory, { recursive: true, force: true })
   }
   const proof = {
@@ -195,6 +226,7 @@ export function RuntimeProof() {
     assetDigest,
     checks,
   }
+  stage('write completed runtime proof')
   if (proofPath) {
     await mkdir(dirname(proofPath), { recursive: true })
     await writeFile(proofPath, JSON.stringify(proof, null, 2) + '\n', 'utf8')
@@ -203,6 +235,7 @@ export function RuntimeProof() {
 }
 
 run().catch((error) => {
+  writeSync(2, `[Life runtime proof] FAILED during ${failedStage || currentStage}\n`)
   process.stderr.write(
     (error instanceof Error ? error.stack || error.message : String(error)) + '\n',
   )

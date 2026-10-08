@@ -124,7 +124,7 @@ jobs:
           cd installers
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life 0.5 brings a T3-style research workspace, individual source extensions and explicit public sharing.
+          Life 0.5.1 brings a T3-style research workspace, individual source extensions and explicit public sharing.
 
           - A compact project/thread rail, open conversation area and wide diff pane bring the agent workspace closer to T3 Code in monochrome dark and light themes.
           - Each /life React/TypeScript/CSS change becomes a separate source extension over the immutable installed base. Enable, disable, remove, export and import individual changes.
@@ -133,6 +133,7 @@ jobs:
           - Preview one source or runtime extension, then explicitly publish a public GitHub Gist with your own token. The token is used once and not stored; Life does not automatically publish customizations.
           - Inspect a public Gist's files, dependencies and complete code before choosing Install extension. Portable bundles include extension code and metadata, without Life's saved connections or conversation history.
           - Real React/npm component changes, optional Tailwind v4 generation, same-thread source reads and bounded automatic repair remain available through bundled tools, without a separate Node.js installation.
+          - Tailwind native processing runs in a separate bundled compiler process, so compiler crashes leave Life and its previous working interface active. Cancellation, timeouts and bounded diagnostics remain supported.
           - Revision checks, saved conversations before reload, rollback and native Ctrl/Cmd + Shift + L recovery protect ongoing work.
           - Research maps, SSH config aliases, project selection, provider model controls and automatic port forwarding remain available.
           - Windows upgrades the existing Life installation and preserves its local data; Windows and AppImage support in-app updates.

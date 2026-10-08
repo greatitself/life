@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
   ArrowUpRight,
+  BrainCircuit,
   Check,
   ChevronDown,
   ChevronRight,
@@ -13,6 +15,7 @@ import {
   Computer,
   Ellipsis,
   Folder,
+  Gauge,
   GitPullRequest,
   Keyboard,
   Network,
@@ -39,9 +42,18 @@ import type {
   ModelOption,
   PermissionMode,
   Provider,
+  StartInput,
 } from '../shared/types'
+import type { LifeSourceContext } from '../shared/source-code'
 import { api, desktop, errorText } from './api'
-import { applyEvent, bindLegacyThreadWorkspace, readThreads, type Thread } from './state'
+import {
+  applyEvent,
+  bindLegacyThreadWorkspace,
+  normalizeModelChoices,
+  readThreads,
+  type Thread,
+} from './state'
+import { fallbackModelCatalog, withProviderDefault } from './model-catalog'
 import { RelayMark, ProviderIcon } from './components/Icons'
 import { Modal } from './components/Modal'
 import { ConnectionDialog } from './components/ConnectionDialog'
@@ -59,6 +71,8 @@ import type { UpdateState } from '../shared/updates'
 import { ExtensionDialog } from './components/ExtensionDialog'
 import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
+import { useSourceCode } from './useSourceCode'
+import { SourceCodeDialog } from './components/SourceCodeDialog'
 import { readProjects } from './research'
 import { LIFE_VERSION } from '../shared/version'
 import { PortForwardDialog } from './components/PortForwardDialog'
@@ -67,17 +81,39 @@ import {
   buildLifeThreadPrompt,
   detectLifeIntent,
   extractLifeThreadResponse,
+  maximumLifeRepairAttempts,
+  maximumLifeSourceReads,
   stripLifeIntent,
+  type LifeThreadPromptOptions,
 } from './life-thread'
+import {
+  encodePendingSourceApply,
+  loadPendingSourceApply,
+  pendingSourceApplyKey,
+} from './source-session'
 import './enhancements.css'
 
 interface LifeTurn {
   turn: number
   parts: Map<string, string>
   finishing: boolean
+  request: string
+  profileId: string
+  start?: StartInput
+  reads: number
+  repairs: number
+  source?: LifeSourceContext
+  paths?: string[]
 }
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
+const effortName = (effort: string) =>
+  effort === 'xhigh'
+    ? 'Extra high'
+    : effort.replace(
+        /(^|[_-])([a-z])/g,
+        (_, separator, letter: string) => `${separator ? ' ' : ''}${letter.toUpperCase()}`,
+      )
 const shortcutModifier = /Mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
 const starterPrompts = [
   {
@@ -110,6 +146,8 @@ export function App() {
   const [customizeOpen, setCustomizeOpen] = useState(false)
   const extensions = useExtensions()
   const [extensionsOpen, setExtensionsOpen] = useState(false)
+  const [sourceCodeOpen, setSourceCodeOpen] = useState(false)
+  const sourceUI = useSourceCode()
   const [selectedExtension, setSelectedExtension] = useState<string>()
   const [extensionRecovery, setExtensionRecovery] = useState(false)
   const enabledExtensions = extensions.extensions.filter((extension) => extension.enabled)
@@ -152,11 +190,16 @@ export function App() {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([])
   const [connection, setConnection] = useState<ConnectionState>({ status: 'disconnected' })
   const [threads, setThreads] = useState<Thread[]>(readThreads)
+  const threadsCurrent = useRef(threads)
+  threadsCurrent.current = threads
   const [activeId, setActiveId] = useState<string>()
   const [provider, setProvider] = useState<Provider>(config.defaultProvider)
   const [model, setModel] = useState(config.defaultModel)
+  const [reasoningEffort, setReasoningEffort] = useState('')
+  const [serviceTier, setServiceTier] = useState('')
   const [mode, setMode] = useState<PermissionMode>(config.defaultMode)
   const [models, setModels] = useState<ModelOption[]>([{ id: '', name: 'Agent default' }])
+  const modelCatalogs = useRef(new Map<string, ModelOption[]>())
   const [draft, setDraft] = useState('')
   const [connectOpen, setConnectOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
@@ -179,11 +222,17 @@ export function App() {
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<{ id?: string } | undefined>(undefined)
   const lifeTurns = useRef(new Map<string, LifeTurn>())
-  const lifeContext = useRef({ preferences, config, extensions })
-  lifeContext.current = { preferences, config, extensions }
+  const lifeContext = useRef({ preferences, config, extensions, connection })
+  lifeContext.current = { preferences, config, extensions, connection }
+  const restoredSourceApply = useRef(false)
   const active = threads.find((t) => t.id === activeId)
   const currentProvider = active?.provider || provider
   const currentModel = active?.model ?? model
+  const currentReasoningEffort = active ? (active.reasoningEffort ?? '') : reasoningEffort
+  const currentServiceTier = active ? (active.serviceTier ?? '') : serviceTier
+  const currentModelOption = models.find((option) => option.id === currentModel)
+  const effortOptions = currentModelOption?.supportedReasoningEfforts || []
+  const tierOptions = currentModelOption?.serviceTiers || []
   const currentMode = active?.mode || mode
   const connected = connection.status === 'connected'
   const projectReady = connected && Boolean(connection.workspace)
@@ -220,6 +269,8 @@ export function App() {
   useEffect(() => {
     setProvider(config.defaultProvider)
     setModel(config.defaultModel)
+    setReasoningEffort('')
+    setServiceTier('')
     setMode(config.defaultMode)
   }, [config.defaultProvider, config.defaultModel, config.defaultMode])
   useEffect(() => {
@@ -235,6 +286,7 @@ export function App() {
     refreshProfiles()
     if (!api) return
     const updateConnection = (state: ConnectionState) => {
+      lifeContext.current.connection = state
       setConnection(state)
       if (state.status === 'connected')
         setThreads((previous) => previous.map((thread) => bindLegacyThreadWorkspace(thread, state)))
@@ -264,6 +316,8 @@ export function App() {
       // The completed provider turn has handed over to a local atomic write.
       // Late provider events cannot cancel or replace that result.
       if (lifeTurn?.finishing) return
+      if (lifeTurn?.start && event.type === 'session' && event.remoteId)
+        lifeTurn.start.remoteId = event.remoteId
       if (lifeTurn && event.type === 'text') {
         const key = event.itemId || 'response'
         lifeTurn.parts.set(
@@ -298,15 +352,180 @@ export function App() {
     }
   }, [refreshProfiles])
 
+  function completeLifeTurn(
+    id: string,
+    lifeTurn: LifeTurn,
+    message: string,
+    failure?: string,
+    synchronous = false,
+  ) {
+    lifeTurns.current.delete(id)
+    const update = () =>
+      setThreads((previous) =>
+        previous.map((thread) => {
+          if (thread.id !== id || thread.turn !== lifeTurn.turn) return thread
+          const messages = thread.messages
+            .filter((item) => item.turn !== lifeTurn.turn || item.role !== 'assistant')
+            .map((item) =>
+              item.role === 'tool' && item.status === 'running'
+                ? { ...item, status: failure ? 'failed' : 'completed' }
+                : item,
+            )
+          if (message.trim())
+            messages.push({
+              id: `${lifeTurn.turn}:life-response`,
+              role: 'assistant',
+              text: message,
+              turn: lifeTurn.turn,
+            })
+          if (failure)
+            messages.push({
+              id: `${lifeTurn.turn}:life-error`,
+              role: 'error',
+              text: failure,
+              turn: lifeTurn.turn,
+            })
+          return { ...thread, messages, busy: false, pending: [] }
+        }),
+      )
+    if (synchronous) flushSync(update)
+    else update()
+  }
+
+  function persistThreadHistory() {
+    localStorage.setItem(
+      'relay.threads.v1',
+      JSON.stringify(
+        threadsCurrent.current.map((thread) => ({ ...thread, pending: [], busy: false })),
+      ),
+    )
+  }
+
+  async function continueLifeTurn(
+    id: string,
+    lifeTurn: LifeTurn,
+    options: LifeThreadPromptOptions,
+    title: string,
+    detail: string,
+  ) {
+    if (!api || !lifeTurn.start) throw new Error('The original agent conversation is unavailable.')
+    const connection = lifeContext.current.connection
+    if (connection.status !== 'connected' || connection.profile?.id !== lifeTurn.profileId)
+      throw new Error('Reconnect this thread’s machine to continue the Life change.')
+    if (lifeTurns.current.get(id) !== lifeTurn) return
+    const prompt = buildLifeThreadPrompt(
+      lifeTurn.request,
+      lifeContext.current.config,
+      lifeContext.current.extensions.extensions,
+      api.extensions.capabilities,
+      options,
+    )
+    lifeTurn.source = options.source
+    lifeTurn.parts.clear()
+    lifeTurn.finishing = false
+    setThreads((previous) =>
+      previous.map((thread) =>
+        thread.id === id && thread.turn === lifeTurn.turn
+          ? {
+              ...thread,
+              busy: true,
+              pending: [],
+              messages: [
+                ...thread.messages.filter(
+                  (message) => message.turn !== lifeTurn.turn || message.role !== 'assistant',
+                ),
+                {
+                  id: `${lifeTurn.turn}:life-step-${lifeTurn.reads}-${lifeTurn.repairs}`,
+                  role: 'tool',
+                  title,
+                  text: detail,
+                  status: 'running',
+                  turn: lifeTurn.turn,
+                },
+              ],
+            }
+          : thread,
+      ),
+    )
+    try {
+      await api.agent.start({ ...lifeTurn.start, prompt, mode: 'plan' })
+    } catch (error) {
+      if (lifeTurns.current.get(id) === lifeTurn)
+        completeLifeTurn(id, lifeTurn, '', errorText(error))
+    }
+  }
+
+  async function repairLifeTurn(
+    id: string,
+    lifeTurn: LifeTurn,
+    diagnostics: string,
+  ): Promise<boolean> {
+    if (
+      !api ||
+      !lifeTurn.start ||
+      lifeTurns.current.get(id) !== lifeTurn ||
+      lifeTurn.repairs >= maximumLifeRepairAttempts
+    )
+      return false
+    const connection = lifeContext.current.connection
+    if (connection.status !== 'connected' || connection.profile?.id !== lifeTurn.profileId)
+      return false
+    lifeTurn.repairs += 1
+    const index = await api.sourceCode.getContext()
+    const wanted = lifeTurn.paths || lifeTurn.source?.files.map((file) => file.path) || []
+    const paths = [...new Set(wanted)].filter((path) => index.paths.includes(path)).slice(0, 30)
+    const missing = wanted.filter((path) => !index.paths.includes(path))
+    const selected = paths.length ? await api.sourceCode.getContext({ paths }) : index
+    const source: LifeSourceContext = {
+      ...selected,
+      files: [
+        ...selected.files,
+        ...(selected.revision === index.revision
+          ? index.files.filter((file) => !selected.files.some((item) => item.path === file.path))
+          : []),
+      ],
+    }
+    if (missing.length)
+      diagnostics += `\nSource paths no longer present in the active workspace: ${missing.join(', ')}. Recreate them if needed by the original request.`
+    if (lifeTurns.current.get(id) !== lifeTurn) return true
+    await continueLifeTurn(
+      id,
+      lifeTurn,
+      { source, repair: { attempt: lifeTurn.repairs, diagnostics: diagnostics.slice(0, 40_000) } },
+      `Repairing Life change (${lifeTurn.repairs}/${maximumLifeRepairAttempts})`,
+      diagnostics,
+    )
+    return true
+  }
+
   async function finishLifeTurn(id: string, lifeTurn: LifeTurn) {
     const current = () => lifeTurns.current.get(id) === lifeTurn
     const response = extractLifeThreadResponse([...lifeTurn.parts.values()].join('\n'))
     let message = response.message
     let failure: string | undefined
+    let reload = false
+    let changedPaths: string[] = []
     try {
       if (!current()) return
       if (response.kind === 'error') failure = response.error
-      else if (response.kind === 'settings') {
+      else if (response.kind === 'source-read') {
+        if (!api) throw new Error('Source customization requires the desktop application.')
+        if (lifeTurn.reads >= maximumLifeSourceReads)
+          throw new Error(
+            'The agent reached the six-read limit. Narrow the change or continue the request in this thread.',
+          )
+        lifeTurn.reads += 1
+        const source = await api.sourceCode.getContext(response.read)
+        if (!current()) return
+        await continueLifeTurn(
+          id,
+          lifeTurn,
+          { source, sourceRead: response.read },
+          `Reading Life source (${lifeTurn.reads}/${maximumLifeSourceReads})`,
+          response.read.paths.join('\n'),
+        )
+        return
+      } else if (response.kind === 'settings') {
         await lifeContext.current.preferences.apply(response.patch)
         message = [
           message,
@@ -332,36 +551,164 @@ export function App() {
           .filter(Boolean)
           .join('\n\n')
         if (current() && installed.enabled) setExtensionRecovery(false)
+      } else if (response.kind === 'source') {
+        if (!api) throw new Error('Source customization requires the desktop application.')
+        lifeTurn.paths = [
+          ...new Set([
+            ...response.patch.files.map((file) => file.path),
+            ...(lifeTurn.source?.files.map((file) => file.path) || []),
+          ]),
+        ].slice(0, 30)
+        const state = await api.sourceCode.apply(response.patch)
+        if (state.error || !state.enabled || !state.active)
+          throw new Error(state.error || 'Life could not activate the compiled source.')
+        changedPaths = response.patch.files.map((file) => file.path)
+        message = [
+          message,
+          `Updated Life source: ${response.patch.summary}. The compiled interface will reload; your conversation is preserved.`,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+        reload = true
       }
     } catch (error) {
       failure = errorText(error)
     }
     if (!current()) return
-    lifeTurns.current.delete(id)
-    setThreads((previous) =>
-      previous.map((thread) => {
-        if (thread.id !== id || thread.turn !== lifeTurn.turn) return thread
-        const messages = thread.messages.filter(
-          (item) => item.turn !== lifeTurn.turn || item.role !== 'assistant',
+    if (failure) {
+      try {
+        if (await repairLifeTurn(id, lifeTurn, failure)) return
+      } catch (error) {
+        failure += `\n\nLife could not continue the repair: ${errorText(error)}`
+      }
+    }
+    if (!current()) return
+    if (reload && lifeTurn.start) {
+      completeLifeTurn(id, lifeTurn, message, undefined, true)
+      try {
+        persistThreadHistory()
+        localStorage.setItem(
+          pendingSourceApplyKey,
+          encodePendingSourceApply({
+            id,
+            turn: lifeTurn.turn,
+            request: lifeTurn.request,
+            profileId: lifeTurn.profileId,
+            reads: lifeTurn.reads,
+            repairs: lifeTurn.repairs,
+            start: lifeTurn.start,
+            paths: [
+              ...new Set([
+                ...changedPaths,
+                ...(lifeTurn.source?.files.map((file) => file.path) || []),
+              ]),
+            ].slice(0, 30),
+          }),
         )
-        if (message.trim())
-          messages.push({
-            id: `${lifeTurn.turn}:life-response`,
-            role: 'assistant',
-            text: message,
-            turn: lifeTurn.turn,
-          })
-        if (failure)
-          messages.push({
-            id: `${lifeTurn.turn}:life-error`,
-            role: 'error',
-            text: failure,
-            turn: lifeTurn.turn,
-          })
-        return { ...thread, messages, busy: false, pending: [] }
-      }),
-    )
+        await api!.sourceCode.reload()
+      } catch (error) {
+        setToast(`Life saved the compiled source but could not reload: ${errorText(error)}`)
+      }
+      return
+    }
+    completeLifeTurn(id, lifeTurn, message, failure)
   }
+  useEffect(() => {
+    const unload = () => {
+      try {
+        persistThreadHistory()
+      } catch {
+        /* Existing quota feedback remains visible before reload. */
+      }
+    }
+    window.addEventListener('beforeunload', unload)
+    return () => window.removeEventListener('beforeunload', unload)
+  }, [])
+
+  useEffect(() => {
+    if (!api || restoredSourceApply.current) return
+    let disposed = false
+    let stored: string | null = null
+    try {
+      stored = localStorage.getItem(pendingSourceApplyKey)
+    } catch {
+      return
+    }
+    const pending = loadPendingSourceApply(stored)
+    if (!pending) {
+      if (stored) localStorage.removeItem(pendingSourceApplyKey)
+      return
+    }
+    void (async () => {
+      const state = await api!.sourceCode.get()
+      if (disposed || restoredSourceApply.current) return
+      restoredSourceApply.current = true
+      const thread = threadsCurrent.current.find((item) => item.id === pending.id)
+      if (!thread || thread.turn !== pending.turn) {
+        localStorage.removeItem(pendingSourceApplyKey)
+        return
+      }
+      setActiveId(thread.id)
+      setView('workspace')
+      if (state.enabled) return
+      if (!state.error) {
+        localStorage.removeItem(pendingSourceApplyKey)
+        return
+      }
+      localStorage.removeItem(pendingSourceApplyKey)
+      const lifeTurn: LifeTurn = {
+        turn: pending.turn,
+        request: pending.request,
+        profileId: pending.profileId,
+        start: { ...pending.start, remoteId: thread.remoteId || pending.start.remoteId },
+        reads: pending.reads,
+        repairs: pending.repairs,
+        paths: pending.paths,
+        parts: new Map(),
+        finishing: true,
+      }
+      lifeTurns.current.set(thread.id, lifeTurn)
+      setThreads((previous) =>
+        previous.map((item) =>
+          item.id === thread.id ? { ...item, busy: true, lifeScope: true } : item,
+        ),
+      )
+      try {
+        const connected = await api!.connection.state()
+        lifeContext.current.connection = connected
+        setConnection(connected)
+        if (
+          await repairLifeTurn(
+            thread.id,
+            lifeTurn,
+            `The compiled Life interface failed during startup and Life restored the working interface.\n${state.error}`,
+          )
+        )
+          return
+        completeLifeTurn(
+          thread.id,
+          lifeTurn,
+          '',
+          state.error +
+            '\nAutomatic repair has stopped. Continue the request in this thread or restore source from Source code.',
+        )
+      } catch (error) {
+        if (lifeTurns.current.get(thread.id) === lifeTurn)
+          completeLifeTurn(
+            thread.id,
+            lifeTurn,
+            '',
+            `Life restored the working interface but could not continue the repair: ${errorText(error)}`,
+          )
+      }
+    })().catch((error) => {
+      if (!disposed) setToast(errorText(error))
+    })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -376,35 +723,40 @@ export function App() {
     return () => clearTimeout(timer)
   }, [threads])
   useEffect(() => {
+    const catalogKey = `${connection.profile?.id || ''}:${connection.workspace || ''}:${currentProvider}`
+    const cached = modelCatalogs.current.get(catalogKey)
+    setModels(cached || fallbackModelCatalog(currentProvider))
     if (!api || !projectReady || connection[currentProvider] === 'missing') {
-      setModels(
-        currentProvider === 'claude'
-          ? [
-              { id: '', name: 'Claude default' },
-              { id: 'sonnet', name: 'Sonnet' },
-              { id: 'opus', name: 'Opus' },
-              { id: 'haiku', name: 'Haiku' },
-            ]
-          : [{ id: '', name: 'Codex default' }],
-      )
       return
     }
     let valid = true
     void api.agent
       .models(currentProvider)
       .then((m) => {
-        if (valid) setModels(m)
+        if (valid) {
+          if (!m.some((option) => option.id !== '') && cached) return
+          const catalog = withProviderDefault(currentProvider, m)
+          modelCatalogs.current.set(catalogKey, catalog)
+          setModels(catalog)
+        }
       })
       .catch((e) => {
         if (valid) {
-          setModels([{ id: '', name: 'Agent default' }])
+          setModels(cached || fallbackModelCatalog(currentProvider))
           setToast(errorText(e))
         }
       })
     return () => {
       valid = false
     }
-  }, [projectReady, connection.workspace, currentProvider, connection.codex, connection.claude])
+  }, [
+    projectReady,
+    connection.profile?.id,
+    connection.workspace,
+    currentProvider,
+    connection.codex,
+    connection.claude,
+  ])
   useEffect(() => {
     if (connected && !connection.workspace) {
       setSuggestedProject(undefined)
@@ -452,7 +804,8 @@ export function App() {
         customizeOpen ||
         portsOpen ||
         updatesOpen ||
-        extensionsOpen
+        extensionsOpen ||
+        sourceCodeOpen
       )
         return
       const key = e.key.toLowerCase()
@@ -497,6 +850,7 @@ export function App() {
     portsOpen,
     updatesOpen,
     extensionsOpen,
+    sourceCodeOpen,
   ])
   async function send() {
     if (!draft.trim() || busy || submitting.current) return
@@ -569,6 +923,8 @@ export function App() {
         messages: [],
         busy: false,
         model,
+        reasoningEffort,
+        serviceTier,
         mode,
         updatedAt: Date.now(),
         turn: 0,
@@ -590,11 +946,20 @@ export function App() {
       messages: [...thread.messages, { id: crypto.randomUUID(), role: 'user', text: prompt, turn }],
     }
     setThreads((previous) => [next, ...previous.filter((t) => t.id !== id)])
+    let lifeSubmission: LifeTurn | undefined
     try {
       // A connected thread sends even simple Life changes to its existing harness so
       // follow-up questions share the actual provider conversation and remote identity.
       if (offlineLocal && localPatch) {
-        lifeTurns.current.set(id, { turn, parts: new Map(), finishing: true })
+        lifeTurns.current.set(id, {
+          turn,
+          parts: new Map(),
+          finishing: true,
+          request: userRequest,
+          profileId: thread.profileId,
+          reads: 0,
+          repairs: 0,
+        })
         await preferences.apply(localPatch)
         lifeTurns.current.delete(id)
         setThreads((previous) =>
@@ -618,25 +983,44 @@ export function App() {
         )
         return
       }
-      const agentPrompt = isLife
-        ? buildLifeThreadPrompt(
-            userRequest,
-            config,
-            extensions.extensions,
-            api!.extensions.capabilities,
-          )
-        : userRequest
-      if (isLife) lifeTurns.current.set(id, { turn, parts: new Map(), finishing: false })
-      await api!.agent.start({
+      const input: StartInput = {
         sessionId: id,
         provider: thread.provider,
         remoteId: thread.remoteId,
         workspace: connection.workspace,
-        prompt: agentPrompt,
+        prompt: userRequest,
         model: thread.model,
+        reasoningEffort: thread.reasoningEffort ?? '',
+        serviceTier: thread.serviceTier ?? '',
         mode: isLife ? 'plan' : thread.mode,
-      })
+      }
+      if (isLife) {
+        const lifeTurn: LifeTurn = {
+          turn,
+          parts: new Map(),
+          finishing: false,
+          request: userRequest,
+          profileId: connection.profile!.id,
+          start: input,
+          reads: 0,
+          repairs: 0,
+        }
+        lifeSubmission = lifeTurn
+        lifeTurns.current.set(id, lifeTurn)
+        const source = await api!.sourceCode.getContext()
+        if (lifeTurns.current.get(id) !== lifeTurn) return
+        lifeTurn.source = source
+        input.prompt = buildLifeThreadPrompt(
+          userRequest,
+          config,
+          extensions.extensions,
+          api!.extensions.capabilities,
+          { source },
+        )
+      }
+      await api!.agent.start(input)
     } catch (e) {
+      if (lifeSubmission && lifeTurns.current.get(id) !== lifeSubmission) return
       const lifeTurn = lifeTurns.current.get(id)
       if (lifeTurn?.turn === turn) lifeTurns.current.delete(id)
       setThreads((previous) =>
@@ -668,12 +1052,33 @@ export function App() {
       setToast(errorText(e))
     }
   }
-  const updateSettings = (value: { model?: string; mode?: PermissionMode }) => {
+  const updateSettings = (value: {
+    model?: string
+    mode?: PermissionMode
+    reasoningEffort?: string
+    serviceTier?: string
+  }) => {
+    let next = value
+    if (value.model !== undefined && value.model !== currentModel) {
+      const selectedModel = models.find((option) => option.id === value.model)
+      const choices = normalizeModelChoices(
+        {
+          id: value.model,
+          name: selectedModel?.name || value.model,
+          supportedReasoningEfforts: selectedModel?.supportedReasoningEfforts || [],
+          serviceTiers: selectedModel?.serviceTiers || [],
+        },
+        { reasoningEffort: currentReasoningEffort, serviceTier: currentServiceTier },
+      )
+      next = { ...choices, ...value }
+    }
     if (active)
-      setThreads((previous) => previous.map((t) => (t.id === active.id ? { ...t, ...value } : t)))
+      setThreads((previous) => previous.map((t) => (t.id === active.id ? { ...t, ...next } : t)))
     else {
-      if (value.model !== undefined) setModel(value.model)
-      if (value.mode) setMode(value.mode)
+      if (next.model !== undefined) setModel(next.model)
+      if (next.mode) setMode(next.mode)
+      if (next.reasoningEffort !== undefined) setReasoningEffort(next.reasoningEffort)
+      if (next.serviceTier !== undefined) setServiceTier(next.serviceTier)
     }
   }
   async function respond(event: AgentEvent, accepted: boolean, answers?: Record<string, string[]>) {
@@ -743,6 +1148,12 @@ export function App() {
         }}
         version={LIFE_VERSION}
       />
+      {!sourceUI.enabled && sourceUI.error ? (
+        <div className="extension-recovery-bar" role="status">
+          <span>{sourceUI.error}</span>
+          <button onClick={() => setSourceCodeOpen(true)}>Review source changes</button>
+        </div>
+      ) : null}
       {replacement ? (
         <div className="extension-replacement">
           <div className="extension-recovery-bar">
@@ -943,6 +1354,11 @@ export function App() {
                 <Network size={14} />
                 <span>Ports</span>
                 <small>{config.autoPortForward ? 'Auto' : 'Off'}</small>
+              </button>
+              <button className="extension-sidebar-entry" onClick={() => setSourceCodeOpen(true)}>
+                <Code2 size={14} />
+                <span>Source code</span>
+                <small>{sourceUI.enabled ? 'Edited' : 'Built-in'}</small>
               </button>
               <div className="sidebar-bottom-actions">
                 <button onClick={() => setConnectOpen(true)}>
@@ -1242,6 +1658,8 @@ export function App() {
                             onClick={() => {
                               setProvider(p)
                               setModel('')
+                              setReasoningEffort('')
+                              setServiceTier('')
                             }}
                             aria-pressed={provider === p}
                           >
@@ -1350,6 +1768,8 @@ export function App() {
                               if (command.provider) {
                                 setProvider(command.provider)
                                 setModel('')
+                                setReasoningEffort('')
+                                setServiceTier('')
                               }
                               if (command.mode) setMode(command.mode)
                             }
@@ -1395,6 +1815,8 @@ export function App() {
                             onChange={(e) => {
                               setProvider(e.target.value as Provider)
                               setModel('')
+                              setReasoningEffort('')
+                              setServiceTier('')
                             }}
                           >
                             <option value="codex">Codex</option>
@@ -1421,6 +1843,89 @@ export function App() {
                           </select>
                           <ChevronDown size={11} />
                         </label>
+                        {effortOptions.length || currentReasoningEffort ? (
+                          <label
+                            className="composer-select reasoning-select"
+                            title={
+                              effortOptions.find(
+                                (option) => option.reasoningEffort === currentReasoningEffort,
+                              )?.description || 'How much reasoning the model uses for this thread'
+                            }
+                          >
+                            <BrainCircuit size={13} />
+                            <select
+                              aria-label="Reasoning effort"
+                              value={currentReasoningEffort}
+                              disabled={busy}
+                              onChange={(event) =>
+                                updateSettings({ reasoningEffort: event.target.value })
+                              }
+                            >
+                              <option value="">
+                                Reasoning: default
+                                {currentModelOption?.defaultReasoningEffort
+                                  ? ` (${effortName(currentModelOption.defaultReasoningEffort)})`
+                                  : ''}
+                              </option>
+                              {effortOptions.map((option) => (
+                                <option
+                                  key={option.reasoningEffort}
+                                  value={option.reasoningEffort}
+                                  title={option.description}
+                                >
+                                  {effortName(option.reasoningEffort)}
+                                </option>
+                              ))}
+                              {currentReasoningEffort &&
+                              !effortOptions.some(
+                                (option) => option.reasoningEffort === currentReasoningEffort,
+                              ) ? (
+                                <option value={currentReasoningEffort}>
+                                  {effortName(currentReasoningEffort)} (unavailable)
+                                </option>
+                              ) : null}
+                            </select>
+                            <ChevronDown size={11} />
+                          </label>
+                        ) : null}
+                        {tierOptions.length || currentServiceTier ? (
+                          <label
+                            className="composer-select tier-select"
+                            title={
+                              tierOptions.find((option) => option.id === currentServiceTier)
+                                ?.description ||
+                              'Provider service tier and response speed for this thread'
+                            }
+                          >
+                            <Gauge size={13} />
+                            <select
+                              aria-label="Service tier"
+                              value={currentServiceTier}
+                              disabled={busy}
+                              onChange={(event) =>
+                                updateSettings({ serviceTier: event.target.value })
+                              }
+                            >
+                              <option value="">Speed: default</option>
+                              {tierOptions.map((option) => (
+                                <option
+                                  key={option.id}
+                                  value={option.id}
+                                  title={option.description}
+                                >
+                                  {option.name}
+                                </option>
+                              ))}
+                              {currentServiceTier &&
+                              !tierOptions.some((option) => option.id === currentServiceTier) ? (
+                                <option value={currentServiceTier}>
+                                  {currentServiceTier} (unavailable)
+                                </option>
+                              ) : null}
+                            </select>
+                            <ChevronDown size={11} />
+                          </label>
+                        ) : null}
                         <label
                           className="composer-select mode-select"
                           title={
@@ -1577,6 +2082,11 @@ export function App() {
             setView('extension')
           }
         }}
+      />
+      <SourceCodeDialog
+        open={sourceCodeOpen}
+        onOpenChange={setSourceCodeOpen}
+        onNotify={setToast}
       />
       <UpdateDialog
         open={updatesOpen}

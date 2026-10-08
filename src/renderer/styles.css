@@ -984,6 +984,14 @@ kbd {
 .model-select {
   color: var(--muted);
 }
+.reasoning-select,
+.tier-select {
+  color: var(--muted);
+}
+.reasoning-select select,
+.tier-select select {
+  max-width: 130px;
+}
 .send-button {
   width: 29px;
   height: 29px;

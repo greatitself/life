@@ -1,7 +1,7 @@
 import type { ClientChannel } from 'ssh2'
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentQuestion, ModelOption, Provider, StartInput } from '../shared/types'
-import { shellQuote } from '../shared/validation'
+import { agentProviderOptionsSchema, shellQuote } from '../shared/validation'
 import { SSHConnection } from './ssh'
 import { JsonLines } from './json-lines'
 import { LIFE_VERSION } from '../shared/version'
@@ -10,6 +10,61 @@ type Wire = Record<string, unknown>
 const object = (value: unknown): Wire => (value && typeof value === 'object' ? (value as Wire) : {})
 const string = (value: unknown) => (typeof value === 'string' ? value : '')
 const array = (value: unknown): Wire[] => (Array.isArray(value) ? value.map(object) : [])
+
+export function codexModelOption(model: Wire): ModelOption {
+  const result: ModelOption = {
+    id: string(model.model || model.id),
+    name: string(model.displayName || model.model || model.id),
+  }
+  if (Array.isArray(model.supportedReasoningEfforts))
+    result.supportedReasoningEfforts = array(model.supportedReasoningEfforts)
+      .map((option) => ({
+        reasoningEffort: string(option.reasoningEffort),
+        ...(typeof option.description === 'string' ? { description: option.description } : {}),
+      }))
+      .filter((option) => option.reasoningEffort)
+  if (typeof model.defaultReasoningEffort === 'string')
+    result.defaultReasoningEffort = model.defaultReasoningEffort
+  if (Array.isArray(model.serviceTiers))
+    result.serviceTiers = array(model.serviceTiers)
+      .map((tier) => ({
+        id: string(tier.id),
+        name: string(tier.name || tier.id),
+        ...(typeof tier.description === 'string' ? { description: tier.description } : {}),
+      }))
+      .filter((tier) => tier.id)
+  else if (Array.isArray(model.additionalSpeedTiers) && model.additionalSpeedTiers.length)
+    result.serviceTiers = [
+      { id: 'default', name: 'Standard' },
+      ...model.additionalSpeedTiers
+        .filter((tier): tier is string => typeof tier === 'string' && Boolean(tier))
+        .map((tier) => ({ id: tier, name: tier.charAt(0).toUpperCase() + tier.slice(1) })),
+    ]
+  if (typeof model.defaultServiceTier === 'string')
+    result.defaultServiceTier = model.defaultServiceTier
+  if (typeof model.isDefault === 'boolean') result.isDefault = model.isDefault
+  return result
+}
+
+export function claudeModelOption(model: Wire): ModelOption {
+  const value = string(model.value)
+  const result: ModelOption = {
+    id: value === 'default' ? '' : value,
+    name: string(model.displayName) || value,
+  }
+  if (Array.isArray(model.supportedEffortLevels))
+    result.supportedReasoningEfforts = model.supportedEffortLevels
+      .filter((effort): effort is string => typeof effort === 'string' && Boolean(effort))
+      .map((reasoningEffort) => ({ reasoningEffort }))
+  else if (model.supportsEffort === false) result.supportedReasoningEfforts = []
+  if (typeof model.supportsFastMode === 'boolean')
+    result.serviceTiers = [
+      { id: 'default', name: 'Standard' },
+      ...(model.supportsFastMode ? [{ id: 'fast', name: 'Fast' }] : []),
+    ]
+  if (value === 'default') result.isDefault = true
+  return result
+}
 
 class RPC {
   private next = 1
@@ -93,6 +148,7 @@ interface Session {
   >
   workspace: string
   appliedModel?: string
+  appliedReasoningEffort?: string
   phase: 'initializing' | 'startingTurn' | 'running'
 }
 export class Agents {
@@ -102,6 +158,14 @@ export class Agents {
   private threads = new Map<string, string>()
   private generation = 0
   private defaultCodexModel?: string
+  private codexModels?: ModelOption[]
+  private codexDefaultEfforts = new Map<string, string>()
+  private codexDefaultTiers = new Map<string, string | null>()
+  private codexDiskConfig?: Wire
+  private codexConfigStarting?: Promise<Wire>
+  private claudeModels?: ModelOption[]
+  private claudeModelsStarting?: Promise<ModelOption[]>
+  private discoveryChannels = new Set<ClientChannel>()
   constructor(
     private ssh: SSHConnection,
     private emit: (event: AgentEvent) => void,
@@ -174,25 +238,183 @@ export class Agents {
   async models(provider: Provider): Promise<ModelOption[]> {
     if (this.ssh.state.status !== 'connected') throw new Error('Connect to a machine first')
     if (!this.ssh.state.workspace) throw new Error('Select a project first')
-    if (provider === 'claude')
-      return [
-        { id: '', name: 'Claude default' },
-        { id: 'sonnet', name: 'Sonnet' },
-        { id: 'opus', name: 'Opus' },
-        { id: 'haiku', name: 'Haiku' },
-      ]
-    const result = await (await this.getCodex()).request('model/list', {})
-    const defaultModel = array(result.data).find((model) => model.isDefault)
-    if (defaultModel) this.defaultCodexModel = string(defaultModel.model || defaultModel.id)
-    return [
-      { id: '', name: 'Codex default' },
-      ...array(result.data)
-        .map((m) => ({
-          id: string(m.model || m.id),
-          name: string(m.displayName || m.model || m.id),
-        }))
-        .filter((m) => m.id),
+    if (provider === 'claude') return this.discoverClaudeModels()
+    const generation = this.generation
+    const rpc = await this.getCodex()
+    const config = await this.configuredCodexDefaults(rpc)
+    const models: Wire[] = []
+    let cursor: string | undefined
+    for (let page = 0; page < 10; page++) {
+      const result = await rpc.request('model/list', { ...(cursor ? { cursor } : {}) })
+      models.push(...array(result.data))
+      const next = string(result.nextCursor)
+      if (!next || next === cursor) break
+      cursor = next
+    }
+    if (generation !== this.generation) throw new Error('SSH connection cancelled')
+    const configuredModel = string(config.model)
+    const defaultModel = models.find((model) =>
+      configuredModel ? string(model.model || model.id) === configuredModel : model.isDefault,
+    )
+    this.defaultCodexModel =
+      configuredModel || (defaultModel ? string(defaultModel.model || defaultModel.id) : undefined)
+    this.codexModels = [
+      { ...(defaultModel ? codexModelOption(defaultModel) : {}), id: '', name: 'Codex default' },
+      ...models.map(codexModelOption).filter((model) => model.id),
     ]
+    return this.codexModels
+  }
+  private async discoverClaudeModels(): Promise<ModelOption[]> {
+    if (this.claudeModels) return this.claudeModels
+    if (this.claudeModelsStarting) return this.claudeModelsStarting
+    const generation = this.generation
+    const starting = (async () => {
+      const args = [
+        'claude',
+        '-p',
+        '--input-format',
+        'stream-json',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--permission-prompt-tool',
+        'stdio',
+        '--permission-mode',
+        'plan',
+      ]
+      const channel = await this.ssh.channel(
+        `cd ${shellQuote(this.ssh.state.workspace!)} && exec ${args.map(shellQuote).join(' ')}`,
+      )
+      if (generation !== this.generation) {
+        channel.close()
+        throw new Error('SSH connection cancelled')
+      }
+      this.discoveryChannels.add(channel)
+      try {
+        const result = await new Promise<Wire>((resolve, reject) => {
+          const requestId = randomUUID()
+          let stderr = ''
+          const timer = setTimeout(
+            () => finish(new Error('Claude model discovery timed out')),
+            60000,
+          )
+          let settled = false
+          const finish = (error?: Error, value?: Wire) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            error ? reject(error) : resolve(value || {})
+          }
+          const lines = new JsonLines((message) => {
+            if (message.type !== 'control_response') return
+            const response = object(message.response)
+            if (response.request_id !== requestId) return
+            if (response.subtype === 'error')
+              finish(new Error(string(response.error) || 'Claude model discovery failed'))
+            else finish(undefined, object(response.response))
+          })
+          channel.on('data', (chunk: Buffer) => lines.push(chunk))
+          channel.stderr.on('data', (chunk: Buffer) => {
+            stderr = (stderr + chunk.toString()).slice(-8192)
+          })
+          channel.on('error', (error: Error) => finish(error))
+          channel.on('close', () =>
+            finish(new Error(stderr || 'Claude model discovery disconnected')),
+          )
+          channel.write(
+            JSON.stringify({
+              type: 'control_request',
+              request_id: requestId,
+              request: { subtype: 'initialize', hooks: null },
+            }) + '\n',
+          )
+        })
+        if (generation !== this.generation) throw new Error('SSH connection cancelled')
+        const advertised = array(result.models).map(claudeModelOption)
+        this.claudeModels = advertised.length
+          ? [
+              {
+                ...(advertised.find((model) => !model.id) || {}),
+                id: '',
+                name: 'Claude default',
+              },
+              ...advertised.filter((model) => model.id),
+            ]
+          : [
+              { id: '', name: 'Claude default' },
+              { id: 'sonnet', name: 'Sonnet' },
+              { id: 'opus', name: 'Opus' },
+              { id: 'haiku', name: 'Haiku' },
+            ]
+        return this.claudeModels
+      } finally {
+        this.discoveryChannels.delete(channel)
+        channel.signal('TERM')
+        channel.close()
+      }
+    })()
+    this.claudeModelsStarting = starting
+    try {
+      return await starting
+    } finally {
+      if (this.claudeModelsStarting === starting) this.claudeModelsStarting = undefined
+    }
+  }
+  private validateModelChoices(input: StartInput, models?: ModelOption[]) {
+    const model = models?.find((option) => option.id === (input.model || ''))
+    if (
+      input.reasoningEffort &&
+      model?.supportedReasoningEfforts &&
+      !model.supportedReasoningEfforts.some(
+        (option) => option.reasoningEffort === input.reasoningEffort,
+      )
+    )
+      throw new Error(`${model.name} does not support reasoning effort ${input.reasoningEffort}`)
+    if (
+      input.serviceTier &&
+      model?.serviceTiers &&
+      !model.serviceTiers.some((tier) => tier.id === input.serviceTier)
+    )
+      throw new Error(`${model.name} does not support speed tier ${input.serviceTier}`)
+    // Claude can silently switch to Opus if fast is requested on another model.
+    // Require an advertised capability instead of changing the user's choice.
+    if (
+      input.provider === 'claude' &&
+      input.serviceTier === 'fast' &&
+      !model?.serviceTiers?.some((tier) => tier.id === 'fast')
+    )
+      throw new Error('Choose a Claude model that advertises Fast mode')
+  }
+  private async configuredCodexDefaults(rpc: RPC): Promise<Wire> {
+    if (this.codexDiskConfig) return this.codexDiskConfig
+    if (this.codexConfigStarting) return this.codexConfigStarting
+    const generation = this.generation
+    const starting = (async () => {
+      let config: Wire = {}
+      try {
+        const result = await rpc.request(
+          'config/read',
+          {
+            includeLayers: false,
+            cwd: this.ssh.state.workspace,
+          },
+          3000,
+        )
+        config = object(result.config)
+      } catch {
+        // Older app-server versions can omit configuration reads. Their model
+        // catalog still provides a safe default without reusing saved overrides.
+      }
+      if (generation !== this.generation) throw new Error('SSH connection cancelled')
+      this.codexDiskConfig = config
+      return config
+    })()
+    this.codexConfigStarting = starting
+    try {
+      return await starting
+    } finally {
+      if (this.codexConfigStarting === starting) this.codexConfigStarting = undefined
+    }
   }
   async start(input: StartInput) {
     if (this.ssh.state.status !== 'connected') throw new Error('Connect to a machine first')
@@ -208,6 +430,17 @@ export class Agents {
     if (old?.busy) throw new Error('This thread is already running')
     if (old && old.input.provider !== input.provider)
       throw new Error('Start a new thread to change providers')
+    if (input.providerOptions) agentProviderOptionsSchema.parse(input.providerOptions)
+    if (
+      input.provider === 'codex' &&
+      (input.providerOptions?.settings || input.providerOptions?.args)
+    )
+      throw new Error('Codex provider options use thread and turn parameters')
+    if (
+      input.provider === 'claude' &&
+      (input.providerOptions?.thread || input.providerOptions?.turn)
+    )
+      throw new Error('Claude provider options use settings and command-line arguments')
     // Each turn owns its asynchronous callbacks; an earlier cancelled startup
     // must not resume against the next turn's input or stop flag.
     const session: Session = {
@@ -223,6 +456,7 @@ export class Agents {
       controls: new Map(),
       workspace: this.ssh.state.workspace!,
       appliedModel: old?.appliedModel,
+      appliedReasoningEffort: old?.appliedReasoningEffort,
       phase: 'initializing',
     }
     this.sessions.set(input.sessionId, session)
@@ -246,41 +480,128 @@ export class Agents {
     if (this.sessions.get(input.sessionId) !== session || session.stopRequested) return
     const approvalPolicy = input.mode === 'review' ? 'untrusted' : 'on-request'
     const sandbox = input.mode === 'plan' ? 'read-only' : 'workspace-write'
-    if (!input.model && session.appliedModel && !this.defaultCodexModel) await this.models('codex')
+    const genericThreadModel = string(input.providerOptions?.thread?.model)
+    const genericTurnModel = string(input.providerOptions?.turn?.model)
+    if (!input.model && !genericThreadModel && !genericTurnModel) {
+      const config = await this.configuredCodexDefaults(rpc)
+      const configuredModel = string(config.model)
+      if (configuredModel) this.defaultCodexModel = configuredModel
+      if (!this.defaultCodexModel) await this.models('codex')
+    }
+    const threadModel = input.model || genericThreadModel || this.defaultCodexModel
+    const turnModel =
+      input.model || genericTurnModel || genericThreadModel || this.defaultCodexModel
+    const effectiveOptions = {
+      ...input,
+      model: turnModel,
+      reasoningEffort:
+        input.reasoningEffort === undefined
+          ? string(input.providerOptions?.turn?.effort)
+          : input.reasoningEffort,
+      serviceTier:
+        input.serviceTier === undefined
+          ? string(input.providerOptions?.turn?.serviceTier)
+          : input.serviceTier,
+    }
+    if (
+      !this.codexModels &&
+      (effectiveOptions.reasoningEffort ||
+        effectiveOptions.serviceTier ||
+        (input.reasoningEffort === '' && session.appliedReasoningEffort))
+    )
+      await this.models('codex')
+    this.validateModelChoices(effectiveOptions, this.codexModels)
     if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     if (!session.remoteId || !this.threads.has(session.remoteId)) {
+      const resuming = Boolean(session.remoteId)
       const result = await rpc.request(session.remoteId ? 'thread/resume' : 'thread/start', {
+        ...input.providerOptions?.thread,
         ...(session.remoteId ? { threadId: session.remoteId } : {}),
         cwd: session.workspace,
         approvalPolicy,
         sandbox,
-        ...(input.model ? { model: input.model } : {}),
+        ...(threadModel ? { model: threadModel } : {}),
       })
       if (this.sessions.get(input.sessionId) !== session)
         throw new Error('SSH connection cancelled')
-      if (!input.model && result.model) this.defaultCodexModel = string(result.model)
+      const responseModel = string(result.model) || threadModel || ''
+      const ordinaryDefaults =
+        !input.providerOptions?.thread?.config &&
+        !genericThreadModel &&
+        !input.providerOptions?.thread?.serviceTier
+      if (
+        responseModel &&
+        typeof result.reasoningEffort === 'string' &&
+        !resuming &&
+        ordinaryDefaults &&
+        !session.appliedReasoningEffort
+      )
+        this.codexDefaultEfforts.set(responseModel, result.reasoningEffort)
+      if (
+        responseModel &&
+        (typeof result.serviceTier === 'string' || result.serviceTier === null) &&
+        !resuming &&
+        ordinaryDefaults &&
+        !this.codexDefaultTiers.has(responseModel)
+      )
+        this.codexDefaultTiers.set(responseModel, result.serviceTier)
       session.remoteId = string(object(result.thread).id)
       if (!session.remoteId) throw new Error('Codex did not return a thread ID')
       this.threads.set(session.remoteId, input.sessionId)
       this.event(input.sessionId, { type: 'session', remoteId: session.remoteId })
     }
     if (session.stopRequested) return
+    if (
+      session.remoteId &&
+      (input.reasoningEffort === '' || input.serviceTier === '') &&
+      (!this.codexDefaultEfforts.has(turnModel || '') ||
+        !this.codexDefaultTiers.has(turnModel || ''))
+    ) {
+      const config = await this.configuredCodexDefaults(rpc)
+      const key = turnModel || ''
+      if (
+        key &&
+        typeof config.model_reasoning_effort === 'string' &&
+        !this.codexDefaultEfforts.has(key)
+      )
+        this.codexDefaultEfforts.set(key, config.model_reasoning_effort)
+      if (
+        key &&
+        (typeof config.service_tier === 'string' || config.service_tier === null) &&
+        !this.codexDefaultTiers.has(key)
+      )
+        this.codexDefaultTiers.set(key, config.service_tier)
+    }
+    if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
+    const modelOption = this.codexModels?.find((model) => model.id === (turnModel || ''))
+    let effort = input.reasoningEffort
+    if (effort === '') {
+      effort = this.codexDefaultEfforts.get(turnModel || '') || modelOption?.defaultReasoningEffort
+      if (!effort && session.appliedReasoningEffort)
+        throw new Error('Codex did not advertise a default reasoning effort for this model')
+    }
     session.phase = 'startingTurn'
     const result = await rpc.request('turn/start', {
+      ...input.providerOptions?.turn,
       threadId: session.remoteId,
       input: [{ type: 'text', text: input.prompt }],
       cwd: session.workspace,
       approvalPolicy,
-      ...(input.model || this.defaultCodexModel
-        ? { model: input.model || this.defaultCodexModel }
+      ...(turnModel ? { model: turnModel } : {}),
+      ...(effort ? { effort } : {}),
+      ...(input.serviceTier !== undefined
+        ? {
+            serviceTier: input.serviceTier || this.codexDefaultTiers.get(turnModel || '') || null,
+          }
         : {}),
       sandboxPolicy:
         input.mode === 'plan'
           ? { type: 'readOnly' }
           : { type: 'workspaceWrite', writableRoots: [session.workspace], networkAccess: false },
     })
+    if (effort) session.appliedReasoningEffort = effort
     session.turnId = string(object(result.turn).id)
-    session.appliedModel = input.model
+    session.appliedModel = turnModel
     session.phase = 'running'
   }
   private receiveCodex(message: Wire, rpc: RPC) {
@@ -396,6 +717,25 @@ export class Agents {
   }
   private async startClaude(session: Session) {
     const { input } = session
+    const settings = { ...input.providerOptions?.settings }
+    if (input.serviceTier !== undefined) {
+      if (input.serviceTier === '') delete settings.fastMode
+      else if (input.serviceTier === 'fast') settings.fastMode = true
+      else if (input.serviceTier === 'default') settings.fastMode = false
+      else throw new Error(`Claude Code does not support speed tier ${input.serviceTier}`)
+    }
+    if (input.reasoningEffort !== undefined) delete settings.effortLevel
+    const effectiveOptions = {
+      ...input,
+      reasoningEffort:
+        input.reasoningEffort === undefined ? string(settings.effortLevel) : input.reasoningEffort,
+      serviceTier: settings.fastMode === true ? 'fast' : input.serviceTier,
+      model: input.model || string(settings.model),
+    }
+    if (!this.claudeModels && (effectiveOptions.reasoningEffort || settings.fastMode === true))
+      await this.discoverClaudeModels()
+    this.validateModelChoices(effectiveOptions, this.claudeModels)
+    if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     if (session.channel) {
       // A new process lets each turn apply the selected model and permission mode.
       const oldChannel = session.channel
@@ -418,6 +758,9 @@ export class Agents {
       input.mode === 'plan' ? 'plan' : input.mode === 'edit' ? 'acceptEdits' : 'default',
     ]
     if (input.model) args.push(`--model=${input.model}`)
+    if (input.reasoningEffort) args.push(`--effort=${input.reasoningEffort}`)
+    if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings))
+    args.push(...(input.providerOptions?.args || []))
     if (session.remoteId) args.push(`--resume=${session.remoteId}`)
     const channel = await this.ssh.channel(
       `cd ${shellQuote(session.workspace)} && exec ${args.map(shellQuote).join(' ')}`,
@@ -515,6 +858,11 @@ export class Agents {
   }
   private receiveClaude(session: Session, message: Wire) {
     const id = session.input.sessionId
+    if (message.type === 'system' && message.subtype === 'notification')
+      this.event(id, {
+        type: 'status',
+        text: string(message.message || message.text) || JSON.stringify(message),
+      })
     if (message.type === 'control_cancel_request') {
       session.approvals.delete(string(message.request_id))
       return
@@ -763,6 +1111,11 @@ export class Agents {
       this.threads.delete(session.remoteId)
     this.sessions.delete(sessionId)
   }
+  hasRunningSessions(): boolean {
+    return [...this.sessions.values()].some(
+      (session) => session.busy || session.startup !== undefined || session.stopping !== undefined,
+    )
+  }
   close(reason = 'SSH disconnected. Reconnect to continue this thread.') {
     this.generation++
     this.codex?.channel.signal('TERM')
@@ -770,6 +1123,18 @@ export class Agents {
     this.codex = undefined
     this.codexStarting = undefined
     this.defaultCodexModel = undefined
+    this.codexModels = undefined
+    this.codexDefaultEfforts.clear()
+    this.codexDefaultTiers.clear()
+    this.codexDiskConfig = undefined
+    this.codexConfigStarting = undefined
+    this.claudeModels = undefined
+    this.claudeModelsStarting = undefined
+    for (const channel of this.discoveryChannels) {
+      channel.signal('TERM')
+      channel.close()
+    }
+    this.discoveryChannels.clear()
     this.threads.clear()
     for (const [id, session] of this.sessions) {
       const channel = session.channel

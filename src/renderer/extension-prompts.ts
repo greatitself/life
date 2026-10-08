@@ -59,7 +59,7 @@ export function extractExtensionManifest(text: string): ExtensionManifestResult 
 
 // JSON.parse has already checked syntax. Track decoded object keys so escaped spellings
 // cannot hide a second value, including within objects nested in arrays.
-function rejectDuplicateObjectKeys(source: string): void {
+export function rejectDuplicateObjectKeys(source: string, label = 'extension manifest'): void {
   const frames: Array<{ object: boolean; keys: Set<string>; expectingKey: boolean }> = []
   let index = 0
   while (index < source.length) {
@@ -73,7 +73,7 @@ function rejectDuplicateObjectKeys(source: string): void {
       const frame = frames.at(-1)
       if (frame?.object && frame.expectingKey) {
         const key = JSON.parse(source.slice(start, index)) as string
-        if (frame.keys.has(key)) throw new Error(`The extension manifest repeats the key "${key}".`)
+        if (frame.keys.has(key)) throw new Error(`The ${label} repeats the key "${key}".`)
         frame.keys.add(key)
         frame.expectingKey = false
       }
@@ -122,6 +122,8 @@ export function buildExtensionPrompt(
     'Do not use JSX, TypeScript, imports, package installation, external assets, CDNs, or bundling. Everything needed by the renderer must be in the manifest.',
     "Use async functions for bridge calls. life.call(method, args) calls a handler registered by this extension's main code.",
     'life.invoke(method, args) calls one of the allowed Life core methods listed below; never invent a core method.',
+    'For new remote workflows use connection.execute({command,workspace,timeoutMs}) from a worker or renderer bridge. It runs a command in the selected SSH project, validates the expected workspace, and returns bounded output. This can launch another coding harness or integration without editing the native host.',
+    'agent.start accepts generic providerOptions for supported provider-specific options: Codex uses {thread:{...},turn:{...}}; Claude uses {settings:{...},args:[...]}. Use these for supported future harness options instead of requiring a named built-in UI setting. Session/workspace/sandbox fields remain controlled by Life; model, reasoningEffort and serviceTier have explicit agent.start fields.',
     'Methods starting with ui. are available only from renderer life.invoke. Main workers cannot invoke ui. methods; call other allowed core methods from the worker or return data for the renderer to act on.',
     'Core methods with no arguments use null. A method with one argument takes that value directly; a method with multiple arguments takes an array in signature order. Do not wrap a single object argument in another object.',
     'life.context contains id, theme, manifest and capabilities. Use life.context.theme for the initial dark or light theme.',
@@ -211,6 +213,17 @@ const extensionCallExamples = [
   { method: 'profiles.remove', signature: '(profileId)', args: 'profile-id' },
   { method: 'connection.state', signature: '()', args: null },
   {
+    method: 'connection.execute',
+    signature: '(ConnectionExecutionInput)',
+    args: {
+      command: 'git status --short',
+      workspace: '/home/researcher/project',
+      timeoutMs: 30000,
+    },
+    notes:
+      'Use the actual selected connection.workspace. The operation cancels if that project or SSH connection changes.',
+  },
+  {
     method: 'connection.connect',
     signature: '(ConnectInput)',
     args: {
@@ -248,9 +261,10 @@ const extensionCallExamples = [
       provider: 'codex',
       prompt: 'Explain this project',
       mode: 'review',
+      providerOptions: { turn: { serviceTier: 'fast' } },
     },
     notes:
-      'Requires a selected project. provider is codex or claude; mode is review, edit or plan; model and remoteId are optional strings. Pass the canonical workspace string from connection.state to guard against a concurrent project switch. Listen to agent events for this sessionId.',
+      'Requires a selected project. provider is codex or claude; mode is review, edit or plan; model and remoteId are optional strings. providerOptions adds supported thread/turn parameters for Codex or settings/args for Claude. Choose actual options supported by that provider version and model. Pass the canonical workspace string from connection.state to guard against a concurrent project switch. Listen to agent events for this sessionId.',
   },
   { method: 'agent.stop', signature: '(sessionId)', args: 'session-id' },
   {

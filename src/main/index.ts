@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, protocol } from 'electron'
 import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { Store } from './store'
 import { SSHConnection } from './ssh'
 import { Agents } from './agents'
@@ -8,6 +9,7 @@ import {
   profileSchema,
   remoteDirectorySchema,
   startSchema,
+  connectionExecutionSchema,
 } from '../shared/validation'
 import { z } from 'zod'
 import { CustomizationStore } from './customization'
@@ -21,10 +23,17 @@ import {
 } from '../shared/extensions'
 import { extensionCoreArguments } from '../shared/extension-core'
 import { buildExtensionDocument, extensionDocumentCSP } from '../shared/extension-document'
+import { SourceCodeStore } from './source-code'
+import { executeConnectionCommand } from './connection-execution'
+import { parseLifeSourcePatch, parseLifeSourceRead } from '../shared/source-code'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
   { scheme: 'life-extension', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  {
+    scheme: 'life-code',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+  },
 ])
 
 let window: BrowserWindow | null = null
@@ -32,6 +41,9 @@ let ssh: SSHConnection
 let customization: CustomizationStore
 let updates: UpdatesService
 let extensions: ExtensionStore
+let sourceCode: SourceCodeStore
+let sourceStartupTimer: ReturnType<typeof setTimeout> | undefined
+let sourceReloadTimer: ReturnType<typeof setTimeout> | undefined
 let quitting = false
 let recovering = false
 const ownsInstance = app.requestSingleInstanceLock()
@@ -73,6 +85,8 @@ async function recoverExtensions() {
       }
     }
     ssh?.disconnect()
+    clearTimeout(sourceStartupTimer)
+    await sourceCode?.disable()
     await Promise.all(
       extensions
         .list()
@@ -113,6 +127,15 @@ async function init() {
   ssh.on('terminal', (data) => send('terminal:data', data))
   ssh.on('forwarding-state', (state) => send('forwarding:state', state))
   const operations = new Map<string, (...args: unknown[]) => unknown>()
+  let localApplies = 0
+  const applyLocal = async <T>(operation: () => Promise<T>): Promise<T> => {
+    localApplies++
+    try {
+      return await operation()
+    } finally {
+      localApplies--
+    }
+  }
   const handle = (name: string, fn: (...args: unknown[]) => unknown) => {
     operations.set(name, fn)
     ipcMain.handle(name, (event, ...args: unknown[]) => {
@@ -159,7 +182,14 @@ async function init() {
             ? 'connection:list-directories'
             : method.startsWith('sshConfig.')
               ? method.replace('sshConfig.', 'ssh-config:')
-              : method.replace('.', ':')
+              : method.startsWith('sourceCode.')
+                ? (
+                    {
+                      'sourceCode.getContext': 'source-code:context',
+                      'sourceCode.openFolder': 'source-code:open-folder',
+                    } as Record<string, string>
+                  )[method] || method.replace('sourceCode.', 'source-code:')
+                : method.replace('.', ':')
     const operation = operations.get(channel)
     if (!operation) throw new Error(`This Life method is unavailable: ${method}`)
     const value = await operation(...args)
@@ -172,8 +202,77 @@ async function init() {
     (_id, method, args) => invokeCore(method, args),
     (id, event, data) => send('extensions:event', { id, type: 'event', event, data }),
   )
+  sourceCode = new SourceCodeStore({
+    sourceDir: app.isPackaged ? join(process.resourcesPath, 'life-source') : app.getAppPath(),
+    nodeModulesDir: app.isPackaged
+      ? join(process.resourcesPath, 'app.asar.unpacked/node_modules')
+      : join(app.getAppPath(), 'node_modules'),
+    directory: join(app.getPath('userData'), 'source-code'),
+    onUpdate: (state) => send('source-code:state', state),
+  })
+  await sourceCode.init()
+  let sourceReload: Promise<void> | undefined
+  const reloadSource = () => {
+    if (sourceReload) return sourceReload
+    const owner = window
+    sourceReload = new Promise<void>((resolve) => {
+      const reloadWhenIdle = () => {
+        if (!owner || owner !== window || owner.isDestroyed() || quitting) {
+          sourceReload = undefined
+          resolve()
+          return
+        }
+        // Keep the current renderer receiving other threads' streaming events.
+        // Reloading once their sessions settle preserves those conversations.
+        if (agents.hasRunningSessions() || localApplies) {
+          sourceReloadTimer = setTimeout(reloadWhenIdle, 200)
+          return
+        }
+        sourceReload = undefined
+        resolve()
+        setTimeout(() => {
+          if (owner !== window || owner.isDestroyed() || quitting) return
+          if (agents.hasRunningSessions() || localApplies) void reloadSource()
+          else owner.webContents.reload()
+        }, 100)
+      }
+      sourceReloadTimer = setTimeout(reloadWhenIdle, 100)
+    })
+    return sourceReload
+  }
+  const sourceFailure = async (revision: number, reason: string) => {
+    if (!sourceCode.get().enabled || sourceCode.get().active?.revision !== revision) return
+    clearTimeout(sourceStartupTimer)
+    await sourceCode.disable(reason)
+    const owner = window
+    if (owner && !owner.isDestroyed()) {
+      createWindow()
+      owner.destroy()
+    }
+  }
+  handle('source-code:get', () => sourceCode.get())
+  handle('source-code:context', (request) =>
+    sourceCode.getContext(request === undefined ? undefined : parseLifeSourceRead(request)),
+  )
+  handle('source-code:apply', (patch) =>
+    applyLocal(() => sourceCode.apply(parseLifeSourcePatch(patch))),
+  )
+  handle('source-code:rollback', () => applyLocal(() => sourceCode.rollback()))
+  handle('source-code:disable', () => sourceCode.disable())
+  handle('source-code:reload', reloadSource)
+  handle('source-code:ready', (value) => {
+    const revision = z.number().int().min(0).parse(value)
+    if (sourceCode.get().active?.revision === revision) clearTimeout(sourceStartupTimer)
+  })
+  handle('source-code:error', (value, reason) =>
+    sourceFailure(z.number().int().min(0).parse(value), z.string().max(10000).parse(reason)),
+  )
+  handle('source-code:open-folder', async () => {
+    const error = await shell.openPath(sourceCode.get().path)
+    if (error) throw new Error(error)
+  })
   handle('extensions:get', () => extensions.get())
-  handle('extensions:apply', (manifest) => extensions.apply(manifest))
+  handle('extensions:apply', (manifest) => applyLocal(() => extensions.apply(manifest)))
   handle('extensions:enable', (id, enabled) =>
     extensions.enable(extensionIdSchema.parse(id), z.boolean().parse(enabled)),
   )
@@ -259,6 +358,9 @@ async function init() {
   )
   handle('connection:disconnect', () => ssh.disconnect())
   handle('connection:state', () => ssh.state)
+  handle('connection:execute', (input) =>
+    executeConnectionCommand(ssh, connectionExecutionSchema.parse(input)),
+  )
   handle('forwarding:get', () => ssh.forwarding.getState())
   handle('connection:trust', (id, accepted) =>
     ssh.trust(z.string().parse(id), z.boolean().parse(accepted)),
@@ -312,6 +414,36 @@ async function init() {
     if (action === 'close') window?.close()
   })
   await extensions.init()
+  protocol.handle('life-code', async (request) => {
+    try {
+      const path = sourceCode.assetPath(request.url)
+      if (!path) return new Response('Source build asset unavailable', { status: 404 })
+      const extension = path.slice(path.lastIndexOf('.')).toLowerCase()
+      const type =
+        (
+          {
+            '.js': 'text/javascript',
+            '.mjs': 'text/javascript',
+            '.css': 'text/css',
+            '.json': 'application/json',
+            '.svg': 'image/svg+xml',
+            '.png': 'image/png',
+            '.woff': 'font/woff',
+            '.woff2': 'font/woff2',
+            '.ttf': 'font/ttf',
+          } as Record<string, string>
+        )[extension] || 'application/octet-stream'
+      return new Response(await readFile(path), {
+        headers: {
+          'Content-Type': type,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
+        },
+      })
+    } catch {
+      return new Response('Source build asset unavailable', { status: 404 })
+    }
+  })
   protocol.handle('life-extension', (request) => {
     try {
       const url = new URL(request.url)
@@ -365,6 +497,46 @@ function createWindow() {
     },
   })
   const owner = window
+  const startSourceWatchdog = () => {
+    clearTimeout(sourceStartupTimer)
+    const state = sourceCode?.get()
+    if (!state?.enabled || !state.active) return
+    const revision = state.active.revision
+    sourceStartupTimer = setTimeout(() => {
+      if (
+        owner !== window ||
+        owner.isDestroyed() ||
+        !sourceCode.get().enabled ||
+        sourceCode.get().active?.revision !== revision
+      )
+        return
+      void sourceCode
+        .disable(
+          'The customized interface did not finish starting. Life restored its built-in interface.',
+        )
+        .then(() => {
+          if (owner !== window || owner.isDestroyed()) return
+          createWindow()
+          owner.destroy()
+        })
+    }, 25000)
+    sourceStartupTimer.unref()
+  }
+  owner.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
+    if (mainFrame) startSourceWatchdog()
+  })
+  owner.webContents.on('render-process-gone', () => {
+    if (owner !== window || recovering || quitting || !sourceCode?.get().enabled) return
+    void sourceCode
+      .disable(
+        'The customized interface stopped unexpectedly. Life restored its built-in interface.',
+      )
+      .then(() => {
+        if (owner !== window || owner.isDestroyed()) return
+        createWindow()
+        owner.destroy()
+      })
+  })
   window.once('ready-to-show', () => owner.show())
   window.on('maximize', () => send('window:state', true))
   window.on('unmaximize', () => send('window:state', false))
@@ -419,12 +591,11 @@ app.on('before-quit', (event) => {
   ssh?.disconnect()
   customization?.close()
   updates?.dispose()
+  clearTimeout(sourceStartupTimer)
+  clearTimeout(sourceReloadTimer)
   if (extensions) {
     event.preventDefault()
     quitting = true
-    void extensions
-      .close()
-      .catch(() => {})
-      .finally(() => app.quit())
+    void Promise.allSettled([extensions.close(), sourceCode?.close()]).finally(() => app.quit())
   }
 })

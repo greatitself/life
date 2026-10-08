@@ -68,6 +68,17 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: Verify packaged Windows live customization
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: ./tests/windows-source-runtime.ps1
+      - name: Save Windows customization proof
+        if: matrix.platform == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-customization-proof
+          path: output/source-runtime-proof.json
+          if-no-files-found: error
       - name: Check out maintained Windows verification
         if: matrix.platform == 'windows-x64'
         uses: actions/checkout@v4
@@ -113,22 +124,20 @@ jobs:
           cd installers
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life 0.3 lets you customize the application from any Codex or Claude Code thread.
+          Life 0.4 edits its actual React application from any Codex or Claude Code thread.
 
-          - Monochrome dark and light themes, a new Life logo, and official SVGL company icons.
-          - Research map with Mermaid diagrams, dependencies, notes, filters, and project backups.
-          - Agent workspace with remote files, Git changes, terminal, and provider approvals.
-          - SSH config aliases, resolved options, and ProxyJump with trusted OpenSSH jump hosts.
-          - Connect to a machine first, then browse and select its remote project folder. Saved projects and thread history keep their original folder.
-          - Automatic SSH port forwarding is enabled by default. The Ports panel shows local mappings, handles occupied local ports and lets you turn forwarding off.
-          - Ask Life in any thread using /life, @life, or a request naming Life. Follow-up questions stay in the same conversation.
-          - Normal explanations, clarification questions and no-change replies no longer fail customization validation.
-          - Live settings and executable UI/backend extensions use the same thread, with hot reload and rollback. Settings and extension management remain available without a separate customization prompt button.
-          - Windows installer upgrades the existing Life installation; in-app updates for future Windows releases.
+          - Edit built-in React/TypeScript components, shared code and CSS through /life or @life in the existing conversation.
+          - Add npm dependencies and actual component source, including shadcn/Radix components, with optional Tailwind v4 generation when the required packages and styles are proposed. Bundled npm and esbuild stage and compile changes locally without requiring a separate Node.js installation.
+          - Automatic source reads supply exact files to the same provider session. Failed proposals/builds retain the working interface and return diagnostics for bounded repair attempts.
+          - Revision checks, conversation persistence before reload, source management, rollback and the native Ctrl/Cmd + Shift + L recovery route protect ongoing work.
+          - Discover models and reasoning/speed capabilities from the connected providers. Supported choices persist per thread; unsupported choices return to provider defaults without automatically enabling a paid fast tier.
+          - Advanced Codex thread/turn options, Claude settings/arguments and executable Node workers can implement additional agent and local behavior.
+          - Research maps, monochrome themes, SSH config aliases, project selection and automatic port forwarding remain available.
+          - Windows upgrades the existing Life installation and preserves its local data; Windows and AppImage support in-app updates.
 
-          Windows users on 0.1.0: run the new .exe once to upgrade. Profiles, conversation history, and local research data are preserved. Then use Updates inside Life for subsequent releases. Executable extensions can replace views and add local behavior immediately. Electron/native dependency and installer changes still require a source build.
+          Windows users on 0.1.0: run the new .exe once to upgrade. Existing users on 0.2.2 or later can use Updates inside Life. Profiles, conversation history, research data, extensions and local source files remain in the existing data directory. When an update changes the built-in source baseline, Life preserves custom files and starts with its built-in interface; ask /life to update your customization, refreshing unchanged files during the next build.
 
-          Existing select controls are unchanged so users can test Life's customization themselves. Replacing built-in components or bundled dependencies still requires a source build.
+          Existing select controls are unchanged so users can test Life's customization themselves. Ask /life to replace a control with real React component source and dependencies. The native host, preload and recovery loader remain the installed copy; native binaries and installer signing require a packaged release.
 
           Agent CLIs must be installed and signed in on the remote Linux or macOS machine. Signing is deferred until publisher credentials are provided: builds remain unsigned, macOS may require Open Anyway and Windows may show an unrecognized publisher prompt. macOS and Debian updates use the new installer; AppImage and Windows support in-app updates.
           NOTES

@@ -42,12 +42,132 @@ export const connectSchema = profileSchema.extend({
   password: z.string().max(4096).optional(),
   passphrase: z.string().max(4096).optional(),
 })
+export const connectionExecutionSchema = z
+  .object({
+    command: z
+      .string()
+      .min(1)
+      .max(100000)
+      .refine((value) => value.trim().length > 0, 'Enter a remote command')
+      .refine((value) => !value.includes('\0'), 'Enter a valid remote command')
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= 100000,
+        'Remote commands must not exceed 100 KB',
+      ),
+    workspace: remoteDirectorySchema.optional(),
+    timeoutMs: z.number().int().min(1).max(120000).default(30000),
+  })
+  .strict()
+const optionNameSchema = z
+  .string()
+  .max(200)
+  .refine((value) => !/[\x00-\x1f]/.test(value), 'Enter a valid provider option')
+const jsonValueSchema = z.custom<unknown>((value) => {
+  const pending = [{ value, depth: 0 }]
+  let nodes = 0
+  while (pending.length) {
+    const next = pending.pop()!
+    if (++nodes > 10000 || next.depth > 20) return false
+    if (next.value === null || ['string', 'boolean'].includes(typeof next.value)) continue
+    if (typeof next.value === 'number' && Number.isFinite(next.value)) continue
+    if (typeof next.value !== 'object' || !next.value) return false
+    if (!Array.isArray(next.value) && Object.getPrototypeOf(next.value) !== Object.prototype)
+      return false
+    for (const item of Object.values(next.value))
+      pending.push({ value: item, depth: next.depth + 1 })
+  }
+  return true
+}, 'Provider options must be bounded JSON values')
+const providerRecordSchema = z.record(
+  z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((key) => !['__proto__', 'constructor', 'prototype'].includes(key)),
+  jsonValueSchema,
+)
+const reservedProtocolFields = new Set([
+  'threadId',
+  'input',
+  'cwd',
+  'approvalPolicy',
+  'sandbox',
+  'sandboxPolicy',
+])
+const reservedClaudeArguments = new Set([
+  '-p',
+  '--print',
+  '-c',
+  '--continue',
+  '-r',
+  '--resume',
+  '--session-id',
+  '--input-format',
+  '--output-format',
+  '--permission-prompt-tool',
+  '--permission-mode',
+  '--dangerously-skip-permissions',
+  '--allow-dangerously-skip-permissions',
+  '--model',
+  '--effort',
+  '--settings',
+  '--cwd',
+  '--help',
+  '-h',
+  '--version',
+  '-v',
+  '--no-session-persistence',
+  '--fork-session',
+  '--',
+])
+export const agentProviderOptionsSchema = z
+  .object({
+    thread: providerRecordSchema.optional(),
+    turn: providerRecordSchema.optional(),
+    settings: providerRecordSchema.optional(),
+    args: z
+      .array(
+        z
+          .string()
+          .max(20000)
+          .refine((value) => !value.includes('\0')),
+      )
+      .max(100)
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    try {
+      if (JSON.stringify(value).length > 128000)
+        context.addIssue({ code: 'custom', message: 'Provider options exceed 128 KB' })
+    } catch {
+      context.addIssue({ code: 'custom', message: 'Provider options must be JSON values' })
+    }
+    for (const scope of ['thread', 'turn'] as const)
+      for (const key of Object.keys(value[scope] || {}))
+        if (reservedProtocolFields.has(key))
+          context.addIssue({
+            code: 'custom',
+            path: [scope, key],
+            message: `${key} is managed by Life; use the corresponding agent.start field`,
+          })
+    for (const [index, argument] of (value.args || []).entries())
+      if (reservedClaudeArguments.has(argument.split('=')[0]) || /^-[prcvh][^-]/.test(argument))
+        context.addIssue({
+          code: 'custom',
+          path: ['args', index],
+          message: `${argument.split('=')[0]} is managed by Life; use the corresponding agent.start field`,
+        })
+  })
 export const startSchema = z.object({
   sessionId: z.string().min(1).max(100),
   provider: z.enum(['codex', 'claude']),
   remoteId: z.string().max(200).optional(),
   prompt: z.string().trim().min(1).max(1000000),
   model: z.string().max(200).optional(),
+  reasoningEffort: optionNameSchema.optional(),
+  serviceTier: optionNameSchema.optional(),
+  providerOptions: agentProviderOptionsSchema.optional(),
   mode: z.enum(['review', 'edit', 'plan']),
   workspace: remoteDirectorySchema.optional(),
 })

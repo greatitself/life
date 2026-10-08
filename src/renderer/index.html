@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*; frame-src life-extension:"
+      content="default-src 'self'; script-src 'self' life-code: 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' life-code: https:; font-src 'self' life-code: data: https:; img-src 'self' life-code: data: blob: https: http:; connect-src 'self' life-code: https: http: ws: wss:; frame-src life-extension: https: http:; worker-src 'self' life-code: blob:"
     />
     <link rel="icon" href="./assets/life.svg" />
     <title>Life — Remote agent workspace</title>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/main.tsx"></script>
+    <script type="module" src="/bootstrap.ts"></script>
   </body>
 </html>

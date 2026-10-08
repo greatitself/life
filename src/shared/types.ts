@@ -2,6 +2,12 @@ import type { LifeConfigPatch, LifeConfigState } from './customization'
 import type { LifeUpdatesAPI } from './updates'
 import type { LifeExtensionManifest, LifeExtensionsSnapshot } from './extensions'
 import type { PortForwardingState } from './port-forwarding'
+import type {
+  LifeSourceContext,
+  LifeSourcePatch,
+  LifeSourceRead,
+  LifeSourceSnapshot,
+} from './source-code'
 export type Provider = 'codex' | 'claude'
 export type PermissionMode = 'review' | 'edit' | 'plan'
 export interface SSHConfigSource {
@@ -59,13 +65,31 @@ export interface StartInput {
   remoteId?: string
   prompt: string
   model?: string
+  reasoningEffort?: string
+  serviceTier?: string
+  providerOptions?: AgentProviderOptions
   mode: PermissionMode
   workspace?: string
+}
+export interface AgentProviderOptions {
+  /** Additional Codex thread/start or thread/resume parameters. */
+  thread?: Record<string, unknown>
+  /** Additional Codex turn/start parameters. */
+  turn?: Record<string, unknown>
+  /** Additional session-scoped Claude Code settings. */
+  settings?: Record<string, unknown>
+  /** Additional Claude Code command-line arguments, quoted individually. */
+  args?: string[]
 }
 export interface RemoteDirectoryList {
   path: string
   parent?: string
   entries: { name: string; path: string }[]
+}
+export interface ConnectionExecutionInput {
+  command: string
+  workspace?: string
+  timeoutMs?: number
 }
 export interface FileEntry {
   name: string
@@ -112,6 +136,11 @@ export interface HostKeyRequest {
 export interface ModelOption {
   id: string
   name: string
+  supportedReasoningEfforts?: { reasoningEffort: string; description?: string }[]
+  defaultReasoningEffort?: string
+  serviceTiers?: { id: string; name: string; description?: string }[]
+  defaultServiceTier?: string
+  isDefault?: boolean
 }
 export interface RelayAPI {
   platform: string
@@ -120,6 +149,18 @@ export interface RelayAPI {
     onState(callback: (state: PortForwardingState) => void): () => void
   }
   updates: LifeUpdatesAPI
+  sourceCode: {
+    get(): Promise<LifeSourceSnapshot>
+    getContext(request?: LifeSourceRead): Promise<LifeSourceContext>
+    apply(patch: LifeSourcePatch): Promise<LifeSourceSnapshot>
+    rollback(): Promise<LifeSourceSnapshot>
+    disable(): Promise<LifeSourceSnapshot>
+    reload(): Promise<void>
+    openFolder(): Promise<void>
+    ready(revision: number): Promise<void>
+    reportError(revision: number, message: string): Promise<void>
+    onState(callback: (state: LifeSourceSnapshot) => void): () => void
+  }
   extensions: {
     capabilities: readonly string[]
     get(): Promise<LifeExtensionsSnapshot>
@@ -162,6 +203,7 @@ export interface RelayAPI {
   }
   connection: {
     connect(input: ConnectInput): Promise<ConnectionState>
+    execute(input: ConnectionExecutionInput): Promise<string>
     selectWorkspace(path: string): Promise<ConnectionState>
     listDirectories(path?: string): Promise<RemoteDirectoryList>
     disconnect(): Promise<void>

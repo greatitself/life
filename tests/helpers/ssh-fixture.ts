@@ -64,7 +64,7 @@ export class SSHFixture {
     const shell = join(bin, 'fixture-shell')
     await writeFile(
       shell,
-      '#!/bin/bash\nif [[ "$1" == "-lc" ]]; then\n  task_command="${2//\\$HOME/\\$RELAY_TEST_HOME}"\n  exec /bin/bash --noprofile --norc -c "$task_command"\nfi\nexec /bin/bash --noprofile --norc -i\n',
+      '#!/bin/bash\nif [[ "$1" == "-lc" ]]; then\n  task_command="${2//\\$HOME/\\$RELAY_TEST_HOME}"\n  exec /bin/bash --noprofile --norc -c "$task_command"\nfi\nif [[ "$1" == "-s" ]]; then\n  exec /bin/bash --noprofile --norc -s\nfi\nexec /bin/bash --noprofile --norc -i\n',
       { mode: 0o755 },
     )
     await Promise.all([

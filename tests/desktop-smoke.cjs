@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /*
  * Native Electron smoke coverage; no provider accounts or inference are used.
- * Run after npm run build. LIFE_ELECTRON_BINARY selects an unpacked packaged app;
- * LIFE_TEST_SOURCE=1 uses the development Electron binary even when a package exists.
+ * Run after npm run build. Built source is the default; LIFE_ELECTRON_BINARY selects
+ * an unpacked packaged app, or LIFE_TEST_SOURCE=0 chooses an existing Linux package.
+ * LIFE_TEST_PACKAGED=1 selects that package; LIFE_TEST_TAILWIND=1 also checks its
+ * optional npm-installed Tailwind compiler and native worker dependencies.
  * Linux uses xvfb-run automatically when DISPLAY is absent. Linux --no-sandbox
  * is confined to this test launcher; application webPreferences remain sandboxed.
  */
 const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
-const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises')
+const { mkdtemp, mkdir, readFile, readdir, rm, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { createServer } = require('node:http')
@@ -89,7 +91,9 @@ async function run() {
       : undefined
   const selectedBinary =
     process.env.LIFE_ELECTRON_BINARY ||
-    (process.env.LIFE_TEST_SOURCE !== '1' && packagedBinary && existsSync(packagedBinary)
+    ((process.env.LIFE_TEST_SOURCE === '0' || process.env.LIFE_TEST_PACKAGED === '1') &&
+    packagedBinary &&
+    existsSync(packagedBinary)
       ? packagedBinary
       : undefined)
   const executablePath = selectedBinary || require('electron')
@@ -225,6 +229,16 @@ async function run() {
     )
   }
   const extensions = () => page.evaluate(() => window.relay.extensions.get())
+  const sourceCode = () => page.evaluate(() => window.relay.sourceCode.get())
+  const openSourceCode = async () => {
+    await page
+      .getByRole('button', { name: /^Source code(?:\s|$)/ })
+      .first()
+      .click()
+    const manager = page.getByRole('dialog', { name: 'Life source', exact: true })
+    await manager.waitFor()
+    return manager
+  }
   const extensionFrame = () => page.frameLocator('iframe[title="Research tools"]')
   const openExtensions = async () => {
     const replacementManager = page.getByRole('button', {
@@ -833,6 +847,106 @@ async function run() {
         ),
     )
 
+    phase = 'discovered provider reasoning and speed choices reach ordinary Life turns'
+    for (const provider of ['codex', 'claude']) {
+      await page.getByRole('button', { name: 'New thread', exact: false }).click()
+      await page
+        .getByRole('button', {
+          name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
+        })
+        .click()
+      const selectedModel = provider === 'codex' ? 'fixture-model' : 'opus'
+      const selectedEffort = provider === 'codex' ? 'high' : 'max'
+      const modelSelect = page.getByRole('combobox', { name: 'Agent model', exact: true })
+      await waitUntil(
+        async () => (await modelSelect.locator(`option[value="${selectedModel}"]`).count()) === 1,
+        'remote provider model catalog discovered',
+      )
+      await modelSelect.selectOption(selectedModel)
+      const reasoningSelect = page.getByRole('combobox', { name: 'Reasoning effort', exact: true })
+      const speedSelect = page.getByRole('combobox', { name: 'Service tier', exact: true })
+      await reasoningSelect.selectOption(selectedEffort)
+      await speedSelect.selectOption('fast')
+      for (const control of [modelSelect, reasoningSelect, speedSelect])
+        assert.equal(await control.evaluate((element) => element.tagName), 'SELECT')
+      const controlsBaseline = (await fixture.log()).length
+      await send('/life explain customization')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText('Life supports settings and executable extensions in this same conversation.', {
+          exact: true,
+        })
+        .waitFor()
+      assert.equal(await page.locator('.chat-error').count(), 0)
+      const selectedControlLog = (await fixture.log()).slice(controlsBaseline)
+      if (provider === 'codex') {
+        const turn = selectedControlLog.find((entry) => entry.message?.method === 'turn/start')
+        assert.equal(turn.message.params.model, selectedModel)
+        assert.equal(turn.message.params.effort, selectedEffort)
+        assert.equal(turn.message.params.serviceTier, 'fast')
+        assert.ok(
+          turn.message.params.input[0].text.startsWith(
+            'The user is asking about Life itself from an ordinary chat thread.',
+          ),
+        )
+      } else {
+        const command = selectedControlLog.find(
+          (entry) => entry.provider === provider && entry.argv,
+        )
+        assert.ok(command.argv.includes(`--model=${selectedModel}`))
+        assert.ok(command.argv.includes(`--effort=${selectedEffort}`))
+        const settingsIndex = command.argv.indexOf('--settings')
+        assert.ok(settingsIndex >= 0)
+        assert.equal(JSON.parse(command.argv[settingsIndex + 1]).fastMode, true)
+      }
+      await waitUntil(async () => {
+        const thread = await page.evaluate(
+          (requestedProvider) =>
+            JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+              (item) =>
+                item.provider === requestedProvider && item.title === '/life explain customization',
+            ),
+          provider,
+        )
+        return (
+          thread?.model === selectedModel &&
+          thread?.reasoningEffort === selectedEffort &&
+          thread?.serviceTier === 'fast'
+        )
+      }, 'model, reasoning and tier persist on the same ordinary thread')
+      const resetBaseline = (await fixture.log()).length
+      if (provider === 'claude') {
+        await modelSelect.selectOption('haiku')
+        assert.equal(await reasoningSelect.count(), 0)
+        assert.equal(await speedSelect.locator('option[value="fast"]').count(), 0)
+        assert.equal(await speedSelect.inputValue(), '')
+        await speedSelect.selectOption('default')
+      } else {
+        await reasoningSelect.selectOption('')
+        await speedSelect.selectOption('')
+      }
+      await send('explain customization')
+      await waitForSend()
+      const resetLog = (await fixture.log()).slice(resetBaseline)
+      if (provider === 'codex') {
+        const turn = resetLog.find((entry) => entry.message?.method === 'turn/start')
+        assert.equal(turn.message.params.effort, 'low')
+        assert.equal(turn.message.params.serviceTier, null)
+      } else {
+        const command = resetLog.find((entry) => entry.provider === provider && entry.argv)
+        assert.ok(command.argv.includes('--model=haiku'))
+        assert.equal(
+          command.argv.some((argument) => argument.startsWith('--effort')),
+          false,
+        )
+        const settingsIndex = command.argv.indexOf('--settings')
+        assert.ok(settingsIndex >= 0)
+        assert.equal(JSON.parse(command.argv[settingsIndex + 1]).fastMode, false)
+      }
+      assert.equal(await page.locator('.chat-error').count(), 0)
+    }
+
     phase = 'remote ordinary-thread settings, replies, clarification and preserved native selects'
     const ordinaryLifeThreads = new Map()
     for (const provider of ['codex', 'claude']) {
@@ -858,7 +972,8 @@ async function run() {
         .getByText(/Updated Life settings:/)
         .waitFor()
       assert.equal(await page.locator('.chat-error').count(), 0)
-      assert.equal(await page.locator('.composer-options select').count(), 3)
+      const nativeSelectCount = await page.locator('.composer-options select').count()
+      assert.ok(nativeSelectCount >= 3)
       const unchanged = await configuration()
       const unchangedExtensions = await extensions()
       for (const [prompt, response] of [
@@ -870,7 +985,7 @@ async function run() {
         ],
         [
           '/life make select components use shadcn',
-          /Replacing built-in components with actual shadcn requires source and dependency changes/,
+          'Life can change its renderer source and rebuild from this thread. Which select controls should I update?',
         ],
       ]) {
         await send(prompt)
@@ -883,7 +998,7 @@ async function run() {
         assert.deepEqual((await configuration()).config, unchanged.config)
         assert.equal((await configuration()).revision, unchanged.revision)
         assert.equal((await extensions()).revision, unchangedExtensions.revision)
-        assert.equal(await page.locator('.composer-options select').count(), 3)
+        assert.equal(await page.locator('.composer-options select').count(), nativeSelectCount)
         for (const label of ['Coding agent', 'Agent model', 'Agent permission mode'])
           assert.equal(
             await page
@@ -1518,6 +1633,455 @@ async function run() {
     await waitUntil(async () => (await extensions()).extensions.length === 0, 'extension removed')
     await closeDialog()
 
+    phase =
+      'ordinary chats create and compile an arbitrary workspace feature with an npm dependency'
+    const sourcePrompt = '/life add a hypothesis backlog directly to the Life workspace'
+    const compileRepairPrompt =
+      '/life repair the hypothesis backlog after a deliberate compiler failure'
+    const reviewSourcePrompt = '/life retitle the hypothesis backlog from its source'
+    const runtimeRepairPrompt =
+      '/life repair the hypothesis backlog after a deliberate runtime failure'
+    const featurePath = 'src/renderer/components/FixtureHypothesisBacklog.tsx'
+    const sourceBaseline = await sourceCode()
+    assert.equal(sourceBaseline.enabled, false)
+    assert.equal(existsSync(join(repository, featurePath)), false)
+    const sourceIndex = await page.evaluate(() => window.relay.sourceCode.getContext())
+    assert.ok(sourceIndex.paths.includes('src/renderer/App.tsx'))
+    assert.ok(sourceIndex.paths.includes('src/main/index.ts'))
+    assert.ok(sourceIndex.paths.includes('src/preload/index.ts'))
+    const readSourceThread = (prompt) =>
+      page.evaluate(
+        (requestedPrompt) =>
+          JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find((thread) =>
+            thread.messages.some(
+              (message) => message.role === 'user' && message.text === requestedPrompt,
+            ),
+          ),
+        prompt,
+      )
+    const selectSourceThread = async (query) => {
+      await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
+      await page.getByRole('dialog', { name: 'Find a thread' }).waitFor()
+      await page.getByRole('textbox', { name: 'Search saved threads' }).fill(query)
+      assert.equal(await page.locator('.search-results button').count(), 1)
+      await page.locator('.search-results button').click()
+    }
+    const board = () => page.getByRole('region', { name: 'Source hypothesis backlog', exact: true })
+    const waitForSourceUI = async (heading) => {
+      await waitUntil(
+        async () => {
+          try {
+            await workspace()
+            return await board().getByRole('heading', { name: heading, exact: true }).isVisible()
+          } catch {
+            return false
+          }
+        },
+        `compiled source interface renders ${heading}`,
+        90000,
+      )
+      await waitUntil(
+        async () => !(await page.evaluate(() => localStorage.getItem('life.pendingSourceApply'))),
+        'healthy source build acknowledges and clears the activation checkpoint',
+      )
+    }
+    const watchSourceStates = async () =>
+      page.evaluate(() => {
+        localStorage.setItem('life.native-source-states', '[]')
+        window.relay.sourceCode.onState((state) => {
+          const states = JSON.parse(localStorage.getItem('life.native-source-states') || '[]')
+          states.push({
+            ...state,
+            boardText:
+              document.querySelector('[aria-label="Source hypothesis backlog"]')?.textContent ||
+              null,
+          })
+          localStorage.setItem('life.native-source-states', JSON.stringify(states))
+        })
+      })
+    const getSourceStates = () =>
+      page.evaluate(() => JSON.parse(localStorage.getItem('life.native-source-states') || '[]'))
+    await workspace()
+    await page.getByRole('button', { name: 'New thread', exact: false }).click()
+    await page.getByRole('button', { name: 'Codex By OpenAI' }).click()
+    await page
+      .getByRole('combobox', { name: 'Agent model', exact: true })
+      .selectOption('fixture-model')
+    await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('high')
+    await page.getByRole('combobox', { name: 'Service tier', exact: true }).selectOption('fast')
+    const sourceLogStart = (await fixture.log()).length
+    const firstSourceReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await send(sourcePrompt)
+    await firstSourceReload
+    await waitForSourceUI('Hypothesis backlog')
+    const initialSource = await sourceCode()
+    assert.equal(initialSource.revision, sourceBaseline.revision + 1)
+    assert.equal(initialSource.active.revision, initialSource.revision)
+    assert.equal(new URL(initialSource.active.js).protocol, 'life-code:')
+    assert.ok(initialSource.path.startsWith(configurationRoot))
+    assert.equal(initialSource.error, undefined)
+    assert.equal(await page.locator('iframe').count(), 0)
+    assert.equal(
+      await board().evaluate(
+        (element) => element.ownerDocument === document && window.parent === window,
+      ),
+      true,
+    )
+    await board().getByRole('button', { name: 'Add hypothesis', exact: true }).click()
+    await board().getByText('Hypotheses: 1', { exact: true }).waitFor()
+    assert.equal(
+      await board().evaluate((element) => element.classList.contains('has-hypotheses')),
+      true,
+    )
+    const sourceFiles = await page.evaluate(
+      (path) => window.relay.sourceCode.getContext({ paths: ['src/renderer/App.tsx', path] }),
+      featurePath,
+    )
+    assert.equal(sourceFiles.dependencies.clsx, '2.1.1')
+    assert.ok(
+      sourceFiles.files
+        .find((file) => file.path === 'src/renderer/App.tsx')
+        .content.includes('<FixtureHypothesisBacklog />'),
+    )
+    assert.ok(
+      sourceFiles.files
+        .find((file) => file.path === featurePath)
+        .content.includes("import clsx from 'clsx'"),
+    )
+    const installedPackages = await readdir(join(initialSource.path, 'packages'))
+    const installedClsx = await Promise.all(
+      installedPackages.map(async (directory) => {
+        try {
+          return JSON.parse(
+            await readFile(
+              join(initialSource.path, 'packages', directory, 'node_modules/clsx/package.json'),
+              'utf8',
+            ),
+          )
+        } catch {
+          return undefined
+        }
+      }),
+    )
+    assert.ok(
+      installedClsx.some(
+        (installed) => installed?.name === 'clsx' && installed.version === '2.1.1',
+      ),
+    )
+    await waitUntil(
+      async () => Boolean((await readSourceThread(sourcePrompt))?.remoteId),
+      'source chat and its remote conversation persisted before renderer reload',
+    )
+    const originalSourceThread = await readSourceThread(sourcePrompt)
+    assert.equal(originalSourceThread.reasoningEffort, 'high')
+    assert.equal(originalSourceThread.serviceTier, 'fast')
+    const sourceTurns = (await fixture.log())
+      .slice(sourceLogStart)
+      .filter((entry) => entry.message?.method === 'turn/start')
+    assert.equal(sourceTurns.length, 2)
+    for (const turn of sourceTurns) {
+      assert.equal(turn.message.params.threadId, originalSourceThread.remoteId)
+      assert.equal(turn.message.params.effort, 'high')
+      assert.equal(turn.message.params.serviceTier, 'fast')
+    }
+    assert.ok(sourceTurns[1].message.params.input[0].text.includes('Life source read results:\n'))
+    await selectSourceThread('hypothesis backlog directly')
+    await screenshot('life-source-customization.png')
+    const sourceManager = await openSourceCode()
+    await sourceManager.getByText('Custom source is active', { exact: true }).waitFor()
+    const sourceFilter = sourceManager.getByRole('textbox', {
+      name: 'Filter Life source files',
+      exact: true,
+    })
+    await sourceFilter.fill('renderer/App.tsx')
+    await sourceManager.getByRole('button', { name: 'renderer/App.tsx', exact: true }).click()
+    const appSourceEditor = sourceManager.getByRole('textbox', {
+      name: 'Source of src/renderer/App.tsx',
+      exact: true,
+    })
+    await appSourceEditor.waitFor()
+    assert.equal(await appSourceEditor.getAttribute('readonly'), null)
+    assert.ok((await appSourceEditor.inputValue()).includes('<FixtureHypothesisBacklog />'))
+    await sourceFilter.fill('main/index.ts')
+    await sourceManager.getByRole('button', { name: 'main/index.ts', exact: true }).click()
+    const nativeSourceEditor = sourceManager.getByRole('textbox', {
+      name: 'Source of src/main/index.ts',
+      exact: true,
+    })
+    await nativeSourceEditor.waitFor()
+    assert.equal(await nativeSourceEditor.getAttribute('readonly'), '')
+    await closeDialog()
+
+    phase = 'failed source compilation keeps the live build and repairs in the same conversation'
+    await watchSourceStates()
+    const compileLogStart = (await fixture.log()).length
+    const repairedReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await send(compileRepairPrompt)
+    await repairedReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const repairedSource = await sourceCode()
+    assert.equal(repairedSource.revision, initialSource.revision + 1)
+    assert.equal(repairedSource.error, undefined)
+    const failedCompile = (await getSourceStates()).find((state) =>
+      state.error?.includes('Life source build failed'),
+    )
+    assert.ok(failedCompile)
+    assert.equal(failedCompile.revision, initialSource.revision)
+    assert.equal(failedCompile.active.revision, initialSource.active.revision)
+    assert.equal(failedCompile.enabled, true)
+    assert.match(failedCompile.error, /FixtureHypothesisBacklog\.tsx/)
+    assert.match(failedCompile.boardText, /Hypotheses: 1/)
+    const compileTurns = (await fixture.log())
+      .slice(compileLogStart)
+      .filter((entry) => entry.message?.method === 'turn/start')
+    assert.equal(compileTurns.length, 2)
+    for (const turn of compileTurns) {
+      assert.equal(turn.message.params.threadId, originalSourceThread.remoteId)
+      assert.equal(turn.message.params.effort, 'high')
+      assert.equal(turn.message.params.serviceTier, 'fast')
+    }
+    assert.ok(compileTurns[1].message.params.input[0].text.includes('Life repair diagnostics:\n'))
+    await selectSourceThread('hypothesis backlog directly')
+    assert.equal(await page.locator('.chat-error').count(), 0)
+    const repairedThread = await readSourceThread(sourcePrompt)
+    assert.equal(repairedThread.id, originalSourceThread.id)
+    assert.equal(repairedThread.remoteId, originalSourceThread.remoteId)
+    assert.equal(
+      repairedThread.messages.filter(
+        (message) => message.role === 'user' && message.text === compileRepairPrompt,
+      ).length,
+      1,
+    )
+
+    phase = 'Claude reads and changes the generated source without opening a new conversation'
+    await page.getByRole('button', { name: 'New thread', exact: false }).click()
+    await page.getByRole('button', { name: 'Claude Code By Anthropic' }).click()
+    await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('opus')
+    await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('max')
+    await page.getByRole('combobox', { name: 'Service tier', exact: true }).selectOption('fast')
+    const reviewLogStart = (await fixture.log()).length
+    const reviewedReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await send(reviewSourcePrompt)
+    await reviewedReload
+    await waitForSourceUI('Hypothesis backlog reviewed')
+    const reviewedSource = await sourceCode()
+    assert.equal(reviewedSource.revision, repairedSource.revision + 1)
+    const reviewThread = await readSourceThread(reviewSourcePrompt)
+    assert.ok(reviewThread?.remoteId)
+    const reviewProcesses = (await fixture.log())
+      .slice(reviewLogStart)
+      .filter((entry) => entry.provider === 'claude' && entry.argv?.includes('--model=opus'))
+    assert.equal(reviewProcesses.length, 2)
+    assert.ok(reviewProcesses[1].argv.includes(`--resume=${reviewThread.remoteId}`))
+    for (const command of reviewProcesses) {
+      assert.ok(command.argv.includes('--effort=max'))
+      assert.equal(JSON.parse(command.argv[command.argv.indexOf('--settings') + 1]).fastMode, true)
+    }
+
+    phase = 'compiled source bootstrap and conversation history survive a real app restart'
+    await application.close()
+    application = undefined
+    await launch()
+    const restartedSource = await sourceCode()
+    assert.equal(restartedSource.enabled, true)
+    assert.equal(restartedSource.active.revision, reviewedSource.active.revision)
+    assert.equal(restartedSource.recovered, false)
+    await workspace()
+    await board()
+      .getByRole('heading', { name: 'Hypothesis backlog reviewed', exact: true })
+      .waitFor()
+    assert.equal((await readSourceThread(sourcePrompt)).remoteId, originalSourceThread.remoteId)
+    assert.equal((await readSourceThread(reviewSourcePrompt)).remoteId, reviewThread.remoteId)
+    await page.getByRole('button', { name: 'Connections', exact: true }).click()
+    const sourceReconnect = page.getByRole('dialog', { name: 'Connect a machine' })
+    await sourceReconnect.waitFor()
+    await sourceReconnect
+      .locator('.saved-profiles button')
+      .filter({ hasText: 'Loopback test workspace' })
+      .click()
+    await sourceReconnect.getByPlaceholder('Your SSH password').fill(input.password)
+    await sourceReconnect.getByRole('button', { name: 'Connect machine', exact: true }).click()
+    await sourceReconnect.waitFor({ state: 'hidden' })
+    await chooseProject()
+    assert.equal(
+      (await page.evaluate(() => window.relay.connection.state())).workspace,
+      input.workspace,
+    )
+
+    phase = 'source management restores the prior compiled application'
+    manager = await openSourceCode()
+    const rollbackReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await manager.getByRole('button', { name: 'Restore previous', exact: true }).click()
+    await rollbackReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const rolledBackSource = await sourceCode()
+    assert.equal(rolledBackSource.active.revision, repairedSource.active.revision)
+    assert.equal(rolledBackSource.revision, reviewedSource.revision + 1)
+
+    phase = 'runtime failure restores the native interface and repairs the same Claude conversation'
+    await selectSourceThread('retitle the hypothesis backlog from its source')
+    await watchSourceStates()
+    const runtimeLogStart = (await fixture.log()).length
+    const fallbackWindow = application.waitForEvent('window', { timeout: 90000 })
+    await send(runtimeRepairPrompt)
+    page = await fallbackWindow
+    page.setDefaultTimeout(15000)
+    page.on('pageerror', (error) => rendererErrors.push(error.message))
+    let observedFallbackSnapshot
+    await waitUntil(
+      async () => {
+        try {
+          const state = await sourceCode()
+          if (!state.enabled && state.error?.includes('Life runtime fixture'))
+            observedFallbackSnapshot = state
+          return (
+            state.enabled &&
+            state.summary === 'Recover the hypothesis backlog after runtime feedback'
+          )
+        } catch {
+          return false
+        }
+      },
+      'native fallback automatically repairs and activates source',
+      90000,
+    )
+    await waitForSourceUI('Hypothesis backlog recovered')
+    const runtimeRepairedSource = await sourceCode()
+    assert.equal(runtimeRepairedSource.error, undefined)
+    assert.ok(runtimeRepairedSource.revision >= rolledBackSource.revision + 3)
+    const runtimeStates = await getSourceStates()
+    const failedRuntime =
+      runtimeStates.find(
+        (state) => !state.enabled && state.error?.includes('Life runtime fixture'),
+      ) || observedFallbackSnapshot
+    assert.ok(failedRuntime)
+    const badRuntimeRevision = runtimeStates.find(
+      (state) => state.enabled && state.revision === failedRuntime.revision - 1,
+    )?.active?.revision
+    assert.ok(badRuntimeRevision)
+    const runtimeProcesses = (await fixture.log())
+      .slice(runtimeLogStart)
+      .filter((entry) => entry.provider === 'claude' && entry.argv?.includes('--model=opus'))
+    assert.equal(runtimeProcesses.length, 2)
+    for (const command of runtimeProcesses) {
+      assert.ok(command.argv.includes(`--resume=${reviewThread.remoteId}`))
+      assert.ok(command.argv.includes('--effort=max'))
+      assert.equal(JSON.parse(command.argv[command.argv.indexOf('--settings') + 1]).fastMode, true)
+    }
+    const runtimeThread = await readSourceThread(reviewSourcePrompt)
+    assert.equal(runtimeThread.id, reviewThread.id)
+    assert.equal(runtimeThread.remoteId, reviewThread.remoteId)
+    assert.equal(
+      runtimeThread.messages.filter(
+        (message) => message.role === 'user' && message.text === runtimeRepairPrompt,
+      ).length,
+      1,
+    )
+    await selectSourceThread('retitle the hypothesis backlog from its source')
+    assert.equal(await page.locator('.chat-error').count(), 0)
+    manager = await openSourceCode()
+    const healthyRollbackReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await manager.getByRole('button', { name: 'Restore previous', exact: true }).click()
+    await healthyRollbackReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    assert.equal((await sourceCode()).active.revision, rolledBackSource.active.revision)
+    assert.notEqual((await sourceCode()).active.revision, badRuntimeRevision)
+    assert.equal(existsSync(join(repository, featurePath)), false)
+
+    let tailwindVerified = false
+    if (process.env.LIFE_TEST_TAILWIND === '1') {
+      phase =
+        'packaged Electron compiles optional Tailwind with real npm and native worker bindings'
+      const beforeTailwind = await sourceCode()
+      const tailwindPatch = {
+        summary:
+          'Verify optional Tailwind utilities and directives in the actual Electron source compiler',
+        baseRevision: beforeTailwind.revision,
+        dependencies: { tailwindcss: '4.3.3', '@tailwindcss/postcss': '4.3.3', postcss: '8.5.29' },
+        files: [
+          {
+            path: 'src/renderer/components/FixtureTailwindProof.tsx',
+            content:
+              'import \'../fixture-tailwind.css\'\nexport function FixtureTailwindProof() { return <div data-testid="native-tailwind-proof" className="p-[28px] font-bold underline bg-life-proof native-tailwind-apply">Native Tailwind compiled</div> }\n',
+          },
+          {
+            path: 'src/renderer/fixture-tailwind.css',
+            content:
+              '@import "tailwindcss/theme.css";\n@import "tailwindcss/utilities.css";\n@theme { --color-life-proof: #123456; }\n.native-tailwind-apply { @apply px-[19px]; }\n',
+          },
+          {
+            path: 'src/renderer/App.tsx',
+            edits: [
+              {
+                find: "import './enhancements.css'",
+                replace:
+                  "import { FixtureTailwindProof } from './components/FixtureTailwindProof'\nimport './enhancements.css'",
+              },
+              {
+                find: '<FixtureHypothesisBacklog />',
+                replace: '<FixtureHypothesisBacklog />\n                <FixtureTailwindProof />',
+              },
+            ],
+          },
+        ],
+      }
+      const tailwindState = await page.evaluate(
+        (patch) => window.relay.sourceCode.apply(patch),
+        tailwindPatch,
+      )
+      assert.equal(tailwindState.error, undefined)
+      const tailwindReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+      await page.evaluate(() => window.relay.sourceCode.reload())
+      await tailwindReload
+      await waitForSourceUI('Hypothesis backlog repaired')
+      const proof = page.getByTestId('native-tailwind-proof')
+      await proof.waitFor()
+      const computedTailwind = await proof.evaluate((element) => {
+        const style = getComputedStyle(element)
+        return {
+          backgroundColor: style.backgroundColor,
+          paddingTop: style.paddingTop,
+          paddingLeft: style.paddingLeft,
+          fontWeight: style.fontWeight,
+          textDecorationLine: style.textDecorationLine,
+        }
+      })
+      assert.deepEqual(computedTailwind, {
+        backgroundColor: 'rgb(18, 52, 86)',
+        paddingTop: '28px',
+        paddingLeft: '19px',
+        fontWeight: '700',
+        textDecorationLine: 'underline',
+      })
+      const tailwindCss = await page.evaluate(async () => {
+        const state = await window.relay.sourceCode.get()
+        return await (await fetch(state.active.css)).text()
+      })
+      assert.ok(tailwindCss.includes('.bg-life-proof'))
+      assert.ok(tailwindCss.includes('.native-tailwind-apply'))
+      assert.doesNotMatch(tailwindCss, /@apply|@theme|@import\s*["']tailwindcss/)
+      await writeFile(
+        join(artifacts, 'desktop-tailwind-proof.json'),
+        JSON.stringify(
+          {
+            packaged: Boolean(selectedBinary),
+            source: await sourceCode(),
+            computed: computedTailwind,
+          },
+          null,
+          2,
+        ),
+      )
+      manager = await openSourceCode()
+      const tailwindRollbackReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+      await manager.getByRole('button', { name: 'Restore previous', exact: true }).click()
+      await tailwindRollbackReload
+      await waitForSourceUI('Hypothesis backlog repaired')
+      assert.equal((await sourceCode()).active.revision, beforeTailwind.active.revision)
+      assert.equal(await page.getByTestId('native-tailwind-proof').count(), 0)
+      tailwindVerified = true
+    }
+
     phase = 'second instance preserves live extensions'
     await applyExtensionSource({ ...replacement, version: '4.0.0' })
     await extensionFrame()
@@ -1615,6 +2179,18 @@ async function run() {
       'disconnected',
     )
     assert.deepEqual((await extensions()).errors, {})
+    const recoveredSource = await sourceCode()
+    assert.equal(recoveredSource.enabled, false)
+    assert.equal(recoveredSource.active, undefined)
+    assert.equal(
+      await page.getByRole('region', { name: 'Source hypothesis backlog', exact: true }).count(),
+      0,
+    )
+    const preservedSource = await page.evaluate(
+      (path) => window.relay.sourceCode.getContext({ paths: [path] }),
+      featurePath,
+    )
+    assert.ok(preservedSource.files[0].content.includes('FixtureHypothesisBacklog'))
     await closeDialog()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
@@ -1628,6 +2204,8 @@ async function run() {
           executablePath,
           packaged: Boolean(selectedBinary),
           platform: process.platform,
+          version: metadata.version,
+          tailwindVerified,
           projectCount: projects.length,
           providerLogEntries: (await fixture.log()).length,
           rendererErrors,
@@ -1636,6 +2214,7 @@ async function run() {
             'life-light.png',
             'life-workspace.png',
             'life-project-picker.png',
+            'life-source-customization.png',
           ],
           assertions: [
             'fresh empty research map',
@@ -1659,7 +2238,8 @@ async function run() {
             'normal replies, clarification and no-op proposals leave settings unchanged',
             'Life turn cancellation and SSH reconnect preserve local and remote conversation identity',
             'project response markers are never applied as Life settings',
-            'existing native selects preserved and shadcn limitations explained',
+            'existing native selects preserved while ambiguous source changes request clarification',
+            'reasoning and service-tier choices discovered remotely and delivered to both providers',
             'custom commands and Mermaid panels',
             'live configuration file watch and undo',
             'same-thread Codex and Claude executable extension generation',
@@ -1670,6 +2250,18 @@ async function run() {
             'extension hot reload, rollback, disable and remove',
             'extension host CSS and built-in style rollback',
             'whole workspace replacement and Back to Life',
+            'ordinary chats read and rewrite actual Life TSX source with an interactive new workspace feature',
+            'real npm dependency installation and bundled renderer compilation in Electron',
+            ...(tailwindVerified
+              ? [
+                  'optional npm-installed Tailwind utilities and directives compile through the native Electron worker and render real styles',
+                ]
+              : []),
+            'source compile failure preserves the active application and repairs the same conversation',
+            'compiled source and chat history persist across reload, app restart and SSH reconnect',
+            'source management inspects writable renderer and read-only native files and restores previous builds',
+            'runtime startup failure restores the built-in interface and automatically repairs the same conversation',
+            'rollback avoids known-failing source revisions and native recovery preserves source files',
             'single-instance lock preserves extensions',
             'main-process recovery from hanging generated UI',
           ],
@@ -1695,6 +2287,17 @@ async function run() {
   } catch (error) {
     console.error(`Desktop smoke failed during: ${phase}: ${error.message}`)
     if (page && !page.isClosed()) {
+      const diagnostics = await page
+        .evaluate(async () => ({
+          source: await window.relay.sourceCode.get(),
+          connection: await window.relay.connection.state(),
+        }))
+        .catch(() => undefined)
+      if (diagnostics)
+        await writeFile(
+          join(artifacts, 'desktop-failure-state.json'),
+          JSON.stringify(diagnostics, null, 2),
+        ).catch(() => {})
       await page
         .screenshot({ path: join(artifacts, 'desktop-failure.png'), timeout: 3000 })
         .catch(() => {})

@@ -657,13 +657,41 @@ describe('provider configuration and cancellation', () => {
 
   it('discovers Codex models through app-server and offers Claude aliases', async () => {
     expect(await agents.models('codex')).toEqual([
-      { id: '', name: 'Codex default' },
-      { id: 'fixture-model', name: 'Fixture Codex' },
+      expect.objectContaining({
+        id: '',
+        name: 'Codex default',
+        defaultReasoningEffort: 'low',
+        isDefault: true,
+      }),
+      expect.objectContaining({
+        id: 'fixture-model',
+        name: 'Fixture Codex',
+        supportedReasoningEfforts: [
+          { reasoningEffort: 'low', description: 'Quick' },
+          { reasoningEffort: 'high', description: 'Thorough' },
+        ],
+        serviceTiers: [
+          { id: 'default', name: 'Standard', description: 'Standard priority' },
+          { id: 'fast', name: 'Fast', description: 'Higher priority' },
+        ],
+      }),
     ])
     expect(await agents.models('claude')).toEqual(
       expect.arrayContaining([
-        { id: 'sonnet', name: 'Sonnet' },
-        { id: 'opus', name: 'Opus' },
+        expect.objectContaining({ id: 'sonnet', name: 'Sonnet' }),
+        expect.objectContaining({
+          id: 'opus',
+          name: 'Opus',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low' },
+            { reasoningEffort: 'high' },
+            { reasoningEffort: 'max' },
+          ],
+          serviceTiers: [
+            { id: 'default', name: 'Standard' },
+            { id: 'fast', name: 'Fast' },
+          ],
+        }),
       ]),
     )
   })

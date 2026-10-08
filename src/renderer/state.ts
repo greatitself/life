@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   ConnectionProfile,
   ConnectionState,
+  ModelOption,
   PermissionMode,
   Provider,
 } from '../shared/types'
@@ -26,12 +27,40 @@ export interface Thread {
   messages: Message[]
   busy: boolean
   model: string
+  reasoningEffort?: string
+  serviceTier?: string
   mode: PermissionMode
   updatedAt: number
   turn: number
   pending: AgentEvent[]
   /** Follow-up messages retain Life scope until the user returns to their project. */
   lifeScope?: boolean
+}
+function validModelChoice(value: unknown): string {
+  return typeof value === 'string' && value.length <= 100 && !/[\x00-\x1f\x7f-\x9f]/.test(value)
+    ? value
+    : ''
+}
+export function normalizeModelChoices(
+  model: ModelOption | undefined,
+  choices: { reasoningEffort?: string; serviceTier?: string },
+): { reasoningEffort: string; serviceTier: string } {
+  const reasoningEffort = validModelChoice(choices.reasoningEffort)
+  const serviceTier = validModelChoice(choices.serviceTier)
+  return {
+    reasoningEffort:
+      reasoningEffort &&
+      Array.isArray(model?.supportedReasoningEfforts) &&
+      !model.supportedReasoningEfforts.some((option) => option.reasoningEffort === reasoningEffort)
+        ? ''
+        : reasoningEffort,
+    serviceTier:
+      serviceTier &&
+      Array.isArray(model?.serviceTiers) &&
+      !model.serviceTiers.some((option) => option.id === serviceTier)
+        ? ''
+        : serviceTier,
+  }
 }
 export function readThreads(): Thread[] {
   try {
@@ -85,6 +114,10 @@ export function readThreads(): Thread[] {
           ? (t.mode as PermissionMode)
           : ('review' as const),
         model: typeof t.model === 'string' ? t.model : '',
+        ...(t.reasoningEffort !== undefined
+          ? { reasoningEffort: validModelChoice(t.reasoningEffort) }
+          : {}),
+        ...(t.serviceTier !== undefined ? { serviceTier: validModelChoice(t.serviceTier) } : {}),
         updatedAt:
           typeof t.updatedAt === 'number' && Number.isFinite(t.updatedAt) ? t.updatedAt : 0,
       }))

@@ -8,6 +8,181 @@ const argv = process.argv.slice(2)
 const record = (value) =>
   appendFileSync(process.env.RELAY_TEST_LOG, JSON.stringify({ provider, ...value }) + '\n')
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
+const codexModels = [
+  {
+    id: 'fixture-model',
+    model: 'fixture-model',
+    displayName: 'Fixture Codex',
+    isDefault: true,
+    supportedReasoningEfforts: [
+      { reasoningEffort: 'low', description: 'Quick' },
+      { reasoningEffort: 'high', description: 'Thorough' },
+    ],
+    defaultReasoningEffort: 'low',
+    serviceTiers: [
+      { id: 'default', name: 'Standard', description: 'Standard priority' },
+      { id: 'fast', name: 'Fast', description: 'Higher priority' },
+    ],
+    defaultServiceTier: 'default',
+  },
+]
+const claudeModels = [
+  {
+    value: 'default',
+    displayName: 'Default',
+    description: 'Fixture account default',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'high'],
+    supportsFastMode: false,
+  },
+  {
+    value: 'sonnet',
+    displayName: 'Sonnet',
+    description: 'Fixture balanced model',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'high'],
+    supportsFastMode: false,
+  },
+  {
+    value: 'opus',
+    displayName: 'Opus',
+    description: 'Fixture capable model',
+    supportsEffort: true,
+    supportedEffortLevels: ['low', 'high', 'max'],
+    supportsFastMode: true,
+  },
+  {
+    value: 'haiku',
+    displayName: 'Haiku',
+    description: 'Fixture compact model',
+    supportsEffort: false,
+    supportsFastMode: false,
+  },
+]
+
+function hypothesisBacklogSource(repaired = false) {
+  return `import { useState } from 'react'
+import clsx from 'clsx'
+
+export function FixtureHypothesisBacklog() {
+  const [count, setCount] = useState(0)
+  return (
+    <section aria-label="Source hypothesis backlog" className={clsx('source-hypothesis-backlog', count > 0 && 'has-hypotheses')} style={{padding:'12px 24px', borderBottom:'1px solid var(--border)', display:'flex', gap:16, alignItems:'center'}}>
+      <h2 style={{fontSize:14, margin:0}}>Hypothesis backlog${repaired ? ' repaired' : ''}</h2>
+      <button type="button" onClick={() => setCount(value => value + 1)}>${repaired ? 'Add experiment' : 'Add hypothesis'}</button>
+      <output aria-live="polite">Hypotheses: {count}</output>
+    </section>
+  )
+}
+`
+}
+
+function sourceThreadResponse(prompt, request) {
+  if (
+    ![
+      'add a hypothesis backlog directly to the Life workspace',
+      'repair the hypothesis backlog after a deliberate compiler failure',
+      'retitle the hypothesis backlog from its source',
+      'repair the hypothesis backlog after a deliberate runtime failure',
+    ].includes(request)
+  )
+    return undefined
+  const contextMarker = 'Current Life source context JSON:\n'
+  if (!prompt.includes(contextMarker))
+    throw new Error('The source request did not include Life source context.')
+  const context = JSON.parse(
+    prompt.slice(prompt.indexOf(contextMarker) + contextMarker.length).split('\n')[0],
+  )
+  if (request === 'retitle the hypothesis backlog from its source') {
+    const path = 'src/renderer/components/FixtureHypothesisBacklog.tsx'
+    if (!prompt.includes('Life source read results:\n'))
+      return `<life-source-read>${JSON.stringify({ paths: [path] })}</life-source-read>`
+    const feature = context.files.find((file) => file.path === path)
+    if (!feature?.content.includes('>Hypothesis backlog repaired</h2>'))
+      throw new Error('The continuation omitted the current repaired hypothesis source.')
+    return `<life-source>${JSON.stringify({
+      summary: 'Review and retitle the existing hypothesis backlog from its source',
+      baseRevision: context.revision,
+      files: [
+        {
+          path,
+          edits: [
+            {
+              find: '>Hypothesis backlog repaired</h2>',
+              replace: '>Hypothesis backlog reviewed</h2>',
+            },
+          ],
+        },
+      ],
+    })}</life-source>`
+  }
+  if (request === 'add a hypothesis backlog directly to the Life workspace') {
+    if (!prompt.includes('Life source read results:\n'))
+      return '<life-source-read>{"paths":["src/renderer/App.tsx"]}</life-source-read>'
+    const app = context.files.find((file) => file.path === 'src/renderer/App.tsx')
+    if (!app?.content.includes('<main className="main-workspace" id="main-content">'))
+      throw new Error('The source continuation omitted the requested App.tsx workspace source.')
+    return `<life-source>${JSON.stringify({
+      summary: 'Add a real hypothesis backlog to the Life workspace source',
+      baseRevision: context.revision,
+      dependencies: { clsx: '2.1.1' },
+      files: [
+        {
+          path: 'src/renderer/components/FixtureHypothesisBacklog.tsx',
+          content: hypothesisBacklogSource(),
+        },
+        {
+          path: 'src/renderer/App.tsx',
+          edits: [
+            {
+              find: "import './enhancements.css'",
+              replace:
+                "import { FixtureHypothesisBacklog } from './components/FixtureHypothesisBacklog'\nimport './enhancements.css'",
+            },
+            {
+              find: '<main className="main-workspace" id="main-content">',
+              replace:
+                '<main className="main-workspace" id="main-content">\n                <FixtureHypothesisBacklog />',
+            },
+          ],
+        },
+      ],
+    })}</life-source>`
+  }
+  const repairing = prompt.includes('Life repair diagnostics:\n')
+  if (request === 'repair the hypothesis backlog after a deliberate runtime failure')
+    return `<life-source>${JSON.stringify({
+      summary: repairing
+        ? 'Recover the hypothesis backlog after runtime feedback'
+        : 'Exercise a deliberate runtime failure with native recovery',
+      baseRevision: context.revision,
+      files: [
+        {
+          path: 'src/renderer/components/FixtureHypothesisBacklog.tsx',
+          content: repairing
+            ? hypothesisBacklogSource(true).replace(
+                'Hypothesis backlog repaired',
+                'Hypothesis backlog recovered',
+              )
+            : "throw new Error('Life runtime fixture')\n" + hypothesisBacklogSource(true),
+        },
+      ],
+    })}</life-source>`
+  return `<life-source>${JSON.stringify({
+    summary: repairing
+      ? 'Repair the hypothesis backlog after compiler feedback'
+      : 'Exercise a deliberate compile failure without activating broken source',
+    baseRevision: context.revision,
+    files: [
+      {
+        path: 'src/renderer/components/FixtureHypothesisBacklog.tsx',
+        content: repairing
+          ? hypothesisBacklogSource(true)
+          : 'export function FixtureHypothesisBacklog() { return (<section>Life fixture compiler failure }',
+      },
+    ],
+  })}</life-source>`
+}
 
 function customizationResponse(prompt) {
   if (
@@ -107,13 +282,15 @@ function lifeThreadResponse(prompt) {
     throw new Error('The Life thread prompt did not include a complete request.')
   }
   if (request === 'hang customization') return null
+  const source = sourceThreadResponse(prompt, request)
+  if (source !== undefined) return source
   if (request === 'clarify customization') return 'Which part of Life would you like me to change?'
   if (request === 'no change customization')
     return 'Life already has this behavior.\n<life-customization>{}</life-customization>'
   if (request === 'explain customization')
     return 'Life supports settings and executable extensions in this same conversation.'
   if (/shadcn/i.test(request))
-    return 'Replacing built-in components with actual shadcn requires source and dependency changes, followed by an application rebuild. A live extension can provide a custom view; would you like that alternative?'
+    return 'Life can change its renderer source and rebuild from this thread. Which select controls should I update?'
   if (request === 'invalid customization')
     return '<life-customization>{"theme":"purple"}</life-customization>'
   if (request === 'mixed customization')
@@ -391,7 +568,16 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({
         id: message.id,
         result: {
-          data: [{ id: 'fixture-model', model: 'fixture-model', displayName: 'Fixture Codex' }],
+          data: codexModels,
+        },
+      })
+    if (message.method === 'config/read')
+      send({
+        id: message.id,
+        result: {
+          config: { model: 'fixture-model', model_reasoning_effort: 'low', service_tier: null },
+          origins: {},
+          layers: null,
         },
       })
     if (message.method === 'thread/start' || message.method === 'thread/resume')
@@ -422,7 +608,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         () => {
           send({
             type: 'control_response',
-            response: { subtype: 'success', request_id: message.request_id, response: {} },
+            response: {
+              subtype: 'success',
+              request_id: message.request_id,
+              response: { models: claudeModels, fast_mode_state: 'off' },
+            },
           })
           send({ type: 'system', subtype: 'init', session_id: sessionId })
         },

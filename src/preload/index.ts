@@ -35,6 +35,18 @@ const api: RelayAPI = {
     install: () => ipcRenderer.invoke('updates:install'),
     onState: (callback) => subscribe('updates:state', callback),
   },
+  sourceCode: {
+    get: () => ipcRenderer.invoke('source-code:get'),
+    getContext: (request) => ipcRenderer.invoke('source-code:context', request),
+    apply: (patch) => ipcRenderer.invoke('source-code:apply', patch),
+    rollback: () => ipcRenderer.invoke('source-code:rollback'),
+    disable: () => ipcRenderer.invoke('source-code:disable'),
+    reload: () => ipcRenderer.invoke('source-code:reload'),
+    openFolder: () => ipcRenderer.invoke('source-code:open-folder'),
+    ready: (revision) => ipcRenderer.invoke('source-code:ready', revision),
+    reportError: (revision, message) => ipcRenderer.invoke('source-code:error', revision, message),
+    onState: (callback) => subscribe('source-code:state', callback),
+  },
   customization: {
     get: () => ipcRenderer.invoke('customization:get'),
     apply: (patch) => ipcRenderer.invoke('customization:apply', patch),
@@ -58,6 +70,7 @@ const api: RelayAPI = {
     listDirectories: (path) => ipcRenderer.invoke('connection:list-directories', path),
     disconnect: () => ipcRenderer.invoke('connection:disconnect'),
     state: () => ipcRenderer.invoke('connection:state'),
+    execute: (input) => ipcRenderer.invoke('connection:execute', input),
     trust: (id, accepted) => ipcRenderer.invoke('connection:trust', id, accepted),
   },
   agent: {

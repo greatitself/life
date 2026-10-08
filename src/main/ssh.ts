@@ -457,7 +457,12 @@ export class SSHConnection extends EventEmitter {
   }
   async exec(
     command: string,
-    options: { signal?: AbortSignal; maxOutputBytes?: number } = {},
+    options: {
+      signal?: AbortSignal
+      maxOutputBytes?: number
+      timeoutMs?: number
+      input?: string
+    } = {},
   ): Promise<string> {
     const channel = await this.channel(command, undefined, options.signal)
     return new Promise((resolve, reject) => {
@@ -478,10 +483,11 @@ export class SSHConnection extends EventEmitter {
         fail(new Error('Remote command cancelled'))
         channel.close()
       }
+      const timeoutMs = options.timeoutMs ?? 30000
       const timer = setTimeout(() => {
-        fail(new Error('Remote command timed out after 30 seconds'))
+        fail(new Error(`Remote command timed out after ${timeoutMs / 1000} seconds`))
         channel.close()
-      }, 30000)
+      }, timeoutMs)
       options.signal?.addEventListener('abort', aborted, { once: true })
       if (options.signal?.aborted) aborted()
       channel.on('data', (chunk: Buffer) => {
@@ -527,6 +533,7 @@ export class SSHConnection extends EventEmitter {
         options.signal?.removeEventListener('abort', aborted)
         resolve(output + decoder.end())
       })
+      if (options.input !== undefined && !settled) channel.end(options.input)
     })
   }
   private async safePath(path?: string) {

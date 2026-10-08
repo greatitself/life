@@ -28,7 +28,7 @@ if (process.platform === 'linux' && !process.env.DISPLAY) {
     throw new Error('Native desktop tests require DISPLAY or xvfb-run on Linux.')
   const child = spawnSync(
     'xvfb-run',
-    ['-a', '-s', '-screen 0 1600x1000x24', process.execPath, __filename],
+    ['-a', '-s', '-screen 0 1920x1200x24', process.execPath, __filename],
     {
       cwd: repository,
       env: process.env,
@@ -69,6 +69,78 @@ async function run() {
   const { SSHFixture } = require(bundledFixture)
   const configurationRoot = await mkdtemp(join(tmpdir(), 'life-desktop-smoke-'))
   const fixture = await new SSHFixture(join(repository, 'tests/fixtures/fake-provider.cjs')).start()
+  const activityBase = `export interface ThreadActivity {
+  id: string
+  kind: 'message' | 'tool' | 'reasoning'
+  role?: 'user' | 'assistant'
+  settled: boolean
+  text: string
+}
+
+export interface ThreadReview {
+  activities: ThreadActivity[]
+  pending: boolean
+}
+
+/** Keep useful activity visible while a test workspace turn settles. */
+export function visibleActivities(review: ThreadReview): ThreadActivity[] {
+  return review.activities.filter((activity) => {
+    if (activity.kind === 'tool') return true
+    return !activity.settled
+  })
+}
+
+export function activityLabel(activity: ThreadActivity): string {
+  if (activity.kind === 'tool') return 'Tool work'
+  if (activity.kind === 'reasoning') return 'Reasoning'
+  return activity.role === 'assistant' ? 'Response' : 'Request'
+}
+`
+  const activityReviewed = activityBase.replace(
+    `  return review.activities.filter((activity) => {
+    if (activity.kind === 'tool') return true
+    return !activity.settled
+  })`,
+    `  const firstResponse = review.activities.findIndex(
+    (activity) => activity.kind === 'message' && activity.role === 'assistant',
+  )
+  const lastResponse = review.activities.reduce((last, activity, index) => {
+    if (activity.kind === 'message' && activity.role === 'assistant') return index
+    return last
+  }, -1)
+
+  return review.activities.filter((activity, index) => {
+    if (activity.kind === 'tool') return true
+    if (index === firstResponse || index === lastResponse) return true
+    if (activity.kind === 'reasoning') return review.pending
+    return !activity.settled
+  })`,
+  )
+  await writeFile(join(fixture.workspace, 'src/thread-activity.ts'), activityBase)
+  const fixtureGit = (...args) => {
+    const result = spawnSync('git', args, {
+      cwd: fixture.workspace,
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, `Fixture git ${args[0]} failed: ${result.stderr}`)
+    return result.stdout
+  }
+  fixtureGit('init', '--quiet')
+  await writeFile(
+    join(fixture.workspace, '.gitignore'),
+    'node_modules/\nbinary.dat\nlarge.txt\nescape-link\n',
+  )
+  fixtureGit('add', 'README.md', 'src/index.ts', 'src/thread-activity.ts', '.gitignore')
+  fixtureGit(
+    '-c',
+    'user.name=Life desktop fixture',
+    '-c',
+    'user.email=life-fixture@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'Create native SSH diff fixture',
+  )
   const remoteService = createServer((request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' })
     response.end(JSON.stringify({ service: 'Life SSH forwarding fixture', path: request.url }))
@@ -106,6 +178,7 @@ async function run() {
   let application
   let page
   let phase = 'launch'
+  let failed = false
 
   const launch = async () => {
     application = await electron.launch({
@@ -125,9 +198,7 @@ async function run() {
     await application.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].setBounds({ width: 1440, height: 960 }),
     )
-    await page
-      .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
-      .waitFor()
+    await page.locator('.app-shell').waitFor()
     const userData = await application.evaluate(({ app }) => app.getPath('userData'))
     assert.ok(
       userData.startsWith(configurationRoot),
@@ -147,6 +218,12 @@ async function run() {
   const map = () => navigation().getByRole('button', { name: 'Map', exact: true }).click()
   const workspace = () =>
     navigation().getByRole('button', { name: 'Workspace', exact: true }).click()
+  const filesPanel = async () => {
+    await page
+      .locator('.workspace-panel .workspace-view-tabs')
+      .getByRole('button', { name: 'Files', exact: true })
+      .click()
+  }
   const configuration = () => page.evaluate(() => window.relay.customization.get())
   const openSettings = async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).first().click()
@@ -277,9 +354,14 @@ async function run() {
 
   try {
     await launch()
-    phase = 'fresh research map and native window controls'
+    phase = 'fresh chat workspace, empty research map and native window controls'
     assert.match(await page.title(), /^Life/)
     assert.equal(await page.evaluate(() => window.relay.platform), process.platform)
+    await page
+      .getByRole('heading', { name: 'Give your next idea a place to grow.', exact: true })
+      .waitFor()
+    assert.equal((await configuration()).config.startView, 'workspace')
+    await map()
     await page.getByRole('heading', { name: 'Give your research a map.', exact: true }).waitFor()
     assert.deepEqual(
       await page.evaluate(() => JSON.parse(localStorage.getItem('life.research.v1') || '[]')),
@@ -389,6 +471,7 @@ async function run() {
     application = undefined
     await launch()
     assert.equal(await page.locator('html').getAttribute('data-theme'), 'light')
+    await map()
     await page.getByRole('heading', { name: 'Give your research a map.', exact: true }).waitFor()
 
     phase = 'research projects, dependencies, filters and real Mermaid export'
@@ -545,7 +628,7 @@ async function run() {
     await initialPicker.getByRole('button', { name: 'Choose later', exact: true }).click()
     await initialPicker.waitFor({ state: 'hidden' })
     await workspace()
-    await page.getByText('SSH connected', { exact: true }).waitFor()
+    await page.locator('.composer-worktree-strip .status-dot.online').waitFor()
     const profiles = await page.evaluate(() => window.relay.profiles.list())
     assert.equal(profiles.length, 1)
     assert.equal(profiles[0].password, undefined)
@@ -695,6 +778,7 @@ async function run() {
 
     phase = 'post-connect project browsing, canonical selection and SFTP'
     await chooseProject({ reopen: true, browse: true })
+    await filesPanel()
     await page.getByRole('button', { name: 'src', exact: true }).click()
     await page.getByRole('button', { name: 'index.ts', exact: true }).click()
     await page
@@ -703,6 +787,54 @@ async function run() {
       .waitFor()
     await page.getByRole('button', { name: 'Add to prompt', exact: true }).click()
     assert.match(await composer().inputValue(), /src\/index.ts/)
+
+    phase = 'real SSH unified Git diff and file review'
+    await writeFile(
+      join(fixture.workspace, 'src/index.ts'),
+      "export const answer = 42\nexport const researchStatus = 'verified'\n",
+    )
+    await writeFile(join(fixture.workspace, 'untracked-proof.txt'), 'Native SSH untracked file\n')
+    await writeFile(join(fixture.workspace, 'src/thread-activity.ts'), activityReviewed)
+    await page
+      .locator('.workspace-panel')
+      .getByRole('button', { name: 'Diff', exact: true })
+      .click()
+    await page.getByRole('button', { name: 'Refresh remote workspace', exact: true }).click()
+    await page
+      .locator('.workspace-diff-line.diff-added')
+      .filter({ hasText: 'researchStatus' })
+      .waitFor()
+    assert.ok((await page.locator('.workspace-diff-hunk').first().textContent()).includes('@@'))
+    assert.ok((await page.locator('.workspace-diff-line .diff-line-number').count()) >= 2)
+    assert.ok((await page.locator('.workspace-diff-line.diff-removed').count()) >= 1)
+    const wrapDiff = page.getByRole('button', { name: 'Wrap diff lines', exact: true })
+    const originalWrap = await wrapDiff.getAttribute('aria-pressed')
+    await wrapDiff.click()
+    assert.equal(
+      await wrapDiff.getAttribute('aria-pressed'),
+      originalWrap === 'true' ? 'false' : 'true',
+    )
+    await wrapDiff.click()
+    assert.equal(await wrapDiff.getAttribute('aria-pressed'), originalWrap)
+    await page.getByRole('button', { name: 'Collapse all diffs', exact: true }).click()
+    assert.equal(await page.locator('.workspace-diff-line.diff-added').count(), 0)
+    await page.getByRole('button', { name: 'Expand all diffs', exact: true }).click()
+    await page
+      .locator('.workspace-diff-line.diff-added')
+      .filter({ hasText: 'researchStatus' })
+      .waitFor()
+    await page
+      .locator('.workspace-untracked-file')
+      .filter({ hasText: 'untracked-proof.txt' })
+      .getByRole('button', { name: 'Open file', exact: true })
+      .click()
+    await page
+      .locator('.file-preview')
+      .getByText('Native SSH untracked file', { exact: true })
+      .waitFor()
+    await page.getByRole('button', { name: 'Add to prompt', exact: true }).click()
+    assert.match(await composer().inputValue(), /untracked-proof\.txt/)
+    await filesPanel()
 
     phase = 'both agent providers, approvals, questions, interruption and current chat'
     for (const provider of ['codex', 'claude']) {
@@ -801,7 +933,7 @@ async function run() {
     const otherFiles = await page.evaluate(() => window.relay.files.list())
     assert.deepEqual(
       otherFiles.map((file) => file.name),
-      ['index.ts'],
+      ['index.ts', 'thread-activity.ts'],
     )
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
     await page.getByRole('dialog', { name: 'Find a thread' }).waitFor()
@@ -1153,7 +1285,12 @@ async function run() {
       await reconnect.getByRole('button', { name: 'Connect machine', exact: true }).click()
       await reconnect.waitFor({ state: 'hidden' })
       await chooseProject()
-      await page.getByText('SSH connected', { exact: true }).waitFor()
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).status === 'connected',
+        'saved machine reconnected',
+      )
+      await page.locator('.composer-worktree-strip .status-dot.online').waitFor()
       assert.equal(await page.getByRole('dialog', { name: 'Trust this machine?' }).count(), 0)
       await send('explain customization')
       await waitForSend()
@@ -1256,6 +1393,78 @@ async function run() {
     )
     await closeDialog()
 
+    phase = 'connected fixture conversation and reference-sized documentation screenshots'
+    await workspace()
+    await page.getByRole('button', { name: 'New thread', exact: false }).click()
+    await page.getByRole('button', { name: 'Codex By OpenAI' }).click()
+    await send('Review the fixture changes')
+    await page
+      .locator('.markdown')
+      .getByText('Reviewed the connected test workspace.', { exact: true })
+      .waitFor()
+    await waitForSend()
+    await map()
+    const referenceWorkspace = async (filename) => {
+      const snapshot = await configuration()
+      const bounds = await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].getBounds(),
+      )
+      try {
+        await page.evaluate(() => window.relay.customization.apply({ widgets: [] }))
+        await application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()[0].setBounds({ width: 1728, height: 1080 }),
+        )
+        await workspace()
+        await page
+          .locator('.workspace-panel')
+          .getByRole('button', { name: 'Diff', exact: true })
+          .click()
+        await page
+          .locator('.workspace-diff-line.diff-added')
+          .filter({ hasText: 'firstResponse' })
+          .first()
+          .waitFor()
+        const indexFile = page
+          .locator('.workspace-diff-file')
+          .filter({ hasText: 'src/index.ts' })
+          .locator('.workspace-diff-file-toggle')
+        if ((await indexFile.getAttribute('aria-expanded')) === 'true') await indexFile.click()
+        await page
+          .locator('.markdown')
+          .getByText('Reviewed the connected test workspace.', { exact: true })
+          .waitFor()
+        const layout = await page.evaluate(() => {
+          const rect = (selector) => {
+            const bounds = document.querySelector(selector).getBoundingClientRect()
+            return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+          }
+          return {
+            viewport: { width: innerWidth, height: innerHeight },
+            sidebar: rect('.sidebar'),
+            chat: rect('.chat-area'),
+            diff: rect('.workspace-panel'),
+          }
+        })
+        assert.ok(layout.sidebar.width >= 260 && layout.sidebar.width <= 340)
+        assert.ok(layout.chat.width > 500)
+        assert.ok(layout.diff.width > 400)
+        assert.ok(layout.sidebar.x < layout.chat.x && layout.chat.x < layout.diff.x)
+        await screenshot(filename)
+        await writeFile(
+          join(artifacts, filename.replace('.png', '-layout.json')),
+          JSON.stringify(layout, null, 2),
+        )
+      } finally {
+        await page.evaluate(
+          (widgets) => window.relay.customization.apply({ widgets }),
+          snapshot.config.widgets,
+        )
+        await application.evaluate(
+          ({ BrowserWindow }, previous) => BrowserWindow.getAllWindows()[0].setBounds(previous),
+          bounds,
+        )
+      }
+    }
     phase = 'grayscale themes and documentation screenshots'
     const grayscale = async () => {
       const palette = await page.locator('html').evaluate((element) => {
@@ -1279,6 +1488,9 @@ async function run() {
     await waitForGraph()
     await waitForDiagram()
     await screenshot('life-light.png')
+    await referenceWorkspace('life-workspace-light.png')
+    await map()
+    await waitForGraph()
     await page.getByRole('button', { name: 'Switch to dark theme', exact: true }).click()
     await waitUntil(
       async () => (await page.locator('html').getAttribute('data-theme')) === 'dark',
@@ -1290,8 +1502,9 @@ async function run() {
     await screenshot('life.png')
     await workspace()
     await waitForDiagram()
+    await filesPanel()
     await page.getByRole('button', { name: 'src', exact: true }).waitFor()
-    await screenshot('life-workspace.png')
+    await referenceWorkspace('life-workspace.png')
 
     phase = 'slow provider initialization cancellation and replacement send'
     const cancellationBaseline = (await fixture.log()).length
@@ -1493,6 +1706,7 @@ async function run() {
       phase = 'Codex and Claude ordinary-thread executable extension generation'
       if (provider === 'codex') {
         await page.evaluate(() => window.relay.extensions.remove('research-tools'))
+        await map()
         await page
           .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
           .waitFor()
@@ -1597,6 +1811,7 @@ async function run() {
       .getByRole('heading', { name: 'Whole workspace counter', exact: true })
       .waitFor()
     await page.getByRole('button', { name: 'Back to Life', exact: true }).click()
+    await map()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
       .waitFor()
@@ -1667,6 +1882,17 @@ async function run() {
       await page.locator('.search-results button').click()
     }
     const board = () => page.getByRole('region', { name: 'Source hypothesis backlog', exact: true })
+    const outlineCSS = () =>
+      board().evaluate((element) => {
+        const style = getComputedStyle(element)
+        return { width: style.outlineWidth, style: style.outlineStyle, color: style.outlineColor }
+      })
+    const assertOutlineEnabled = async () =>
+      assert.deepEqual(await outlineCSS(), {
+        width: '3px',
+        style: 'solid',
+        color: 'rgb(17, 34, 51)',
+      })
     const waitForSourceUI = async (heading) => {
       await waitUntil(
         async () => {
@@ -1720,6 +1946,11 @@ async function run() {
     assert.equal(new URL(initialSource.active.js).protocol, 'life-code:')
     assert.ok(initialSource.path.startsWith(configurationRoot))
     assert.equal(initialSource.error, undefined)
+    assert.equal(initialSource.extensions.length, 1)
+    assert.equal(initialSource.extensions[0].enabled, true)
+    assert.ok(initialSource.extensions[0].files.includes(featurePath))
+    assert.ok(initialSource.extensions[0].files.includes('src/renderer/App.tsx'))
+    assert.equal(initialSource.extensions[0].dependencies.clsx, '2.1.1')
     assert.equal(await page.locator('iframe').count(), 0)
     assert.equal(
       await board().evaluate(
@@ -1988,6 +2219,429 @@ async function run() {
     assert.notEqual((await sourceCode()).active.revision, badRuntimeRevision)
     assert.equal(existsSync(join(repository, featurePath)), false)
 
+    phase = 'source extension conflicts preserve the working interface'
+    const conflictBaseline = await sourceCode()
+    const creator = conflictBaseline.extensions.find((extension) =>
+      extension.files.includes('src/renderer/App.tsx'),
+    )
+    assert.ok(creator, 'The original workspace feature is a manageable source extension')
+    manager = await openExtensions()
+    const sourceCard = (id) =>
+      manager.locator(`article[data-extension-kind="source"][data-extension-id="${id}"]`)
+    await sourceCard(creator.id)
+      .getByRole('checkbox', { name: `Enable ${creator.name}`, exact: true })
+      .click()
+    await manager
+      .getByRole('alert')
+      .filter({ hasText: /conflict|missing|depend|apply/i })
+      .waitFor()
+    const conflicted = await sourceCode()
+    assert.equal(conflicted.revision, conflictBaseline.revision)
+    assert.deepEqual(conflicted.active, conflictBaseline.active)
+    assert.deepEqual(conflicted.extensions, conflictBaseline.extensions)
+    await sourceCard(creator.id)
+      .getByRole('checkbox', { name: `Enable ${creator.name}`, exact: true })
+      .waitFor()
+    assert.equal(
+      await sourceCard(creator.id)
+        .getByRole('checkbox', { name: `Enable ${creator.name}`, exact: true })
+        .isChecked(),
+      true,
+    )
+    await closeDialog()
+    await board().getByRole('button', { name: 'Add experiment', exact: true }).click()
+    await board().getByText('Hypotheses: 1', { exact: true }).waitFor()
+
+    phase = 'independent source layers remain live while another layer is disabled or removed'
+    const outlineName = 'Workspace source outline'
+    const counterName = 'Independent workspace counter'
+    const sourceCSS = await page.evaluate(() =>
+      window.relay.sourceCode.getContext({ paths: ['src/renderer/enhancements.css'] }),
+    )
+    await page.evaluate((patch) => window.relay.sourceCode.apply(patch), {
+      summary: outlineName,
+      baseRevision: conflicted.revision,
+      files: [
+        {
+          path: 'src/renderer/enhancements.css',
+          content: `${sourceCSS.files[0].content}\n.source-hypothesis-backlog { outline: 3px solid rgb(17, 34, 51); outline-offset: -3px; }\n`,
+        },
+      ],
+    })
+    let independentReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await page.evaluate(() => window.relay.sourceCode.reload())
+    await independentReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const outlined = await sourceCode()
+    const outline = outlined.extensions.find((extension) => extension.name === outlineName)
+    assert.ok(outline)
+    await assertOutlineEnabled()
+    const counterSource =
+      'import { useState } from \'react\'\nexport function FixtureIndependentCounter() { const [count, setCount] = useState(0); return <section aria-label="Independent source counter"><button onClick={() => setCount(count + 1)}>Add source count</button><output>Source count: {count}</output></section> }\n'
+    await page.evaluate((patch) => window.relay.sourceCode.apply(patch), {
+      summary: counterName,
+      baseRevision: outlined.revision,
+      files: [
+        { path: 'src/renderer/components/FixtureIndependentCounter.tsx', content: counterSource },
+        {
+          path: 'src/renderer/App.tsx',
+          edits: [
+            {
+              find: "import './enhancements.css'",
+              replace:
+                "import { FixtureIndependentCounter } from './components/FixtureIndependentCounter'\nimport './enhancements.css'",
+            },
+            {
+              find: '<FixtureHypothesisBacklog />',
+              replace:
+                '<FixtureHypothesisBacklog />\n                <FixtureIndependentCounter />',
+            },
+          ],
+        },
+      ],
+    })
+    independentReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await page.evaluate(() => window.relay.sourceCode.reload())
+    await independentReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const counter = () =>
+      page.getByRole('region', { name: 'Independent source counter', exact: true })
+    await counter().getByRole('button', { name: 'Add source count', exact: true }).click()
+    await counter().getByText('Source count: 1', { exact: true }).waitFor()
+    assert.ok((await sourceCode()).extensions.some((extension) => extension.name === counterName))
+    manager = await openExtensions()
+    let layerReload = page.waitForEvent('domcontentloaded')
+    await sourceCard(outline.id)
+      .getByRole('checkbox', { name: `Enable ${outlineName}`, exact: true })
+      .click()
+    await layerReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const disabledCSSProof = await page.evaluate(async () => {
+      const state = await window.relay.sourceCode.get()
+      const context = await window.relay.sourceCode.getContext({
+        paths: ['src/renderer/enhancements.css'],
+      })
+      const css = await (await fetch(state.active.css)).text()
+      return {
+        state,
+        context,
+        css,
+        styleSheets: Array.from(document.styleSheets).map((sheet) => sheet.href),
+        computedOutline: getComputedStyle(
+          document.querySelector('[aria-label="Source hypothesis backlog"]'),
+        ).outline,
+      }
+    })
+    await writeFile(
+      join(artifacts, 'desktop-source-disabled-css-proof.json'),
+      JSON.stringify(disabledCSSProof, null, 2),
+    )
+    assert.equal(
+      disabledCSSProof.context.files[0].content.includes('.source-hypothesis-backlog { outline:'),
+      false,
+    )
+    assert.equal(disabledCSSProof.css.includes('.source-hypothesis-backlog'), false)
+    assert.equal((await outlineCSS()).style, 'none')
+    await counter().getByRole('button', { name: 'Add source count', exact: true }).click()
+    await counter().getByText('Source count: 1', { exact: true }).waitFor()
+    const disabledLayers = await sourceCode()
+    assert.equal(
+      disabledLayers.extensions.find((extension) => extension.id === outline.id).enabled,
+      false,
+    )
+    assert.equal(
+      disabledLayers.extensions.find((extension) => extension.name === counterName).enabled,
+      true,
+    )
+    manager = await openExtensions()
+    layerReload = page.waitForEvent('domcontentloaded')
+    await sourceCard(outline.id)
+      .getByRole('checkbox', { name: `Enable ${outlineName}`, exact: true })
+      .click()
+    await layerReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    await assertOutlineEnabled()
+
+    phase = 'editing an existing source extension preserves its identity and independent layers'
+    const beforeLayerEdit = await sourceCode()
+    const editableLayer = await page.evaluate(
+      (id) => window.relay.sourceCode.exportExtension(id),
+      outline.id,
+    )
+    editableLayer.version = '1.0.1'
+    editableLayer.files.push({
+      kind: 'create',
+      path: 'src/shared/native-layer-edit.ts',
+      content: 'export const nativeLayerEdited = true\n',
+    })
+    manager = await openExtensions()
+    await sourceCard(outline.id).getByRole('button', { name: 'Edit code', exact: true }).click()
+    await manager.getByRole('textbox', { name: 'Extension manifest', exact: true }).fill(
+      JSON.stringify({
+        format: 'life-extension',
+        formatVersion: 1,
+        kind: 'source',
+        extension: editableLayer,
+      }),
+    )
+    layerReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await manager.getByRole('button', { name: 'Apply source', exact: true }).click()
+    await layerReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    const editedLayers = await sourceCode()
+    assert.equal(editedLayers.extensions.length, beforeLayerEdit.extensions.length)
+    assert.equal(
+      editedLayers.extensions.find((extension) => extension.id === outline.id).version,
+      '1.0.1',
+    )
+    assert.ok(
+      editedLayers.extensions
+        .find((extension) => extension.id === outline.id)
+        .files.includes('src/shared/native-layer-edit.ts'),
+    )
+    const editedFile = await page.evaluate(() =>
+      window.relay.sourceCode.getContext({ paths: ['src/shared/native-layer-edit.ts'] }),
+    )
+    assert.equal(editedFile.files[0].content, 'export const nativeLayerEdited = true\n')
+    await counter().getByRole('button', { name: 'Add source count', exact: true }).click()
+    await counter().getByText('Source count: 1', { exact: true }).waitFor()
+
+    phase = 'source extension export and explicit public sharing preview'
+    manager = await openExtensions()
+    await screenshot('life-extensions.png')
+    const portablePath = join(artifacts, 'desktop-source-extension.life-extension.json')
+    await rm(portablePath, { force: true })
+    await application.evaluate(({ BrowserWindow }, file) => {
+      globalThis.__lifePortableDownload = undefined
+      BrowserWindow.getAllWindows()[0].webContents.session.once('will-download', (_event, item) => {
+        globalThis.__lifePortableDownload = { filename: item.getFilename(), state: 'started' }
+        item.setSavePath(file)
+        item.once('done', (_done, state) => {
+          globalThis.__lifePortableDownload.state = state
+        })
+      })
+    }, portablePath)
+    await sourceCard(outline.id)
+      .getByRole('button', { name: `Export ${outlineName}`, exact: true })
+      .click()
+    await waitUntil(
+      async () =>
+        (await application.evaluate(() => globalThis.__lifePortableDownload))?.state ===
+        'completed',
+      'native portable extension download completed',
+    )
+    assert.equal(
+      (await application.evaluate(() => globalThis.__lifePortableDownload)).filename,
+      `${outline.id}.life-extension.json`,
+    )
+    const portable = JSON.parse(await readFile(portablePath, 'utf8'))
+    assert.equal(portable.format, 'life-extension')
+    assert.equal(portable.kind, 'source')
+    assert.equal(portable.extension.id, outline.id)
+    const rawExport = await page.evaluate(
+      (id) => window.relay.sourceCode.exportExtension(id),
+      outline.id,
+    )
+    assert.deepEqual(portable.extension, rawExport)
+    const portableJSON = JSON.stringify(portable)
+    assert.equal(portableJSON.includes('fixture-password'), false)
+    assert.equal(portableJSON.includes('Loopback test workspace'), false)
+    assert.equal(portableJSON.includes(originalSourceThread.remoteId), false)
+    // Replace the two publication IPC handlers in this isolated test instance.
+    // Production network validation and payload construction have separate unit coverage.
+    // These UI checks cannot create a real Gist, even if an actual token is present in the environment.
+    await application.evaluate(({ ipcMain }, bundle) => {
+      globalThis.__lifeSharing = { calls: [], bundle }
+      ipcMain.removeHandler('extension-sharing:publish')
+      ipcMain.removeHandler('extension-sharing:inspect-public')
+      ipcMain.handle('extension-sharing:publish', (_event, request) => {
+        if (JSON.stringify(request.bundle) !== JSON.stringify(globalThis.__lifeSharing.bundle))
+          throw new Error('Unexpected sharing payload')
+        if (request.token !== `ghp_${'a'.repeat(24)}`) throw new Error('Unexpected fixture token')
+        globalThis.__lifeSharing.calls.push({ method: 'publish', id: request.bundle.extension.id })
+        return new Promise((resolvePublication) =>
+          setTimeout(
+            () =>
+              resolvePublication({
+                id: '0123456789abcdef0123456789abcdef',
+                url: 'https://gist.github.com/0123456789abcdef0123456789abcdef',
+                filename: 'extension.life-extension.json',
+              }),
+            1500,
+          ),
+        )
+      })
+      ipcMain.handle('extension-sharing:inspect-public', (_event, link) => {
+        if (link !== 'https://gist.github.com/0123456789abcdef0123456789abcdef')
+          throw new Error('Unexpected fixture public link')
+        globalThis.__lifeSharing.calls.push({
+          method: 'inspect',
+          id: globalThis.__lifeSharing.bundle.extension.id,
+        })
+        return {
+          id: '0123456789abcdef0123456789abcdef',
+          url: link,
+          bundle: globalThis.__lifeSharing.bundle,
+        }
+      })
+    }, portable)
+    await sourceCard(outline.id)
+      .getByRole('button', { name: `Share ${outlineName} publicly`, exact: true })
+      .click()
+    const sharing = page.getByRole('dialog', { name: 'Share extension publicly', exact: true })
+    await sharing.waitFor()
+    await sharing.getByText('Review complete extension code', { exact: true }).click()
+    assert.deepEqual(JSON.parse(await sharing.locator('pre').textContent()), portable)
+    assert.equal((await application.evaluate(() => globalThis.__lifeSharing.calls)).length, 0)
+    assert.equal(
+      await sharing.getByRole('button', { name: 'Publish publicly', exact: true }).isDisabled(),
+      true,
+    )
+    await sharing.getByLabel('GitHub token', { exact: true }).fill(`ghp_${'a'.repeat(24)}`)
+    assert.equal((await application.evaluate(() => globalThis.__lifeSharing.calls)).length, 0)
+    await sharing.getByRole('button', { name: 'Publish publicly', exact: true }).click()
+    await sharing.getByRole('button', { name: 'Publishing…', exact: true }).waitFor()
+    assert.equal(
+      await sharing.getByRole('button', { name: 'Publishing…', exact: true }).isDisabled(),
+      true,
+    )
+    assert.equal(
+      await sharing.getByRole('button', { name: 'Cancel', exact: true }).isDisabled(),
+      true,
+    )
+    await page.keyboard.press('Escape')
+    assert.equal(await sharing.isVisible(), true)
+    await sharing.getByText('Your extension is public.', { exact: true }).waitFor()
+    assert.equal(
+      (await application.evaluate(() => globalThis.__lifeSharing.calls)).filter(
+        (call) => call.method === 'publish',
+      ).length,
+      1,
+    )
+    await sharing.getByRole('button', { name: 'Copy link', exact: true }).click()
+    await sharing.getByRole('button', { name: 'Link copied', exact: true }).waitFor()
+    assert.equal(
+      await application.evaluate(({ clipboard }) => clipboard.readText()),
+      'https://gist.github.com/0123456789abcdef0123456789abcdef',
+    )
+    await application.evaluate(({ shell }) => {
+      globalThis.__lifeShareOpenExternal = shell.openExternal
+      globalThis.__lifeShareURLs = []
+      shell.openExternal = async (url) => {
+        globalThis.__lifeShareURLs.push(url)
+      }
+    })
+    try {
+      await sharing.getByRole('button', { name: 'Open public page', exact: true }).click()
+      await waitUntil(
+        async () =>
+          (await application.evaluate(() => globalThis.__lifeShareURLs)).includes(
+            'https://gist.github.com/0123456789abcdef0123456789abcdef',
+          ),
+        'reviewed public page uses the native browser opener',
+      )
+    } finally {
+      await application.evaluate(({ shell }) => {
+        shell.openExternal = globalThis.__lifeShareOpenExternal
+        delete globalThis.__lifeShareOpenExternal
+      })
+    }
+    await sharing.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await sourceCard(outline.id)
+      .getByRole('button', { name: `Share ${outlineName} publicly`, exact: true })
+      .click()
+    await sharing.waitFor()
+    assert.equal(await sharing.getByLabel('GitHub token', { exact: true }).inputValue(), '')
+    await sharing.getByRole('button', { name: 'Cancel', exact: true }).click()
+    assert.equal(
+      (await page.evaluate(() => JSON.stringify(localStorage))).includes(`ghp_${'a'.repeat(24)}`),
+      false,
+    )
+
+    const removeOutline = async () => {
+      manager = await openExtensions()
+      await sourceCard(outline.id)
+        .getByRole('button', { name: `Delete ${outlineName}`, exact: true })
+        .click()
+      const reloaded = page.waitForEvent('domcontentloaded')
+      await sourceCard(outline.id).getByRole('button', { name: 'Remove', exact: true }).click()
+      await reloaded
+      await waitForSourceUI('Hypothesis backlog repaired')
+      assert.equal(
+        (await sourceCode()).extensions.some((extension) => extension.id === outline.id),
+        false,
+      )
+      assert.equal(
+        (await page.evaluate(() => window.relay.sourceCode.getContext())).paths.includes(
+          'src/shared/native-layer-edit.ts',
+        ),
+        false,
+      )
+      assert.equal((await outlineCSS()).style, 'none')
+      await counter().getByRole('button', { name: 'Add source count', exact: true }).click()
+      await counter().getByText('Source count: 1', { exact: true }).waitFor()
+    }
+    await closeDialog()
+    await removeOutline()
+
+    phase = 'portable source extension file import requires review before compilation'
+    manager = await openExtensions()
+    await manager.getByRole('tab', { name: 'Import', exact: true }).click()
+    const beforeFileImport = await sourceCode()
+    await manager.getByLabel('Extension file', { exact: true }).setInputFiles(portablePath)
+    await manager.getByRole('button', { name: 'Preview extension', exact: true }).click()
+    await manager.getByRole('button', { name: 'Install extension', exact: true }).waitFor()
+    assert.equal((await sourceCode()).revision, beforeFileImport.revision)
+    layerReload = page.waitForEvent('domcontentloaded')
+    await manager.getByRole('button', { name: 'Install extension', exact: true }).click()
+    await layerReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    await assertOutlineEnabled()
+    assert.deepEqual(
+      await page.evaluate((id) => window.relay.sourceCode.exportExtension(id), outline.id),
+      rawExport,
+    )
+    await removeOutline()
+
+    phase = 'public source extension link preview has no install side effects'
+    manager = await openExtensions()
+    await manager.getByRole('tab', { name: 'Import', exact: true }).click()
+    const beforePublicImport = await sourceCode()
+    await manager
+      .getByRole('textbox', { name: 'Public extension link', exact: true })
+      .fill('https://gist.github.com/0123456789abcdef0123456789abcdef')
+    await manager.getByRole('button', { name: 'Preview public extension', exact: true }).click()
+    await manager.getByRole('button', { name: 'Install extension', exact: true }).waitFor()
+    assert.equal((await sourceCode()).revision, beforePublicImport.revision)
+    assert.equal(
+      (await application.evaluate(() => globalThis.__lifeSharing.calls)).filter(
+        (call) => call.method === 'inspect',
+      ).length,
+      1,
+    )
+    layerReload = page.waitForEvent('domcontentloaded')
+    await manager.getByRole('button', { name: 'Install extension', exact: true }).click()
+    await layerReload
+    await waitForSourceUI('Hypothesis backlog repaired')
+    await assertOutlineEnabled()
+    assert.equal(
+      (await sourceCode()).extensions.find((extension) => extension.name === counterName).enabled,
+      true,
+    )
+    await writeFile(
+      join(artifacts, 'desktop-source-layer-proof.json'),
+      JSON.stringify(
+        {
+          portable,
+          sharing: await application.evaluate(() => globalThis.__lifeSharing.calls),
+          source: await sourceCode(),
+          realPublication: false,
+        },
+        null,
+        2,
+      ),
+    )
+
     let tailwindVerified = false
     if (process.env.LIFE_TEST_TAILWIND === '1') {
       phase =
@@ -2163,6 +2817,7 @@ async function run() {
     page.on('pageerror', (error) => rendererErrors.push(error.message))
     await page.getByRole('dialog', { name: 'Manage extensions', exact: true }).waitFor()
     await closeDialog()
+    await map()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
       .waitFor()
@@ -2213,11 +2868,13 @@ async function run() {
             'life.png',
             'life-light.png',
             'life-workspace.png',
+            'life-workspace-light.png',
             'life-project-picker.png',
             'life-source-customization.png',
+            'life-extensions.png',
           ],
           assertions: [
-            'fresh empty research map',
+            'fresh chat workspace with an empty research map',
             'isolated sandboxed Electron',
             'platform window controls',
             'persisted dark/light themes',
@@ -2228,6 +2885,7 @@ async function run() {
             'real loopback host trust and SFTP',
             'machine connection before project selection with coding and files blocked until chosen',
             'post-connect SFTP directory browsing and project choice after reconnect',
+            'real SSH unified Git diff with file ranges, line numbers, wrapping and collapse controls',
             'switching projects preserves thread scope and requires returning to its original directory',
             'real SSH HTTP forwarding with local collision mapping and browser URL',
             'automatic port forwarding default, persisted toggle and socket cleanup',
@@ -2260,6 +2918,12 @@ async function run() {
             'source compile failure preserves the active application and repairs the same conversation',
             'compiled source and chat history persist across reload, app restart and SSH reconnect',
             'source management inspects writable renderer and read-only native files and restores previous builds',
+            'every code customization is a named manageable source extension',
+            'conflicting source-layer changes preserve the active interface and installed layers',
+            'source-layer disable and removal preserve independent interactive changes',
+            'source-layer editing preserves its identity and replaces its stored code',
+            'portable source extension file export and reviewed import roundtrip',
+            'explicit public-sharing review and publish plus public-link preview and installation use mocked IPC without real publication',
             'runtime startup failure restores the built-in interface and automatically repairs the same conversation',
             'rollback avoids known-failing source revisions and native recovery preserves source files',
             'single-instance lock preserves extensions',
@@ -2285,6 +2949,7 @@ async function run() {
       `Native Electron smoke passed (${selectedBinary ? 'packaged' : 'built source'}): research, themes, native controls, config aliases, real SSH/SFTP, both providers, customization, executable extensions, hot reload, rollback and emergency recovery. Screenshots: docs/images/life{,-light,-workspace}.png`,
     )
   } catch (error) {
+    failed = true
     console.error(`Desktop smoke failed during: ${phase}: ${error.message}`)
     if (page && !page.isClosed()) {
       const diagnostics = await page
@@ -2327,7 +2992,9 @@ async function run() {
     await fixture.close()
     remoteService.closeAllConnections()
     await new Promise((resolveClosed) => remoteService.close(resolveClosed))
-    await rm(configurationRoot, { recursive: true, force: true })
+    if (failed && process.env.LIFE_TEST_KEEP_FAILURE === '1') {
+      console.error(`Preserved failed desktop fixture data for debugging: ${configurationRoot}`)
+    } else await rm(configurationRoot, { recursive: true, force: true })
   }
 }
 

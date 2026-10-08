@@ -59,6 +59,20 @@ const claudeModels = [
     supportsFastMode: false,
   },
 ]
+const fixtureReviewResponse = `Reviewed the connected test workspace.
+
+The change keeps the first and final assistant messages visible while a turn settles. Tool work stays available, and intermediate reasoning follows the current turn state.
+
+The diff contains:
+
+- A first and last response lookup in \`src/thread-activity.ts\`.
+- An explicit pending-state rule for reasoning activity.
+- A research status marker in \`src/index.ts\`.
+- An untracked text file that can be opened from the Files panel.
+
+The right panel shows these actual files from the loopback SSH test project. Expand a file to compare the removed and added lines, or turn wrapping off to inspect long expressions.
+
+This is a deterministic test conversation; no provider account or inference was used.`
 
 function hypothesisBacklogSource(repaired = false) {
   return `import { useState } from 'react'
@@ -392,6 +406,10 @@ function codexTurn(message) {
     codexComplete(turn, '<life-customization>{"theme":"light"}</life-customization>')
     return
   }
+  if (text === 'Review the fixture changes') {
+    codexComplete(turn, fixtureReviewResponse)
+    return
+  }
   if (text === 'hang' || text === 'delay-start') return
   if (text === 'provider-error') {
     send({
@@ -499,6 +517,10 @@ function claudeTurn(message) {
   }
   if (text === 'remote-life-markers') {
     claudeComplete('<life-customization>{"theme":"light"}</life-customization>')
+    return
+  }
+  if (text === 'Review the fixture changes') {
+    claudeComplete(fixtureReviewResponse)
     return
   }
   if (text === 'hang') return

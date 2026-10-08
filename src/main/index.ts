@@ -26,6 +26,8 @@ import { buildExtensionDocument, extensionDocumentCSP } from '../shared/extensio
 import { SourceCodeStore } from './source-code'
 import { executeConnectionCommand } from './connection-execution'
 import { parseLifeSourcePatch, parseLifeSourceRead } from '../shared/source-code'
+import { ExtensionSharing } from './extension-sharing'
+import { canonicalPublicGistURL } from '../shared/extension-sharing'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
@@ -122,6 +124,7 @@ async function init() {
   ssh = new SSHConnection(store)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
+  const extensionSharing = new ExtensionSharing()
   ssh.on('state', (state) => send('connection:state', state))
   ssh.on('host-key', (request) => send('connection:host-key', request))
   ssh.on('terminal', (data) => send('terminal:data', data))
@@ -187,6 +190,11 @@ async function init() {
                     {
                       'sourceCode.getContext': 'source-code:context',
                       'sourceCode.openFolder': 'source-code:open-folder',
+                      'sourceCode.setExtensionEnabled': 'source-code:set-extension-enabled',
+                      'sourceCode.removeExtension': 'source-code:remove-extension',
+                      'sourceCode.exportExtension': 'source-code:export-extension',
+                      'sourceCode.importExtension': 'source-code:import-extension',
+                      'sourceCode.updateExtension': 'source-code:update-extension',
                     } as Record<string, string>
                   )[method] || method.replace('sourceCode.', 'source-code:')
                 : method.replace('.', ':')
@@ -257,6 +265,23 @@ async function init() {
   handle('source-code:apply', (patch) =>
     applyLocal(() => sourceCode.apply(parseLifeSourcePatch(patch))),
   )
+  handle('source-code:set-extension-enabled', (id, enabled) =>
+    applyLocal(() =>
+      sourceCode.setExtensionEnabled(extensionIdSchema.parse(id), z.boolean().parse(enabled)),
+    ),
+  )
+  handle('source-code:remove-extension', (id) =>
+    applyLocal(() => sourceCode.removeExtension(extensionIdSchema.parse(id))),
+  )
+  handle('source-code:export-extension', (id) =>
+    sourceCode.exportExtension(extensionIdSchema.parse(id)),
+  )
+  handle('source-code:import-extension', (bundle) =>
+    applyLocal(() => sourceCode.importExtension(bundle)),
+  )
+  handle('source-code:update-extension', (bundle) =>
+    applyLocal(() => sourceCode.updateExtension(bundle)),
+  )
   handle('source-code:rollback', () => applyLocal(() => sourceCode.rollback()))
   handle('source-code:disable', () => sourceCode.disable())
   handle('source-code:reload', reloadSource)
@@ -270,6 +295,13 @@ async function init() {
   handle('source-code:open-folder', async () => {
     const error = await shell.openPath(sourceCode.get().path)
     if (error) throw new Error(error)
+  })
+  handle('extension-sharing:publish', (input) => extensionSharing.publish(input))
+  handle('extension-sharing:inspect-public', (link) =>
+    extensionSharing.inspectPublic(z.string().max(2048).parse(link)),
+  )
+  handle('extension-sharing:open-public', async (link) => {
+    await shell.openExternal(canonicalPublicGistURL(z.string().max(2048).parse(link)))
   })
   handle('extensions:get', () => extensions.get())
   handle('extensions:apply', (manifest) => applyLocal(() => extensions.apply(manifest)))

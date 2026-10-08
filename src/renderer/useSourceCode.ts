@@ -8,6 +8,7 @@ const initialSource: LifeSourceSnapshot = {
   canRollback: false,
   path: '',
   recovered: false,
+  extensions: [],
 }
 
 export function useSourceCode(): LifeSourceSnapshot {

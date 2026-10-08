@@ -2,7 +2,7 @@
 
 Life is an Electron research workspace for **Codex and Claude Code over SSH**, with an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a Mermaid project map, and prompt-driven customization.
 
-![Life research map](docs/images/life.png)
+![Life agent workspace](docs/images/life-workspace.png)
 
 Download installers from [GitHub Releases](https://github.com/greatitself/life/releases/latest). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
 
@@ -10,15 +10,17 @@ Download installers from [GitHub Releases](https://github.com/greatitself/life/r
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.4.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 release, upgrades it, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.5.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 release, upgrades it, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
 
 ## Two views, two monochrome themes
 
 - **Research map:** Track projects, hypotheses, notes, tags, status, and dependencies. Link projects to saved SSH workspaces and agent threads. Switch between Mermaid graph and list views, filter and search, group by status or machine, change direction, zoom, and export SVG or Mermaid source. JSON backups preserve all project data and can be imported later.
-- **Agent workspace:** Chat with Codex or Claude Code, review approvals and questions, browse remote files, inspect Git changes, and use an interactive terminal. Threads retain their original provider and resume remote sessions after reconnecting.
+- **Agent workspace:** A compact project/thread rail, open conversation area, and wide diff pane bring the layout closer to T3 Code. Chat with Codex or Claude Code, review approvals and questions, browse remote files, inspect Git changes, and use an interactive terminal. Threads retain their original provider and resume remote sessions after reconnecting.
 - **Dark and light:** Neutral black, white, and gray surfaces. Theme changes apply to diagrams and the terminal. Windows has rectangular controls on the right; macOS uses native traffic lights. Official Codex and Claude marks come from [SVGL](https://github.com/pheralb/svgl), with its MIT notice bundled in installers.
 
-![Life light theme](docs/images/life-light.png)
+Fresh installations open the agent workspace. Switch to **Map** from the sidebar header to manage research projects; existing saved view preferences are respected.
+
+![Life agent workspace in light theme](docs/images/life-workspace-light.png)
 
 ## Tell Life to change itself
 
@@ -34,13 +36,21 @@ A connected Codex or Claude Code agent can edit Life’s actual **React, TypeScr
 
 Successfully compiled source becomes the active interface after a reload. Life saves the conversation before reloading and retains local workspace data. Failed builds leave the working interface active and return their diagnostics to the same agent for up to two repair attempts; one request can make up to six automatic source-read round trips. Revision checks reject proposals based on stale source. Explanations, clarification questions, and replies proposing no changes remain ordinary chat messages.
 
-Open **Settings** for configuration undo, reset, and reload. Click **Source code** below **Ports** in the sidebar to open **Life source**, inspect or edit files, compile and reload, restore the previous revision, use the built-in interface, or open the source folder. The local `life.config.json` file also reloads when edited externally. See [source customization](docs/source-customization.md) for the workflow and supported dependencies.
+Each source change becomes its own extension layer over the immutable installed source. Open **Live extensions** in the sidebar to manage source and runtime extensions. Enable, disable, remove, export, and import individual changes without replacing the entire app with another workspace. Life composes enabled layers and rebuilds the result; conflicting patches or failed builds leave the previous working interface active. Existing 0.4 customizations migrate into one legacy source extension with their edits preserved.
 
-**Live extensions** go further: prompts can generate executable UI and behavior, including new views, CSS changes to the existing interface, or replacements for the entire workspace. Renderer extensions run in isolated frames and use the Life bridge to access connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers and can use local files, commands, and Node modules with your user permissions. Enable, disable, edit, reload, and roll back extensions without rebuilding the app. The built-in workspace remains accessible through the recovery control and **Ctrl/Cmd + Shift + L**.
+Open **Settings** for configuration undo, reset, and reload. Click **Source code** in the sidebar to open **Life source**, inspect or edit files, compile and reload, restore the previous revision, use the built-in interface, or open the source folder. The local `life.config.json` file also reloads when edited externally. See [source customization](docs/source-customization.md) for the workflow and supported dependencies.
 
-Extensions and source revisions are stored in Life’s local data directory. When an app update changes the built-in source baseline, Life preserves custom files and starts with its built-in interface. Ask `/life update my customization for this Life version` to rebuild against the new baseline; unchanged files refresh automatically while your edits remain available to the agent. Renderer and shared source can change immediately; the native Electron host, preload bridge, and recovery loader remain the installed copy. Backend extensions can implement new local behavior, and advanced agent calls accept provider-specific options. Changes to Electron/native binaries or installer signing need a packaged release.
+**Runtime extensions** can generate executable UI and behavior, including new views, CSS changes to the existing interface, or replacements for the entire workspace. Renderer extensions run in isolated frames and use the Life bridge to access connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers and can use local files, commands, and Node modules with your user permissions. Enable, disable, edit, reload, and roll back extensions without rebuilding the app. The built-in workspace remains accessible through the recovery control and **Ctrl/Cmd + Shift + L**.
+
+Extensions and source revisions are stored in Life’s local data directory. When an app update changes the built-in source baseline, Life preserves source extensions and starts with its built-in interface. Ask `/life update my customization for this Life version` to rebuild against the new baseline. Patches must still compose and compile; overlapping edits or changed host contracts can require repair. Renderer and shared source can change immediately; the native Electron host, preload bridge, and recovery loader remain the installed copy. Backend extensions can implement new local behavior, and advanced agent calls accept provider-specific options. Changes to Electron/native binaries or installer signing need a packaged release.
 
 The existing select controls remain unchanged so you can test customization yourself. For example, ask “/life replace Life’s model dropdown with a shadcn Select.” The agent can add actual React component source and required npm dependencies through the live source workflow. Tailwind v4 styles also compile when the proposal includes `tailwindcss`, `@tailwindcss/postcss`, `postcss`, and the stylesheet directives. Changing styles alone does not install the requested component library.
+
+## Share a customization
+
+Export a source or runtime extension as a portable bundle, or explicitly share one as a **public GitHub Gist**. Review its files, dependencies, and complete code before clicking **Publish publicly**. Publishing uses your GitHub token for that request; Life does not store it or add it to the bundle. Customizations remain local until you choose to publish them.
+
+Bundles contain extension code and dependency metadata, without Life’s saved connections, conversation history, or settings. Code can still contain information you put into it, so inspect the preview before sharing. In **Manage extensions → Import**, enter a public Gist link, choose **Preview public extension**, review it, then choose **Install extension**. Fetching its preview does not execute the extension. See [source customization](docs/source-customization.md) for sharing and layer compatibility.
 
 ## Release signing
 

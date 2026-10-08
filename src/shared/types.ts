@@ -2,6 +2,12 @@ import type { LifeConfigPatch, LifeConfigState } from './customization'
 import type { LifeUpdatesAPI } from './updates'
 import type { LifeExtensionManifest, LifeExtensionsSnapshot } from './extensions'
 import type { PortForwardingState } from './port-forwarding'
+import type { SourceExtensionBundle } from './source-extensions'
+import type {
+  LifePublishedExtension,
+  LifePublicExtensionPreview,
+  LifePublishExtensionInput,
+} from './extension-sharing'
 import type {
   LifeSourceContext,
   LifeSourcePatch,
@@ -153,6 +159,11 @@ export interface RelayAPI {
     get(): Promise<LifeSourceSnapshot>
     getContext(request?: LifeSourceRead): Promise<LifeSourceContext>
     apply(patch: LifeSourcePatch): Promise<LifeSourceSnapshot>
+    setExtensionEnabled(id: string, enabled: boolean): Promise<LifeSourceSnapshot>
+    removeExtension(id: string): Promise<LifeSourceSnapshot>
+    exportExtension(id: string): Promise<SourceExtensionBundle>
+    importExtension(bundle: SourceExtensionBundle): Promise<LifeSourceSnapshot>
+    updateExtension(bundle: SourceExtensionBundle): Promise<LifeSourceSnapshot>
     rollback(): Promise<LifeSourceSnapshot>
     disable(): Promise<LifeSourceSnapshot>
     reload(): Promise<void>
@@ -160,6 +171,11 @@ export interface RelayAPI {
     ready(revision: number): Promise<void>
     reportError(revision: number, message: string): Promise<void>
     onState(callback: (state: LifeSourceSnapshot) => void): () => void
+  }
+  extensionSharing: {
+    publish(input: LifePublishExtensionInput): Promise<LifePublishedExtension>
+    inspectPublic(link: string): Promise<LifePublicExtensionPreview>
+    openPublic(link: string): Promise<void>
   }
   extensions: {
     capabilities: readonly string[]

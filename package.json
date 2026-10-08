@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -32,6 +32,7 @@
     "@radix-ui/react-dialog": "^1.1.15",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "diff": "8.0.2",
     "electron-updater": "^6.8.9",
     "esbuild": "0.25.12",
     "lucide-react": "^0.468.0",

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { assertExtensionJson } from './extensions'
+import type { SourceExtensionSummary } from './source-extensions'
 
 export const lifeSourcePathSchema = z
   .string()
@@ -47,8 +48,8 @@ const fileChangeSchema = z
     'A file change must have either content or edits, but not both',
   )
 
-const dependencyName = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/
-const dependencyVersion = /^(?:\^|~)?\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/i
+export const sourceDependencyName = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/
+export const sourceDependencyVersion = /^(?:\^|~)?\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/i
 
 export const lifeSourcePatchSchema = z
   .object({
@@ -57,10 +58,14 @@ export const lifeSourcePatchSchema = z
     files: z.array(fileChangeSchema).max(100),
     dependencies: z
       .record(
-        z.string().regex(dependencyName, 'Use an npm package name'),
+        z.string().regex(sourceDependencyName, 'Use an npm package name'),
         z
           .string()
-          .regex(dependencyVersion, 'Use an explicit npm semver version, optionally ^ or ~'),
+          .regex(sourceDependencyVersion, 'Use an explicit npm semver version, optionally ^ or ~'),
+      )
+      .refine(
+        (dependencies) => Object.keys(dependencies).length <= 100,
+        'A source proposal can declare up to 100 dependencies',
       )
       .optional(),
   })
@@ -90,6 +95,8 @@ export interface LifeSourceAsset {
 }
 
 export interface LifeSourceSnapshot {
+  /** Ordered, independently managed changes layered over the installed source. */
+  extensions: SourceExtensionSummary[]
   revision: number
   enabled: boolean
   active?: LifeSourceAsset
@@ -103,6 +110,7 @@ export interface LifeSourceSnapshot {
 }
 
 export interface LifeSourceContext {
+  extensions: SourceExtensionSummary[]
   revision: number
   paths: string[]
   files: Array<{ path: string; content: string }>

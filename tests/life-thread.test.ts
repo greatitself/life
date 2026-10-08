@@ -20,12 +20,14 @@ const sourceContext = (): LifeSourceContext => ({
     { path: 'src/renderer/App.tsx', content: 'export function App() { return <main>Life</main> }' },
   ],
   dependencies: { react: '19.3.0' },
+  extensions: [],
   snapshot: {
     revision: 3,
     enabled: true,
     canRollback: true,
     path: '/tmp/life-source',
     recovered: false,
+    extensions: [],
   },
 })
 const sourcePatch = (): LifeSourcePatch => ({

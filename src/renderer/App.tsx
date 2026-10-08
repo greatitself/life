@@ -73,6 +73,7 @@ import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
 import { useSourceCode } from './useSourceCode'
 import { SourceCodeDialog } from './components/SourceCodeDialog'
+import { SidebarThread } from './components/SidebarThread'
 import { readProjects } from './research'
 import { LIFE_VERSION } from '../shared/version'
 import { PortForwardDialog } from './components/PortForwardDialog'
@@ -565,7 +566,7 @@ export function App() {
         changedPaths = response.patch.files.map((file) => file.path)
         message = [
           message,
-          `Updated Life source: ${response.patch.summary}. The compiled interface will reload; your conversation is preserved.`,
+          `Applied source extension: ${response.patch.summary}. Disable, export, or share it in Manage extensions. The compiled interface will reload; your conversation is preserved.`,
         ]
           .filter(Boolean)
           .join('\n\n')
@@ -1135,7 +1136,9 @@ export function App() {
 
   return (
     <div
-      className={`app-shell ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+      className={`app-shell life-desktop-layout ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+      data-panel-size={config.workspacePanelWidth === 320 ? 'adaptive' : 'custom'}
+      data-sidebar-size={config.sidebarWidth === 260 ? 'adaptive' : 'custom'}
     >
       <TitleBar
         theme={config.theme}
@@ -1175,29 +1178,37 @@ export function App() {
         <div className="app-body">
           <aside className="sidebar" aria-label="Projects and threads">
             <div className="brand">
-              <span className="brand-mark">
-                <RelayMark size={24} />
-              </span>
-              <strong>
-                life<span className="brand-period">.</span>
-              </strong>
               <button
                 className="icon-button"
                 title="Toggle sidebar (Ctrl+B)"
                 aria-label="Hide sidebar"
                 onClick={() => setSidebarOpen(false)}
               >
-                <PanelLeft size={16} />
+                <PanelLeft size={17} />
               </button>
+              <span className="brand-mark">
+                <RelayMark size={22} />
+              </span>
+              <strong>Life</strong>
+              <nav className="view-switch" aria-label="Workspace views">
+                <button
+                  aria-label="Map"
+                  title="Research map"
+                  aria-pressed={view === 'research'}
+                  onClick={() => setView('research')}
+                >
+                  <Network size={15} />
+                </button>
+                <button
+                  aria-label="Workspace"
+                  title="Agent workspace"
+                  aria-pressed={view === 'workspace'}
+                  onClick={() => setView('workspace')}
+                >
+                  <MessageSquare size={15} />
+                </button>
+              </nav>
             </div>
-            <nav className="view-switch" aria-label="Workspace views">
-              <button aria-pressed={view === 'research'} onClick={() => setView('research')}>
-                <Network size={14} /> Map
-              </button>
-              <button aria-pressed={view === 'workspace'} onClick={() => setView('workspace')}>
-                <MessageSquare size={14} /> Workspace
-              </button>
-            </nav>
             {enabledExtensions
               .filter((extension) => extension.renderer.placement === 'view')
               .map((extension) => (
@@ -1213,16 +1224,25 @@ export function App() {
                   <span>{extension.name}</span>
                 </button>
               ))}
-            <button className="new-thread-button" onClick={newThread}>
-              <Plus size={17} /> New thread <kbd>{shortcutModifier} N</kbd>
-            </button>
-            <button className="sidebar-search" onClick={() => setSearchOpen(true)}>
-              <Search size={15} />
-              <span>Search threads</span>
-              <kbd>{shortcutModifier} K</kbd>
-            </button>
+            <div className="sidebar-search-row">
+              <button className="sidebar-search" onClick={() => setSearchOpen(true)}>
+                <Search size={16} />
+                <span>Search threads</span>
+                <kbd>{shortcutModifier} K</kbd>
+              </button>
+              <button
+                className="new-thread-button"
+                aria-label="New thread"
+                title={`New thread (${shortcutModifier}+N)`}
+                onClick={newThread}
+              >
+                <Plus size={17} /> <span>New thread</span> <kbd>{shortcutModifier} N</kbd>
+              </button>
+            </div>
             <div className="sidebar-section-title">
-              <span>WORKSPACES</span>
+              <span>
+                <Folder size={16} /> All projects
+              </span>
               <button
                 className="icon-button"
                 aria-label="Add workspace"
@@ -1232,103 +1252,67 @@ export function App() {
               </button>
             </div>
             <div className="project-list">
-              {profiles.length ? (
-                profiles.map((profile) => (
-                  <div className="project-group" key={profile.id}>
-                    <button
-                      className="project-heading"
-                      onClick={() => {
-                        if (connection.profile?.id !== profile.id || !connected) {
-                          setRequestedProfileId(profile.id)
-                          setConnectOpen(true)
-                        } else newThread()
-                      }}
-                    >
-                      <ChevronDown size={13} />
-                      <Folder size={16} />
-                      <span>{profile.name}</span>
-                      {connection.profile?.id === profile.id && connected ? (
-                        <span className="status-dot online" />
-                      ) : (
-                        <Server size={12} className="muted" />
-                      )}
-                    </button>
-                    {threads
-                      .filter((t) => t.profileId === profile.id)
-                      .map((t) => (
-                        <button
-                          className={`thread-row ${activeId === t.id ? 'active' : ''}`}
-                          key={t.id}
-                          onClick={() => selectThread(t)}
-                        >
-                          <ProviderIcon provider={t.provider} size={13} />
-                          <span>{t.title}</span>
-                          {t.busy ? <span className="status-dot working" /> : null}
-                        </button>
-                      ))}
-                    {!threads.some((t) => t.profileId === profile.id) ? (
-                      <div className="project-no-threads">Your next idea starts here.</div>
-                    ) : null}
-                  </div>
-                ))
-              ) : (
-                <>
-                  <button className="empty-project" onClick={() => setConnectOpen(true)}>
-                    <span className="empty-project-icon">
-                      <Folder size={17} />
-                      <Plus size={9} />
-                    </span>
-                    <span>
-                      Add your first workspace<small>Connect a remote project</small>
-                    </span>
-                    <ChevronRight size={14} />
-                  </button>
-                  <div className="sidebar-empty">
-                    <div className="thread-skeleton">
-                      <MessageSquare size={13} />
-                      <span />
-                    </div>
-                    <div className="thread-skeleton">
-                      <MessageSquare size={13} />
-                      <span />
-                    </div>
-                    <div className="thread-skeleton">
-                      <MessageSquare size={13} />
-                      <span />
-                    </div>
-                    <p>
-                      A place for every project.
-                      <br />A thread for every idea.
-                    </p>
-                  </div>
-                </>
-              )}
-              {threads.filter((t) => !profiles.some((p) => p.id === t.profileId)).length ? (
-                <div className="orphaned-threads">
-                  <span className="eyebrow">Previous threads</span>
-                  {threads
-                    .filter((t) => !profiles.some((p) => p.id === t.profileId))
-                    .map((t) => (
-                      <button
-                        className={`thread-row ${activeId === t.id ? 'active' : ''}`}
-                        key={t.id}
-                        onClick={() => selectThread(t)}
-                      >
-                        <ProviderIcon provider={t.provider} size={13} />
-                        <span>{t.title}</span>
-                      </button>
-                    ))}
-                </div>
+              {!profiles.length ? (
+                <button className="empty-project" onClick={() => setConnectOpen(true)}>
+                  <span className="empty-project-icon">
+                    <Folder size={17} />
+                    <Plus size={9} />
+                  </span>
+                  <span>
+                    Add your first workspace<small>Connect a remote project</small>
+                  </span>
+                  <ChevronRight size={14} />
+                </button>
               ) : null}
+              {[...threads]
+                .sort((a, b) => b.updatedAt - a.updatedAt)
+                .map((thread) => (
+                  <SidebarThread
+                    key={thread.id}
+                    thread={thread}
+                    projectName={
+                      thread.workspace?.split('/').filter(Boolean).pop() ||
+                      profiles.find((profile) => profile.id === thread.profileId)?.name ||
+                      'Previous project'
+                    }
+                    active={activeId === thread.id}
+                    onSelect={() => selectThread(thread)}
+                  />
+                ))}
+              {profiles
+                .filter((profile) => !threads.some((thread) => thread.profileId === profile.id))
+                .map((profile) => (
+                  <button
+                    className="project-heading"
+                    key={profile.id}
+                    onClick={() => {
+                      if (connection.profile?.id !== profile.id || !connected) {
+                        setRequestedProfileId(profile.id)
+                        setConnectOpen(true)
+                      } else newThread()
+                    }}
+                  >
+                    <Folder size={16} />
+                    <span>{profile.name}</span>
+                    {connection.profile?.id === profile.id && connected ? (
+                      <span className="status-dot online" />
+                    ) : (
+                      <Server size={12} className="muted" />
+                    )}
+                  </button>
+                ))}
             </div>
             <div className="sidebar-bottom">
               <button
                 className={`machine-card ${connected ? 'connected' : ''}`}
+                title={
+                  connected
+                    ? `${connection.profile?.username}@${connection.profile?.host}`
+                    : 'Connect over SSH'
+                }
                 onClick={() => setConnectOpen(true)}
               >
-                <span className="machine-icon">
-                  <Server size={17} />
-                </span>
+                <span className={`status-dot ${connected ? 'online' : ''}`} />
                 <span>
                   <strong>{connected ? connection.profile?.name : 'Connect a machine'}</strong>
                   <small>
@@ -1338,66 +1322,78 @@ export function App() {
                   </small>
                 </span>
                 {connection.status === 'connecting' ? (
-                  <LoaderCircle size={15} className="spinning" />
-                ) : connected ? (
-                  <span className="status-dot online" />
+                  <LoaderCircle size={14} className="spinning" />
                 ) : (
-                  <ArrowUpRight size={15} />
+                  <ChevronRight size={14} />
                 )}
               </button>
-              <button className="extension-sidebar-entry" onClick={() => setExtensionsOpen(true)}>
-                <Code2 size={14} />
-                <span>Live extensions</span>
-                <small>{extensions.extensions.length}</small>
-              </button>
-              <button className="extension-sidebar-entry" onClick={() => setPortsOpen(true)}>
-                <Network size={14} />
-                <span>Ports</span>
-                <small>{config.autoPortForward ? 'Auto' : 'Off'}</small>
-              </button>
-              <button className="extension-sidebar-entry" onClick={() => setSourceCodeOpen(true)}>
-                <Code2 size={14} />
-                <span>Source code</span>
-                <small>{sourceUI.enabled ? 'Edited' : 'Built-in'}</small>
-              </button>
-              <div className="sidebar-bottom-actions">
-                <button onClick={() => setConnectOpen(true)}>
-                  <Server size={15} /> Connections
-                </button>
+              <div className="sidebar-tool-row" aria-label="Life tools">
                 <button
                   className="icon-button"
                   aria-label="Settings"
                   title="Settings"
                   onClick={() => setCustomizeOpen(true)}
                 >
-                  <Settings2 size={15} />
+                  <Settings2 size={16} />
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label="Connections"
+                  title="SSH connections"
+                  onClick={() => setConnectOpen(true)}
+                >
+                  <Server size={16} />
+                </button>
+                <button
+                  className="icon-button extension-sidebar-entry"
+                  aria-label="Live extensions"
+                  title={`Live extensions (${extensions.extensions.length + (sourceUI.extensions?.length || 0)})`}
+                  onClick={() => setExtensionsOpen(true)}
+                >
+                  <Code2 size={16} />
+                  {extensions.extensions.length + (sourceUI.extensions?.length || 0) ? (
+                    <i className="tool-notification-dot" />
+                  ) : null}
+                </button>
+                <button
+                  className="icon-button extension-sidebar-entry"
+                  aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
+                  title={`Port forwarding: ${config.autoPortForward ? 'automatic' : 'off'}`}
+                  onClick={() => setPortsOpen(true)}
+                >
+                  <Network size={16} />
+                </button>
+                <button
+                  className="icon-button extension-sidebar-entry"
+                  aria-label={`Source code ${sourceUI.enabled ? 'Edited' : 'Built-in'}`}
+                  title="Source code"
+                  onClick={() => setSourceCodeOpen(true)}
+                >
+                  <Folder size={16} />
+                </button>
+                <button
+                  className="icon-button update-life-button"
+                  aria-label="Updates"
+                  title={
+                    updateState.status === 'available' || updateState.status === 'downloaded'
+                      ? `Life ${updateState.version} available`
+                      : `Life ${LIFE_VERSION} updates`
+                  }
+                  onClick={() => setUpdatesOpen(true)}
+                >
+                  <ArrowDown size={16} />
+                  {updateState.status === 'available' || updateState.status === 'downloaded' ? (
+                    <i className="tool-notification-dot" />
+                  ) : null}
                 </button>
                 <button
                   className="icon-button"
                   aria-label="Help and keyboard shortcuts"
+                  title="Help and keyboard shortcuts"
                   onClick={() => setHelpOpen(true)}
                 >
                   <CircleHelp size={16} />
                 </button>
-              </div>
-              <button className="update-life-button" onClick={() => setUpdatesOpen(true)}>
-                <ArrowDown size={13} />
-                <span>
-                  {updateState.status === 'available' || updateState.status === 'downloaded'
-                    ? `Life ${updateState.version} available`
-                    : 'Updates'}
-                </span>
-                {updateState.status === 'available' || updateState.status === 'downloaded' ? (
-                  <span className="status-dot online" />
-                ) : (
-                  <span>v{LIFE_VERSION}</span>
-                )}
-              </button>
-              <div className="sidebar-credit">
-                <span className="tiny-logo">
-                  <RelayMark size={12} />
-                </span>{' '}
-                Your agents. Your machines.
               </div>
             </div>
           </aside>
@@ -1489,9 +1485,22 @@ export function App() {
                       <PanelLeft size={17} />
                     </button>
                   ) : null}
-                  <Folder size={15} />
-                  <span>{titleProfile?.name || config.labels.workspaceTitle}</span>
-                  <ChevronRight size={13} />
+                  {active ? (
+                    <ProviderIcon provider={active.provider} size={16} />
+                  ) : (
+                    <Folder size={15} />
+                  )}
+                  <span title={active?.workspace || connection.workspace}>
+                    {(active?.workspace || connection.workspace)
+                      ?.split('/')
+                      .filter(Boolean)
+                      .pop() ||
+                      titleProfile?.name ||
+                      config.labels.workspaceTitle}
+                  </span>
+                  <span className="breadcrumb-separator" aria-hidden="true">
+                    /
+                  </span>
                   <strong>{active?.title || 'New thread'}</strong>
                 </div>
                 <div className="header-actions">
@@ -1641,12 +1650,9 @@ export function App() {
                   }}
                 >
                   {!active ? (
-                    <div className="welcome">
-                      <div className="welcome-emblem">
-                        <RelayMark size={29} />
-                      </div>
-                      <div className="welcome-eyebrow">
-                        <span /> YOUR RESEARCH, CONNECTED
+                    <div className="welcome workspace-start">
+                      <div className="workspace-start-label">
+                        <MessageSquare size={17} /> New thread
                       </div>
                       <h1>{config.labels.welcomeTitle}</h1>
                       <p>{config.labels.welcomeSubtitle}</p>
@@ -1676,12 +1682,7 @@ export function App() {
                           </button>
                         ))}
                       </div>
-                      <div className="welcome-divider">
-                        <span />
-                        <span>A little inspiration to get started</span>
-                        <span />
-                      </div>
-                      <div className="starter-grid">
+                      <div className="starter-grid" aria-label="Suggested prompts">
                         {starterPrompts.map((item) => (
                           <button
                             className="starter-card"
@@ -1789,7 +1790,7 @@ export function App() {
                         lifeIntent
                           ? 'Describe a Life change, or /project to return to your code…'
                           : projectReady
-                            ? 'What are we building?'
+                            ? 'Ask for changes, explore ideas, or send a follow-up…'
                             : connected
                               ? 'Choose a project, or /life switch to light for local settings…'
                               : 'Connect a machine, or /life switch to light for local settings…'
@@ -1994,7 +1995,7 @@ export function App() {
                       )}
                     </div>
                   </div>
-                  <div className="composer-caption">
+                  <div className="composer-caption composer-worktree-strip">
                     <span>
                       <span className={`status-dot ${connected ? 'online' : ''}`} />
                       {lifeIntent ? (
@@ -2022,17 +2023,50 @@ export function App() {
                           )}
                         </>
                       ) : (
-                        <span>
-                          {projectReady
-                            ? connection.workspace
-                            : connected
-                              ? 'Choose a remote project'
-                              : 'Remote agents'}{' '}
-                          · /life changes this app
-                        </span>
+                        <button
+                          className="composer-project-control"
+                          aria-label="Choose workspace project"
+                          title={connection.workspace || 'Choose a project after connecting'}
+                          onClick={() => {
+                            if (connected) {
+                              setSuggestedProject(undefined)
+                              setProjectOpen(true)
+                            } else setConnectOpen(true)
+                          }}
+                        >
+                          <Folder size={13} />
+                          <span>
+                            {projectReady
+                              ? connection.workspace
+                                  ?.split('/')
+                                  .filter(Boolean)
+                                  .slice(-2)
+                                  .join('/') || '/'
+                              : connected
+                                ? 'Choose a project'
+                                : 'Connect a machine'}
+                          </span>
+                          <ChevronDown size={11} />
+                        </button>
                       )}
                     </span>
-                    <span>
+                    <span
+                      className="composer-machine-status"
+                      title={
+                        connected
+                          ? `${connection.profile?.username}@${connection.profile?.host}`
+                          : undefined
+                      }
+                    >
+                      {connected ? (
+                        <>
+                          <Server size={12} /> {connection.profile?.host}
+                        </>
+                      ) : (
+                        '/life changes Life'
+                      )}
+                    </span>
+                    <span className="composer-keyboard-hint">
                       <kbd>↵</kbd> Send <span className="caption-dot">·</span> <kbd>⇧ ↵</kbd> New
                       line
                     </span>

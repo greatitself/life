@@ -39,6 +39,12 @@ const api: RelayAPI = {
     get: () => ipcRenderer.invoke('source-code:get'),
     getContext: (request) => ipcRenderer.invoke('source-code:context', request),
     apply: (patch) => ipcRenderer.invoke('source-code:apply', patch),
+    setExtensionEnabled: (id, enabled) =>
+      ipcRenderer.invoke('source-code:set-extension-enabled', id, enabled),
+    removeExtension: (id) => ipcRenderer.invoke('source-code:remove-extension', id),
+    exportExtension: (id) => ipcRenderer.invoke('source-code:export-extension', id),
+    importExtension: (bundle) => ipcRenderer.invoke('source-code:import-extension', bundle),
+    updateExtension: (bundle) => ipcRenderer.invoke('source-code:update-extension', bundle),
     rollback: () => ipcRenderer.invoke('source-code:rollback'),
     disable: () => ipcRenderer.invoke('source-code:disable'),
     reload: () => ipcRenderer.invoke('source-code:reload'),
@@ -46,6 +52,11 @@ const api: RelayAPI = {
     ready: (revision) => ipcRenderer.invoke('source-code:ready', revision),
     reportError: (revision, message) => ipcRenderer.invoke('source-code:error', revision, message),
     onState: (callback) => subscribe('source-code:state', callback),
+  },
+  extensionSharing: {
+    publish: (input) => ipcRenderer.invoke('extension-sharing:publish', input),
+    inspectPublic: (link) => ipcRenderer.invoke('extension-sharing:inspect-public', link),
+    openPublic: (link) => ipcRenderer.invoke('extension-sharing:open-public', link),
   },
   customization: {
     get: () => ipcRenderer.invoke('customization:get'),

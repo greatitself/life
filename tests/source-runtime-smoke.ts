@@ -89,6 +89,9 @@ export function RuntimeProof() {
       ],
     })
     assert.equal(active.enabled, true)
+    assert.equal(active.extensions.length, 1, 'The source change was not installed as an extension')
+    const portable = await store.exportExtension(active.extensions[0].id)
+    assert.equal(portable.format, 'life-source-extension')
     assert(active.active?.css, 'The committed generation has no CSS asset')
     const jsPath = store.assetPath(active.active.js)
     const cssPath = store.assetPath(active.active.css)
@@ -134,6 +137,7 @@ export function RuntimeProof() {
     )
     assert.equal(store.get().active?.js, beforeInvalid.active?.js)
     assert.equal(store.get().revision, beforeInvalid.revision)
+    assert.equal(store.get().extensions.length, 1, 'A failed build saved a broken extension')
     assert.equal(await readFile(jsPath, 'utf8'), js)
     checks.push(
       'A failed compilation retained the previous active revision and its immutable assets',
@@ -153,6 +157,28 @@ export function RuntimeProof() {
     assert.equal(rolledBack.enabled, false)
     assert.equal(rolledBack.active, undefined)
     checks.push('Rollback restored the built-in application')
+    const imported = await store.importExtension(portable)
+    assert.equal(imported.enabled, true)
+    assert.equal(imported.extensions[0].id, portable.id)
+    checks.push(
+      'An exported source extension installed independently from the built-in application',
+    )
+    const disabled = await store.setExtensionEnabled(portable.id, false)
+    assert.equal(disabled.enabled, false)
+    assert.equal(disabled.extensions[0].enabled, false)
+    const reenabled = await store.setExtensionEnabled(portable.id, true)
+    assert.equal(reenabled.enabled, true)
+    assert.equal(reenabled.extensions[0].enabled, true)
+    checks.push('Per-extension disable and enable recomposed the packaged interface')
+    const removed = await store.removeExtension(portable.id)
+    assert.equal(removed.enabled, false)
+    assert.equal(removed.extensions.length, 0)
+    await store.close()
+    store = new SourceCodeStore(options)
+    const afterRemoval = await store.init()
+    assert.equal(afterRemoval.enabled, false)
+    assert.equal(afterRemoval.extensions.length, 0)
+    checks.push('Extension removal restored the built-in interface and persisted across restart')
   } finally {
     await store.close()
     await rm(directory, { recursive: true, force: true })

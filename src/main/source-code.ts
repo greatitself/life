@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import {
   copyFile,
@@ -17,6 +17,14 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { Worker } from 'node:worker_threads'
+import { applyPatch, createTwoFilesPatch, diffChars } from 'diff'
+import {
+  parseSourceExtensionBundle,
+  sourceExtensionBundleSchema,
+  type SourceExtensionBundle,
+  type SourceExtensionFile,
+  type SourceExtensionSummary,
+} from '../shared/source-extensions'
 import {
   lifeSourcePathSchema,
   parseLifeSourcePatch,
@@ -58,9 +66,97 @@ const metadataSchema = z
     dependencies: z.record(z.string(), z.string()),
     baseFingerprint: z.string(),
     baseHashes: z.record(z.string(), z.string()).default({}),
+    extensions: z
+      .array(z.object({ bundle: sourceExtensionBundleSchema, enabled: z.boolean() }).strict())
+      .max(200)
+      .optional(),
   })
   .strict()
 type Metadata = z.infer<typeof metadataSchema>
+type SourceLayer = NonNullable<Metadata['extensions']>[number]
+interface TextEdit {
+  start: number
+  end: number
+  replacement: string
+}
+
+function textEdits(before: string, after: string): TextEdit[] {
+  const changes = diffChars(before, after, { timeout: 2000 })
+  if (!changes)
+    throw new Error(
+      'This source change is too large to merge safely. Split it into smaller extensions.',
+    )
+  const edits: TextEdit[] = []
+  let position = 0
+  let current: TextEdit | undefined
+  for (const change of changes) {
+    if (change.added || change.removed) {
+      current ||= { start: position, end: position, replacement: '' }
+      if (change.removed) {
+        position += change.value.length
+        current.end = position
+      } else current.replacement += change.value
+    } else {
+      if (current) {
+        edits.push(current)
+        current = undefined
+      }
+      position += change.value.length
+    }
+  }
+  if (current) edits.push(current)
+  return edits
+}
+
+/** Merge both edits against their shared preimage, rather than replacing the whole file. */
+function mergeSource(
+  before: string,
+  after: string,
+  current: string,
+  path: string,
+  name: string,
+): string {
+  if (current === before || current === after) return after
+  const existing = textEdits(before, current)
+  const proposed = textEdits(before, after)
+  const combined = [...existing]
+  for (const edit of proposed) {
+    let duplicate = false
+    for (const other of existing) {
+      if (
+        edit.start === other.start &&
+        edit.end === other.end &&
+        edit.replacement === other.replacement
+      ) {
+        duplicate = true
+        break
+      }
+      const inserted = edit.start === edit.end
+      const otherInserted = other.start === other.end
+      const overlap =
+        inserted && otherInserted
+          ? edit.start === other.start
+          : inserted
+            ? edit.start > other.start && edit.start < other.end
+            : otherInserted
+              ? other.start > edit.start && other.start < edit.end
+              : Math.max(edit.start, other.start) < Math.min(edit.end, other.end)
+      if (overlap)
+        throw new Error(
+          `Source extension “${name}” conflicts in ${path}. Another extension or the installed app changed the same code. Keep the working interface, then ask /life to adapt this extension.`,
+        )
+    }
+    if (!duplicate) combined.push(edit)
+  }
+  combined.sort((left, right) => left.start - right.start || left.end - right.end)
+  let result = ''
+  let position = 0
+  for (const edit of combined) {
+    result += before.slice(position, edit.start) + edit.replacement
+    position = edit.end
+  }
+  return result + before.slice(position)
+}
 
 const explain = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const contained = (root: string, file: string) => {
@@ -162,6 +258,14 @@ export class SourceCodeStore {
     if (this.state.current !== null) {
       try {
         this.metadata = await this.readMetadata(this.state.current)
+        if (!this.metadata.extensions) {
+          this.metadata = await this.migrateLegacy(this.state.current, this.metadata)
+          await writeFile(
+            join(this.generation(this.state.current), 'metadata.json'),
+            JSON.stringify(this.metadata),
+            'utf8',
+          )
+        }
         await stat(join(this.generation(this.state.current), 'dist', 'entry.js'))
         if (this.metadata.baseFingerprint !== this.baselineFingerprint) {
           this.state = {
@@ -201,6 +305,7 @@ export class SourceCodeStore {
 
   get(): LifeSourceSnapshot {
     return {
+      extensions: this.extensionSummaries(),
       revision: this.state.revision,
       enabled: this.state.enabled,
       ...(this.state.enabled && this.state.current !== null
@@ -268,6 +373,7 @@ export class SourceCodeStore {
       }
     }
     return {
+      extensions: snapshot.extensions,
       revision,
       paths,
       files,
@@ -281,127 +387,497 @@ export class SourceCodeStore {
     const patch = parseLifeSourcePatch(value)
     const epoch = this.operationEpoch
     return this.queue(async () => {
-      if (epoch !== this.operationEpoch)
-        throw new Error('Life source application was cancelled by recovery.')
+      this.checkEpoch(epoch)
       if (patch.baseRevision !== this.state.revision)
         throw new Error(
           `Life source changed since the proposal was written (proposal revision ${patch.baseRevision}, current revision ${this.state.revision}). Read the current source and regenerate the patch.`,
         )
-      const nextRevision = this.state.revision + 1
-      const controller = new AbortController()
-      this.activeController = controller
-      const signal = controller.signal
-      const staging = join(
-        this.path,
-        'revisions',
-        `.staging-${nextRevision}-${createHash('sha256')
-          .update(String(Date.now()) + String(Math.random()))
-          .digest('hex')
-          .slice(0, 12)}`,
+      const layers = this.cloneLayers()
+      const current = await this.readEditable(
+        this.state.current === null ? this.options.sourceDir : this.generation(this.state.current),
       )
-      try {
-        const currentSource =
-          this.state.current === null ? this.options.sourceDir : this.generation(this.state.current)
-        await mkdir(staging, { recursive: true })
-        const currentPaths = (await this.listSource(currentSource)).filter(
-          (path) => path.startsWith('src/renderer/') || path.startsWith('src/shared/'),
+      const desired = new Map(current)
+      const adaptations = new Map<string, string | undefined>()
+      for (const change of patch.files) {
+        this.assertExactPath(desired, change.path)
+        const content = this.proposedContent(desired.get(change.path), change)
+        if (content === undefined) desired.delete(change.path)
+        else desired.set(change.path, content)
+        if (change.content !== undefined) adaptations.set(change.path, content)
+      }
+      // Startup repair updates the failed layer in place. It never leaves an additional
+      // broken layer underneath the repaired extension.
+      const failedIndex =
+        this.state.current !== null && this.state.failed.includes(this.state.current)
+          ? layers.findLastIndex((layer) => layer.enabled)
+          : -1
+      let bundle: SourceExtensionBundle | undefined
+      if (failedIndex !== -1) {
+        const prefix = await this.composeLayers(
+          layers.slice(0, failedIndex),
+          Boolean(this.get().baseChanged),
+          adaptations,
         )
-        for (const path of currentPaths) {
-          signal.throwIfAborted()
-          if (!path.startsWith('src/renderer/') && !path.startsWith('src/shared/')) continue
-          const target = join(staging, path)
-          let original = join(currentSource, path)
-          if (
-            this.metadata?.baseFingerprint !== this.baselineFingerprint &&
-            this.metadata?.baseHashes[path]
-          ) {
-            const currentHash = this.hash(await readFile(original))
-            if (currentHash === this.metadata.baseHashes[path]) {
-              if (!this.baselineHashes[path]) continue
-              original = join(this.options.sourceDir, path)
-            }
+        const previous = layers[failedIndex].bundle
+        const affected = new Set([
+          ...previous.files.map((file) => file.path),
+          ...patch.files.map((file) => file.path),
+        ])
+        const files = this.extensionFiles(prefix.files, desired, affected)
+        const dependencies = { ...previous.dependencies, ...patch.dependencies }
+        if (files.length || Object.keys(dependencies).length) {
+          bundle = {
+            ...previous,
+            name: patch.summary.slice(0, 120),
+            description: patch.summary,
+            updatedAt: new Date().toISOString(),
+            files,
+            dependencies,
           }
-          await mkdir(dirname(target), { recursive: true })
-          await copyFile(original, target)
-        }
-        if (this.metadata && this.metadata.baseFingerprint !== this.baselineFingerprint) {
-          for (const path of Object.keys(this.baselineHashes)) {
-            if (currentPaths.includes(path) || this.metadata.baseHashes[path]) continue
-            const target = join(staging, path)
-            await mkdir(dirname(target), { recursive: true })
-            await copyFile(join(this.options.sourceDir, path), target)
-          }
-        }
-        // Shared version metadata imports ../../package.json. The installed manifest is
-        // copied as read-only build input, so an override cannot rewrite app identity.
-        if (existsSync(join(this.options.sourceDir, 'package.json')))
-          await copyFile(
-            join(this.options.sourceDir, 'package.json'),
-            join(staging, 'package.json'),
-          )
-        const stagedPaths = new Map(
-          (await this.listSource(staging)).map((path) => [path.toLowerCase(), path]),
+          layers[failedIndex] = { bundle, enabled: true }
+        } else layers.splice(failedIndex, 1)
+      } else {
+        const files = this.extensionFiles(
+          current,
+          desired,
+          new Set(patch.files.map((file) => file.path)),
         )
-        for (const change of patch.files) {
-          const existing = stagedPaths.get(change.path.toLowerCase())
-          if (existing && existing !== change.path)
-            throw new Error(
-              `Source path ${change.path} aliases the existing ${existing} on Windows. Use the exact path from Life’s source index.`,
-            )
-          await this.changeFile(staging, change)
+        if (files.length || Object.keys(patch.dependencies || {}).length) {
+          bundle = this.newBundle(patch.summary, files, patch.dependencies || {})
+          layers.push({ bundle, enabled: true })
         }
-        signal.throwIfAborted()
-        const dependencies = { ...this.metadata?.dependencies, ...patch.dependencies }
-        const packageModules = await this.installDependencies(dependencies, signal)
-        signal.throwIfAborted()
-        await this.compile(staging, packageModules, dependencies, signal)
-        signal.throwIfAborted()
-        const metadata: Metadata = {
-          summary: patch.summary,
-          dependencies,
-          baseFingerprint: this.baselineFingerprint,
-          baseHashes: { ...this.baselineHashes },
-        }
-        await writeFile(join(staging, 'metadata.json'), JSON.stringify(metadata), 'utf8')
-        signal.throwIfAborted()
-        const destination = this.generation(nextRevision)
-        if (existsSync(destination))
-          throw new Error(
-            `A source generation already exists for revision ${nextRevision}; recover Life’s source state before applying again.`,
-          )
-        await rename(staging, destination)
-        const next: SavedState = {
-          format: 1,
-          revision: nextRevision,
-          current: nextRevision,
-          history:
-            this.state.current !== null && this.state.failed.includes(this.state.current)
-              ? [...this.state.history]
-              : [...this.state.history, this.state.current].slice(-5),
-          enabled: true,
-          failed: [...this.state.failed],
-        }
-        try {
-          signal.throwIfAborted()
-          await this.writeState(next)
-        } catch (error) {
-          await rm(destination, { recursive: true, force: true })
-          throw error
-        }
-        this.state = next
-        this.metadata = metadata
-        this.recovered = false
-        this.emit()
+      }
+      if (layers.length > 200)
+        throw new Error(
+          'Life supports up to 200 source extensions. Remove unused extensions before adding more.',
+        )
+      return this.commitLayers(
+        layers,
+        patch.summary,
+        epoch,
+        Boolean(this.get().baseChanged),
+        adaptations,
+      )
+    })
+  }
+
+  async setExtensionEnabled(id: string, enabled: boolean): Promise<LifeSourceSnapshot> {
+    const epoch = this.operationEpoch
+    return this.queue(async () => {
+      this.checkEpoch(epoch)
+      const layers = this.cloneLayers()
+      const layer = layers.find((entry) => entry.bundle.id === id)
+      if (!layer) throw new Error(`Source extension does not exist: ${id}`)
+      if (layer.enabled === enabled && this.state.enabled === layers.some((entry) => entry.enabled))
         return this.get()
-      } catch (error) {
-        await rm(staging, { recursive: true, force: true }).catch(() => {})
-        this.state.error = explain(error)
-        this.emit()
-        throw new Error(explain(error))
-      } finally {
-        if (this.activeController === controller) this.activeController = undefined
+      layer.enabled = enabled
+      return this.commitLayers(
+        layers,
+        `${enabled ? 'Enable' : 'Disable'} ${layer.bundle.name}`,
+        epoch,
+      )
+    })
+  }
+
+  async removeExtension(id: string): Promise<LifeSourceSnapshot> {
+    const epoch = this.operationEpoch
+    return this.queue(async () => {
+      this.checkEpoch(epoch)
+      const layers = this.cloneLayers()
+      const index = layers.findIndex((entry) => entry.bundle.id === id)
+      if (index === -1) throw new Error(`Source extension does not exist: ${id}`)
+      const [removed] = layers.splice(index, 1)
+      return this.commitLayers(layers, `Remove ${removed.bundle.name}`, epoch)
+    })
+  }
+
+  async exportExtension(id: string): Promise<SourceExtensionBundle> {
+    await this.operations
+    const layer = this.metadata?.extensions?.find((entry) => entry.bundle.id === id)
+    if (!layer) throw new Error(`Source extension does not exist: ${id}`)
+    // Export only portable code and dependency declarations, never paths, build caches,
+    // machine profiles, SSH keys, messages, or account credentials.
+    return parseSourceExtensionBundle(JSON.parse(JSON.stringify(layer.bundle)))
+  }
+
+  async importExtension(value: unknown): Promise<LifeSourceSnapshot> {
+    const bundle = parseSourceExtensionBundle(value)
+    this.verifyBundle(bundle)
+    const epoch = this.operationEpoch
+    return this.queue(async () => {
+      this.checkEpoch(epoch)
+      const layers = this.cloneLayers()
+      if (layers.some((entry) => entry.bundle.id === bundle.id))
+        throw new Error(
+          `Source extension “${bundle.name}” is already installed. Remove it before importing another copy.`,
+        )
+      if (layers.length >= 200)
+        throw new Error(
+          'Life supports up to 200 source extensions. Remove unused extensions before adding more.',
+        )
+      layers.push({ bundle, enabled: true })
+      return this.commitLayers(layers, `Install ${bundle.name}`, epoch)
+    })
+  }
+
+  async updateExtension(value: unknown): Promise<LifeSourceSnapshot> {
+    const bundle = parseSourceExtensionBundle(value)
+    bundle.files = bundle.files.map((file) => {
+      if (file.kind === 'create') return file
+      if (file.kind === 'delete') return { ...file, baseHash: this.hash(file.preimage) }
+      return {
+        ...file,
+        baseHash: this.hash(file.preimage),
+        patch: createTwoFilesPatch(
+          file.path,
+          file.path,
+          file.preimage,
+          file.content,
+          undefined,
+          undefined,
+          { context: 3 },
+        ),
       }
     })
+    parseSourceExtensionBundle(bundle)
+    this.verifyBundle(bundle)
+    const epoch = this.operationEpoch
+    return this.queue(async () => {
+      this.checkEpoch(epoch)
+      const layers = this.cloneLayers()
+      const layer = layers.find((entry) => entry.bundle.id === bundle.id)
+      if (!layer) throw new Error(`Source extension does not exist: ${bundle.id}`)
+      layer.bundle = {
+        ...bundle,
+        createdAt: layer.bundle.createdAt,
+        updatedAt: new Date().toISOString(),
+      }
+      return this.commitLayers(layers, `Update ${bundle.name}`, epoch)
+    })
+  }
+
+  private checkEpoch(epoch: number) {
+    if (epoch !== this.operationEpoch)
+      throw new Error('Life source application was cancelled by recovery.')
+  }
+
+  private cloneLayers(): SourceLayer[] {
+    return JSON.parse(JSON.stringify(this.metadata?.extensions || [])) as SourceLayer[]
+  }
+
+  private extensionSummaries(): SourceExtensionSummary[] {
+    const layers = this.metadata?.extensions || []
+    const failedIndex =
+      this.state.current !== null && this.state.failed.includes(this.state.current)
+        ? layers.findLastIndex((layer) => layer.enabled)
+        : -1
+    return layers.map((layer, index) => ({
+      id: layer.bundle.id,
+      name: layer.bundle.name,
+      description: layer.bundle.description,
+      version: layer.bundle.version,
+      enabled: layer.enabled,
+      files: layer.bundle.files.map((file) => file.path),
+      dependencies: { ...layer.bundle.dependencies },
+      createdAt: layer.bundle.createdAt,
+      updatedAt: layer.bundle.updatedAt,
+      ...(index === failedIndex && this.state.error ? { error: this.state.error } : {}),
+    }))
+  }
+
+  private async readEditable(root: string): Promise<Map<string, string>> {
+    const files = new Map<string, string>()
+    for (const path of await this.listSource(root)) {
+      if (!path.startsWith('src/renderer/') && !path.startsWith('src/shared/')) continue
+      files.set(path, await readFile(join(root, path), 'utf8'))
+    }
+    return files
+  }
+
+  private assertExactPath(files: Map<string, string>, path: string) {
+    const existing = [...files.keys()].find((entry) => entry.toLowerCase() === path.toLowerCase())
+    if (existing && existing !== path)
+      throw new Error(
+        `Source path ${path} aliases the existing ${existing} on Windows. Use the exact path from Life’s source index.`,
+      )
+  }
+
+  private proposedContent(
+    current: string | undefined,
+    change: LifeSourcePatch['files'][number],
+  ): string | undefined {
+    if (change.content === null) return undefined
+    if (change.content !== undefined) return change.content
+    if (current === undefined)
+      throw new Error(
+        `Cannot edit ${change.path}: the file does not exist. Read the current file or provide content to create it.`,
+      )
+    let content = current
+    for (const edit of change.edits || []) {
+      const first = content.indexOf(edit.find)
+      if (first === -1)
+        throw new Error(
+          `Source edit did not match ${change.path}. Read its current content and use an exact find string.`,
+        )
+      if (content.indexOf(edit.find, first + 1) !== -1)
+        throw new Error(
+          `Source edit is ambiguous in ${change.path}. The find string must match exactly once.`,
+        )
+      content = content.slice(0, first) + edit.replace + content.slice(first + edit.find.length)
+    }
+    return content
+  }
+
+  private extensionFiles(
+    before: Map<string, string>,
+    after: Map<string, string>,
+    paths: Set<string>,
+  ): SourceExtensionFile[] {
+    const changes: SourceExtensionFile[] = []
+    for (const path of [...paths].sort()) {
+      const original = before.get(path)
+      const content = after.get(path)
+      if (original === content) continue
+      if (original === undefined && content !== undefined)
+        changes.push({ path, kind: 'create', content })
+      else if (content === undefined && original !== undefined)
+        changes.push({ path, kind: 'delete', preimage: original, baseHash: this.hash(original) })
+      else
+        changes.push({
+          path,
+          kind: 'patch',
+          preimage: original!,
+          content: content!,
+          baseHash: this.hash(original!),
+          patch: createTwoFilesPatch(path, path, original!, content!, undefined, undefined, {
+            context: 3,
+          }),
+        })
+    }
+    return changes
+  }
+
+  private newBundle(
+    summary: string,
+    files: SourceExtensionFile[],
+    dependencies: Record<string, string>,
+  ): SourceExtensionBundle {
+    const date = new Date().toISOString()
+    return parseSourceExtensionBundle({
+      format: 'life-source-extension',
+      formatVersion: 1,
+      id: `source-${randomUUID().replaceAll('-', '').slice(0, 12)}`,
+      name: summary.slice(0, 120),
+      description: summary,
+      version: '1.0.0',
+      createdAt: date,
+      updatedAt: date,
+      files,
+      dependencies,
+    })
+  }
+
+  private verifyBundle(bundle: SourceExtensionBundle) {
+    for (const file of bundle.files) {
+      if (file.kind === 'create') continue
+      if (this.hash(file.preimage) !== file.baseHash)
+        throw new Error(`Source extension preimage checksum does not match ${file.path}.`)
+      if (file.kind === 'patch' && applyPatch(file.preimage, file.patch) !== file.content)
+        throw new Error(
+          `Source extension patch does not match its declared content in ${file.path}.`,
+        )
+    }
+  }
+
+  private async composeLayers(
+    layers: SourceLayer[],
+    rebase = false,
+    adaptations = new Map<string, string | undefined>(),
+  ): Promise<{
+    files: Map<string, string>
+    baselineFiles: Map<string, string>
+    dependencies: Record<string, string>
+    layers: SourceLayer[]
+  }> {
+    const baselineFiles = await this.readEditable(this.options.sourceDir)
+    const files = new Map(baselineFiles)
+    const dependencies: Record<string, string> = {}
+    const nextLayers = JSON.parse(JSON.stringify(layers)) as SourceLayer[]
+    for (const layer of nextLayers) {
+      layer.bundle = parseSourceExtensionBundle(layer.bundle)
+      if (!layer.enabled) continue
+      this.verifyBundle(layer.bundle)
+      const adjusted: SourceExtensionFile[] = []
+      for (const change of layer.bundle.files) {
+        this.assertExactPath(files, change.path)
+        const current = files.get(change.path)
+        let content: string | undefined
+        if (change.kind === 'create') {
+          if (current !== undefined && current !== change.content)
+            throw new Error(
+              `Source extension “${layer.bundle.name}” conflicts in ${change.path}: this file already exists with different content.`,
+            )
+          content = change.content
+        } else if (change.kind === 'delete') {
+          if (
+            current !== undefined &&
+            current !== change.preimage &&
+            !(rebase && adaptations.has(change.path) && adaptations.get(change.path) === undefined)
+          )
+            throw new Error(
+              `Source extension “${layer.bundle.name}” conflicts in ${change.path}: another extension changed the file being removed.`,
+            )
+          content = undefined
+        } else {
+          if (current === undefined)
+            throw new Error(
+              `Source extension “${layer.bundle.name}” conflicts in ${change.path}: its required source file is missing. Enable its prerequisite extension or adapt this extension with /life.`,
+            )
+          try {
+            content = mergeSource(
+              change.preimage,
+              change.content,
+              current,
+              change.path,
+              layer.bundle.name,
+            )
+          } catch (error) {
+            if (!rebase || !adaptations.has(change.path)) throw error
+            content = adaptations.get(change.path)
+          }
+        }
+        if (rebase) {
+          const before = new Map<string, string>()
+          const after = new Map<string, string>()
+          if (current !== undefined) before.set(change.path, current)
+          if (content !== undefined) after.set(change.path, content)
+          adjusted.push(...this.extensionFiles(before, after, new Set([change.path])))
+        }
+        if (content === undefined) files.delete(change.path)
+        else files.set(change.path, content)
+      }
+      if (rebase) layer.bundle.files = adjusted
+      if (layer.bundle.files.length || Object.keys(layer.bundle.dependencies).length)
+        layer.bundle = parseSourceExtensionBundle(layer.bundle)
+      Object.assign(dependencies, layer.bundle.dependencies)
+    }
+    return {
+      files,
+      baselineFiles,
+      dependencies,
+      // Rebased code already included by another adapted layer does not create an
+      // invalid empty portable bundle. The composed source still contains its result.
+      layers: nextLayers.filter(
+        (layer) => layer.bundle.files.length || Object.keys(layer.bundle.dependencies).length,
+      ),
+    }
+  }
+
+  private async migrateLegacy(revision: number, metadata: Metadata): Promise<Metadata> {
+    const baseline = await this.readEditable(this.options.sourceDir)
+    const current = await this.readEditable(this.generation(revision))
+    const affected = new Set<string>()
+    for (const [path, content] of current) {
+      // Untouched files from the old app do not become private overrides after an upgrade.
+      if (metadata.baseHashes[path] && this.hash(content) === metadata.baseHashes[path]) continue
+      if (baseline.get(path) !== content) affected.add(path)
+    }
+    for (const path of Object.keys(metadata.baseHashes))
+      if (!current.has(path) && baseline.has(path)) affected.add(path)
+    const files = this.extensionFiles(baseline, current, affected)
+    const extensions: SourceLayer[] =
+      files.length || Object.keys(metadata.dependencies).length
+        ? [
+            {
+              bundle: this.newBundle('Legacy customization', files, metadata.dependencies),
+              enabled: true,
+            },
+          ]
+        : []
+    return { ...metadata, extensions }
+  }
+
+  private async commitLayers(
+    layers: SourceLayer[],
+    summary: string,
+    epoch: number,
+    rebase = false,
+    adaptations = new Map<string, string | undefined>(),
+  ): Promise<LifeSourceSnapshot> {
+    this.checkEpoch(epoch)
+    const nextRevision = this.state.revision + 1
+    const controller = new AbortController()
+    this.activeController = controller
+    const signal = controller.signal
+    const staging = join(
+      this.path,
+      'revisions',
+      `.staging-${nextRevision}-${randomUUID().slice(0, 12)}`,
+    )
+    try {
+      const composed = await this.composeLayers(layers, rebase, adaptations)
+      signal.throwIfAborted()
+      await mkdir(staging, { recursive: true })
+      for (const [path, content] of composed.files) {
+        signal.throwIfAborted()
+        const target = join(staging, path)
+        await mkdir(dirname(target), { recursive: true })
+        if (composed.baselineFiles.get(path) === content)
+          await copyFile(join(this.options.sourceDir, path), target)
+        else await writeFile(target, content, 'utf8')
+      }
+      if (existsSync(join(this.options.sourceDir, 'package.json')))
+        await copyFile(join(this.options.sourceDir, 'package.json'), join(staging, 'package.json'))
+      const packageModules = await this.installDependencies(composed.dependencies, signal)
+      signal.throwIfAborted()
+      await this.compile(staging, packageModules, composed.dependencies, signal)
+      signal.throwIfAborted()
+      const metadata: Metadata = metadataSchema.parse({
+        summary,
+        dependencies: composed.dependencies,
+        baseFingerprint: this.baselineFingerprint,
+        baseHashes: { ...this.baselineHashes },
+        extensions: composed.layers,
+      })
+      await writeFile(join(staging, 'metadata.json'), JSON.stringify(metadata), 'utf8')
+      signal.throwIfAborted()
+      const destination = this.generation(nextRevision)
+      if (existsSync(destination))
+        throw new Error(
+          `A source generation already exists for revision ${nextRevision}; recover Life’s source state before applying again.`,
+        )
+      await rename(staging, destination)
+      const next: SavedState = {
+        format: 1,
+        revision: nextRevision,
+        current: nextRevision,
+        history:
+          this.state.current !== null && this.state.failed.includes(this.state.current)
+            ? [...this.state.history]
+            : [...this.state.history, this.state.current].slice(-5),
+        enabled: composed.layers.some((layer) => layer.enabled),
+        failed: [...this.state.failed],
+      }
+      try {
+        signal.throwIfAborted()
+        await this.writeState(next)
+      } catch (error) {
+        await rm(destination, { recursive: true, force: true })
+        throw error
+      }
+      this.state = next
+      this.metadata = metadata
+      this.recovered = false
+      this.emit()
+      return this.get()
+    } catch (error) {
+      await rm(staging, { recursive: true, force: true }).catch(() => {})
+      this.state.error = explain(error)
+      this.emit()
+      throw new Error(explain(error))
+    } finally {
+      if (this.activeController === controller) this.activeController = undefined
+    }
   }
 
   async rollback(): Promise<LifeSourceSnapshot> {
@@ -418,14 +894,29 @@ export class SourceCodeStore {
           )
         previous = history.pop()!
       }
-      const metadata = previous === null ? undefined : await this.readMetadata(previous)
+      let metadata = previous === null ? undefined : await this.readMetadata(previous)
+      if (metadata && !metadata.extensions) {
+        metadata = await this.migrateLegacy(previous!, metadata)
+        await writeFile(
+          join(this.generation(previous!), 'metadata.json'),
+          JSON.stringify(metadata),
+          'utf8',
+        )
+      }
+      const baseChanged = Boolean(metadata && metadata.baseFingerprint !== this.baselineFingerprint)
       const next: SavedState = {
         format: 1,
         revision: this.state.revision + 1,
         current: previous,
         history,
-        enabled: previous !== null,
+        enabled: !baseChanged && Boolean(metadata?.extensions?.some((layer) => layer.enabled)),
         failed: [...this.state.failed],
+        ...(baseChanged
+          ? {
+              error:
+                'This previous customization belongs to an older Life installation. Its extensions are preserved; ask /life to adapt them to the current source before enabling them.',
+            }
+          : {}),
       }
       await this.writeState(next)
       this.state = next
@@ -579,40 +1070,6 @@ export class SourceCodeStore {
       await visit(join(root, 'src', directory))
     if (existsSync(join(root, 'package.json'))) paths.push('package.json')
     return paths.sort()
-  }
-
-  private async changeFile(root: string, change: LifeSourcePatch['files'][number]) {
-    const file = join(root, change.path)
-    if (change.content === null) {
-      await unlink(file).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') throw error
-      })
-      return
-    }
-    let content = change.content
-    if (change.edits) {
-      try {
-        content = await readFile(file, 'utf8')
-      } catch (error) {
-        throw new Error(
-          `Cannot edit ${change.path}: ${explain(error)}. Read the current file or provide content to create it.`,
-        )
-      }
-      for (const edit of change.edits) {
-        const first = content.indexOf(edit.find)
-        if (first === -1)
-          throw new Error(
-            `Source edit did not match ${change.path}. Read its current content and use an exact find string.`,
-          )
-        if (content.indexOf(edit.find, first + 1) !== -1)
-          throw new Error(
-            `Source edit is ambiguous in ${change.path}. The find string must match exactly once.`,
-          )
-        content = content.slice(0, first) + edit.replace + content.slice(first + edit.find.length)
-      }
-    }
-    await mkdir(dirname(file), { recursive: true })
-    await writeFile(file, content!, 'utf8')
   }
 
   private async installDependencies(

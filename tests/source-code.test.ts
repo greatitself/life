@@ -654,7 +654,10 @@ const rendered = renderToStaticMarkup(<Select.Root defaultValue="high"><Select.T
     await updated.apply({
       summary: 'Migrate source customizations onto the latest installed app',
       baseRevision: preserved.revision,
-      files: [{ path: 'src/shared/user-note.ts', content: preserved.files[0].content }],
+      files: [
+        { path: 'src/shared/user-note.ts', content: preserved.files[0].content },
+        { path: 'src/shared/removed-by-user.ts', content: null },
+      ],
     })
     const merged = await updated.getContext({
       paths: ['src/shared/greeting.ts', 'src/shared/user-note.ts', 'src/shared/new-in-update.ts'],

@@ -83,7 +83,7 @@ export type LifeConfigState = LifeConfigSnapshot
 export const defaultLifeConfig: LifeConfig = {
   version: 1,
   theme: 'dark',
-  startView: 'research',
+  startView: 'workspace',
   density: 'comfortable',
   fontSize: 14,
   sidebarWidth: 260,

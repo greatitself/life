@@ -124,18 +124,20 @@ jobs:
           cd installers
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life 0.4 edits its actual React application from any Codex or Claude Code thread.
+          Life 0.5 brings a T3-style research workspace, individual source extensions and explicit public sharing.
 
-          - Edit built-in React/TypeScript components, shared code and CSS through /life or @life in the existing conversation.
-          - Add npm dependencies and actual component source, including shadcn/Radix components, with optional Tailwind v4 generation when the required packages and styles are proposed. Bundled npm and esbuild stage and compile changes locally without requiring a separate Node.js installation.
-          - Automatic source reads supply exact files to the same provider session. Failed proposals/builds retain the working interface and return diagnostics for bounded repair attempts.
-          - Revision checks, conversation persistence before reload, source management, rollback and the native Ctrl/Cmd + Shift + L recovery route protect ongoing work.
-          - Discover models and reasoning/speed capabilities from the connected providers. Supported choices persist per thread; unsupported choices return to provider defaults without automatically enabling a paid fast tier.
-          - Advanced Codex thread/turn options, Claude settings/arguments and executable Node workers can implement additional agent and local behavior.
-          - Research maps, monochrome themes, SSH config aliases, project selection and automatic port forwarding remain available.
+          - A compact project/thread rail, open conversation area and wide diff pane bring the agent workspace closer to T3 Code in monochrome dark and light themes.
+          - Each /life React/TypeScript/CSS change becomes a separate source extension over the immutable installed base. Enable, disable, remove, export and import individual changes.
+          - Enabled source layers compose and compile together. Conflicts or failed builds preserve the previous working interface; dependent changes may need adaptation.
+          - Existing 0.4 source customizations migrate into one legacy extension with their edits preserved.
+          - Preview one source or runtime extension, then explicitly publish a public GitHub Gist with your own token. The token is used once and not stored; Life does not automatically publish customizations.
+          - Inspect a public Gist's files, dependencies and complete code before choosing Install extension. Portable bundles include extension code and metadata, without Life's saved connections or conversation history.
+          - Real React/npm component changes, optional Tailwind v4 generation, same-thread source reads and bounded automatic repair remain available through bundled tools, without a separate Node.js installation.
+          - Revision checks, saved conversations before reload, rollback and native Ctrl/Cmd + Shift + L recovery protect ongoing work.
+          - Research maps, SSH config aliases, project selection, provider model controls and automatic port forwarding remain available.
           - Windows upgrades the existing Life installation and preserves its local data; Windows and AppImage support in-app updates.
 
-          Windows users on 0.1.0: run the new .exe once to upgrade. Existing users on 0.2.2 or later can use Updates inside Life. Profiles, conversation history, research data, extensions and local source files remain in the existing data directory. When an update changes the built-in source baseline, Life preserves custom files and starts with its built-in interface; ask /life to update your customization, refreshing unchanged files during the next build.
+          Windows users on 0.1.0: run the new .exe once to upgrade. Existing users on 0.2.2 or later can use Updates inside Life. Profiles, conversation history, research data, extensions and local source files remain in the existing data directory. When an update changes the built-in source baseline, Life preserves source extensions and starts with its built-in interface; ask /life to update your customization. Patches must compose and compile against the new baseline; this is not an automatic semantic merge.
 
           Existing select controls are unchanged so users can test Life's customization themselves. Ask /life to replace a control with real React component source and dependencies. The native host, preload and recovery loader remain the installed copy; native binaries and installer signing require a packaged release.
 

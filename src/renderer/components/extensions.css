@@ -365,3 +365,312 @@
     flex-wrap: wrap;
   }
 }
+
+.extension-folder-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 7px;
+}
+.extension-change-summary {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.extension-change-summary summary {
+  cursor: pointer;
+}
+.extension-change-summary ul {
+  margin: 10px 0;
+  padding-left: 18px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.extension-change-summary code {
+  font: 10px/1.7 var(--mono);
+}
+.extension-dependency {
+  display: inline-block;
+  margin: 0 5px 5px 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.extension-share-action {
+  white-space: nowrap;
+}
+.extension-import {
+  display: grid;
+  gap: 20px;
+}
+.extension-import-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.extension-import-file > div {
+  flex: 1;
+  min-width: 200px;
+}
+.extension-import-file label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-strong);
+  font-size: 12px;
+}
+.extension-import-file span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.extension-import-file input {
+  width: 230px;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+}
+.extension-import-file input::file-selector-button {
+  padding: 7px 10px;
+  margin-right: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.extension-public-import > label,
+.extension-share-form > label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.extension-public-import > div {
+  display: flex;
+  gap: 8px;
+}
+.extension-public-import input,
+.extension-share-form > input {
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+.extension-public-import .button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.extension-import-preview {
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.extension-share-modal {
+  max-width: 760px;
+}
+.extension-bundle-preview {
+  margin-top: 18px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.extension-import-preview .extension-bundle-preview {
+  margin-top: 0;
+}
+.extension-bundle-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.extension-bundle-heading > div {
+  flex: 1;
+  min-width: 0;
+}
+.extension-bundle-heading strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-strong);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.extension-bundle-heading span,
+.extension-bundle-heading > code {
+  color: var(--muted);
+  font: 10px var(--mono);
+  overflow-wrap: anywhere;
+}
+.extension-bundle-preview > p {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.extension-bundle-files {
+  display: grid;
+  gap: 7px;
+  max-height: 190px;
+  overflow: auto;
+  margin-top: 14px;
+}
+.extension-bundle-files > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+.extension-bundle-files svg {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--dim);
+}
+.extension-bundle-files code {
+  flex: 1;
+  color: var(--text);
+  font: 10px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.extension-bundle-files span {
+  color: var(--dim);
+  font-size: 10px;
+}
+.extension-bundle-dependencies {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--muted);
+}
+.extension-bundle-dependencies > span {
+  font-size: 11px;
+}
+.extension-bundle-dependencies code {
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: 10px var(--mono);
+  overflow-wrap: anywhere;
+}
+.extension-share-form {
+  margin-top: 18px;
+}
+.extension-public-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.extension-public-notice svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.extension-share-form > input {
+  margin-bottom: 14px;
+}
+.extension-share-form .extension-caption {
+  display: block;
+  margin: -3px 0 0;
+}
+.extension-share-footer,
+.extension-published-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.extension-published {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+}
+.extension-published > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.extension-published > code {
+  color: var(--muted);
+  font: 11px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+}
+.extension-published-actions {
+  margin-top: 0;
+}
+@media (max-width: 620px) {
+  .extension-public-import > div {
+    flex-direction: column;
+  }
+  .extension-public-import .button {
+    align-self: flex-start;
+  }
+  .extension-card-heading {
+    flex-wrap: wrap;
+  }
+  .extension-card-heading > div {
+    min-width: 150px;
+  }
+  .extension-delete-confirm {
+    flex-wrap: wrap;
+  }
+  .extension-delete-confirm > span {
+    flex-basis: 100%;
+  }
+  .extension-bundle-heading {
+    flex-wrap: wrap;
+  }
+  .extension-bundle-heading > code {
+    flex-basis: 100%;
+  }
+  .extension-folder-actions {
+    flex-wrap: wrap;
+  }
+}
+.extension-editor-selection {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.extension-editor-selection > span {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.extension-editor-selection strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.extension-editor-selection > button {
+  flex-shrink: 0;
+}
+@media (max-width: 620px) {
+  .extension-editor-selection {
+    flex-wrap: wrap;
+  }
+  .extension-editor-selection > span {
+    flex-basis: 100%;
+  }
+}

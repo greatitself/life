@@ -11,6 +11,12 @@ export const sshConfigPathSchema = z
   .min(1)
   .max(4096)
   .refine((value) => !/[\x00-\x1f]/.test(value), 'Enter a valid SSH config path')
+export const remoteDirectorySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4096)
+  .refine((value) => !/[\x00-\x1f]/.test(value), 'Enter a valid remote path')
 export const profileSchema = z.object({
   id: z.string().min(1).max(100),
   name: z.string().trim().min(1).max(100),
@@ -29,12 +35,7 @@ export const profileSchema = z.object({
     .regex(/^[a-zA-Z0-9._-]+$/),
   auth: z.enum(['agent', 'key', 'password']),
   privateKeyPath: z.string().max(4096),
-  workspace: z
-    .string()
-    .trim()
-    .min(1)
-    .max(4096)
-    .refine((v) => !/[\x00-\x1f]/.test(v), 'Enter a valid remote path'),
+  workspace: remoteDirectorySchema.default('~'),
   sshConfig: z.object({ alias: sshConfigAliasSchema, path: sshConfigPathSchema }).optional(),
 })
 export const connectSchema = profileSchema.extend({
@@ -48,6 +49,7 @@ export const startSchema = z.object({
   prompt: z.string().trim().min(1).max(1000000),
   model: z.string().max(200).optional(),
   mode: z.enum(['review', 'edit', 'plan']),
+  workspace: remoteDirectorySchema.optional(),
 })
 export function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'"

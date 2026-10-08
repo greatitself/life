@@ -235,4 +235,18 @@ describe('conversation state', () => {
     expect(state).toMatchObject({ remoteId: 'remote-thread', busy: false, pending: [] })
     expect(state.messages[0]).toMatchObject({ role: 'error', text: 'Login expired', turn: 1 })
   })
+
+  it('preserves Life follow-up scope and ordinary remote identity when reloading thread history', () => {
+    const saved = { ...thread(), lifeScope: true, remoteId: 'same-remote-conversation' }
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify([saved]) })
+    expect(readThreads()[0]).toMatchObject({
+      lifeScope: true,
+      remoteId: saved.remoteId,
+      busy: false,
+    })
+    vi.stubGlobal('localStorage', {
+      getItem: () => JSON.stringify([{ ...saved, lifeScope: 'unsafe' }]),
+    })
+    expect(readThreads()[0].lifeScope).toBeUndefined()
+  })
 })

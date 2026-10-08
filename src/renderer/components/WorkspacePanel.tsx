@@ -48,7 +48,7 @@ export function WorkspacePanel({
     setError('')
   }, [connection.workspace, connection.status])
   useEffect(() => {
-    if (connection.status !== 'connected' || !api) return
+    if (connection.status !== 'connected' || !connection.workspace || !api) return
     let active = true
     setBusy(true)
     setError('')
@@ -95,7 +95,7 @@ export function WorkspacePanel({
           <button
             className="icon-button"
             aria-label="Refresh remote workspace"
-            disabled={connection.status !== 'connected' || busy}
+            disabled={connection.status !== 'connected' || !connection.workspace || busy}
             onClick={() => setRefresh((v) => v + 1)}
           >
             <RefreshCw size={14} className={busy ? 'spinning' : ''} />
@@ -118,7 +118,7 @@ export function WorkspacePanel({
           {changes.length ? <span>{changes.length}</span> : null}
         </button>
       </div>
-      {connection.status !== 'connected' ? (
+      {connection.status !== 'connected' || !connection.workspace ? (
         <div className="workspace-empty">
           <div className="workspace-illustration">
             <div>
@@ -129,14 +129,19 @@ export function WorkspacePanel({
             </div>
             <Server size={23} className="illustration-server" />
           </div>
-          <h3>A home for your code</h3>
+          <h3>
+            {connection.status === 'connected' ? 'Choose your project' : 'A home for your code'}
+          </h3>
           <p>
-            Connect a machine to browse files
+            {connection.status === 'connected'
+              ? 'Select a project to browse files'
+              : 'Connect a machine to browse files'}
             <br />
             and review what your agents change.
           </p>
           <button className="button secondary" onClick={onConnect}>
-            Connect machine <ChevronRight size={14} />
+            {connection.status === 'connected' ? 'Select project' : 'Connect machine'}{' '}
+            <ChevronRight size={14} />
           </button>
           <div className="workspace-checklist">
             <span>

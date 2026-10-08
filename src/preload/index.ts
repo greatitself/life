@@ -9,6 +9,10 @@ const subscribe = <T>(channel: string, callback: (data: T) => void) => {
 }
 const api: RelayAPI = {
   platform: process.platform,
+  forwarding: {
+    get: () => ipcRenderer.invoke('forwarding:get'),
+    onState: (callback) => subscribe('forwarding:state', callback),
+  },
   extensions: {
     capabilities: extensionCapabilities,
     get: () => ipcRenderer.invoke('extensions:get'),
@@ -50,6 +54,8 @@ const api: RelayAPI = {
   },
   connection: {
     connect: (input) => ipcRenderer.invoke('connection:connect', input),
+    selectWorkspace: (path) => ipcRenderer.invoke('connection:select-workspace', path),
+    listDirectories: (path) => ipcRenderer.invoke('connection:list-directories', path),
     disconnect: () => ipcRenderer.invoke('connection:disconnect'),
     state: () => ipcRenderer.invoke('connection:state'),
     trust: (id, accepted) => ipcRenderer.invoke('connection:trust', id, accepted),

@@ -3,7 +3,12 @@ import { join } from 'node:path'
 import { Store } from './store'
 import { SSHConnection } from './ssh'
 import { Agents } from './agents'
-import { connectSchema, profileSchema, startSchema } from '../shared/validation'
+import {
+  connectSchema,
+  profileSchema,
+  remoteDirectorySchema,
+  startSchema,
+} from '../shared/validation'
 import { z } from 'zod'
 import { CustomizationStore } from './customization'
 import { listSSHConfig, resolveSSHConfig } from './ssh-config'
@@ -94,16 +99,19 @@ async function init() {
   await store.init()
   customization = new CustomizationStore(app.getPath('userData'), (state) => {
     nativeTheme.themeSource = state.config.theme
+    ssh?.forwarding.setEnabled(state.config.autoPortForward)
     window?.setBackgroundColor(state.config.theme === 'dark' ? '#161616' : '#ffffff')
     send('customization:state', state)
   })
   await customization.init()
   updates = new UpdatesService((state) => send('updates:state', state))
   ssh = new SSHConnection(store)
+  ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
   ssh.on('state', (state) => send('connection:state', state))
   ssh.on('host-key', (request) => send('connection:host-key', request))
   ssh.on('terminal', (data) => send('terminal:data', data))
+  ssh.on('forwarding-state', (state) => send('forwarding:state', state))
   const operations = new Map<string, (...args: unknown[]) => unknown>()
   const handle = (name: string, fn: (...args: unknown[]) => unknown) => {
     operations.set(name, fn)
@@ -145,9 +153,13 @@ async function init() {
     const channel =
       method === 'app.chooseKey'
         ? 'choose-key'
-        : method.startsWith('sshConfig.')
-          ? method.replace('sshConfig.', 'ssh-config:')
-          : method.replace('.', ':')
+        : method === 'connection.selectWorkspace'
+          ? 'connection:select-workspace'
+          : method === 'connection.listDirectories'
+            ? 'connection:list-directories'
+            : method.startsWith('sshConfig.')
+              ? method.replace('sshConfig.', 'ssh-config:')
+              : method.replace('.', ':')
     const operation = operations.get(channel)
     if (!operation) throw new Error(`This Life method is unavailable: ${method}`)
     const value = await operation(...args)
@@ -239,8 +251,15 @@ async function init() {
   handle('profiles:save', (p) => store.save(profileSchema.parse(p)))
   handle('profiles:remove', (id) => store.remove(z.string().parse(id)))
   handle('connection:connect', (input) => ssh.connect(connectSchema.parse(input)))
+  handle('connection:select-workspace', (path) =>
+    ssh.selectWorkspace(remoteDirectorySchema.parse(path)),
+  )
+  handle('connection:list-directories', (path) =>
+    ssh.listDirectories(remoteDirectorySchema.optional().parse(path)),
+  )
   handle('connection:disconnect', () => ssh.disconnect())
   handle('connection:state', () => ssh.state)
+  handle('forwarding:get', () => ssh.forwarding.getState())
   handle('connection:trust', (id, accepted) =>
     ssh.trust(z.string().parse(id), z.boolean().parse(accepted)),
   )

@@ -113,18 +113,24 @@ jobs:
           cd installers
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life 0.2 is a customizable research workspace for Codex and Claude Code over SSH.
+          Life 0.3 lets you customize the application from any Codex or Claude Code thread.
 
           - Monochrome dark and light themes, a new Life logo, and official SVGL company icons.
           - Research map with Mermaid diagrams, dependencies, notes, filters, and project backups.
           - Agent workspace with remote files, Git changes, terminal, and provider approvals.
           - SSH config aliases, resolved options, and ProxyJump with trusted OpenSSH jump hosts.
-          - Prompt-driven live settings, commands, panels, executable UI/backend extensions, hot reload and rollback.
+          - Connect to a machine first, then browse and select its remote project folder. Saved projects and thread history keep their original folder.
+          - Automatic SSH port forwarding is enabled by default. The Ports panel shows local mappings, handles occupied local ports and lets you turn forwarding off.
+          - Ask Life in any thread using /life, @life, or a request naming Life. Follow-up questions stay in the same conversation.
+          - Normal explanations, clarification questions and no-change replies no longer fail customization validation.
+          - Live settings and executable UI/backend extensions use the same thread, with hot reload and rollback. Settings and extension management remain available without a separate customization prompt button.
           - Windows installer upgrades the existing Life installation; in-app updates for future Windows releases.
 
           Windows users on 0.1.0: run the new .exe once to upgrade. Profiles, conversation history, and local research data are preserved. Then use Updates inside Life for subsequent releases. Executable extensions can replace views and add local behavior immediately. Electron/native dependency and installer changes still require a source build.
 
-          Agent CLIs must be installed and signed in on the remote Linux or macOS machine. Builds are unsigned; macOS users may need to use Open Anyway in System Settings, and Windows may show an unrecognized publisher prompt. macOS and Debian updates use the new installer; AppImage and Windows support in-app updates.
+          Existing select controls are unchanged so users can test Life's customization themselves. Replacing built-in components or bundled dependencies still requires a source build.
+
+          Agent CLIs must be installed and signed in on the remote Linux or macOS machine. Signing is deferred until publisher credentials are provided: builds remain unsigned, macOS may require Open Anyway and Windows may show an unrecognized publisher prompt. macOS and Debian updates use the new installer; AppImage and Windows support in-app updates.
           NOTES
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG" --notes-file release-notes.md

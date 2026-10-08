@@ -32,7 +32,7 @@ const blank = (): ConnectInput => ({
   username: '',
   auth: 'key',
   privateKeyPath: '',
-  workspace: '~/projects',
+  workspace: '~',
   password: '',
   passphrase: '',
 })
@@ -130,7 +130,6 @@ export function ConnectionDialog({
             username:
               'Enter your SSH username using letters, numbers, dots, underscores, or hyphens.',
             port: 'Enter a port from 1 to 65535.',
-            workspace: 'Enter the existing project directory on the remote machine.',
             name: 'Enter a machine name of 100 characters or fewer.',
           } as Record<string, string>
         )[field] || parsed.error.issues[0].message,
@@ -176,7 +175,7 @@ export function ConnectionDialog({
         if (!saving) onOpenChange(v)
       }}
       title="Connect a machine"
-      description="Your workspace and agents, one SSH connection away."
+      description="Connect over SSH, then choose a project on your machine."
       className="connection-modal"
     >
       {!desktop ? (
@@ -285,9 +284,8 @@ export function ConnectionDialog({
             onChange={(event) => {
               const host = configList?.hosts.find((item) => item.alias === event.target.value)
               if (!host || !configList) return
-              setInput((previous) => ({
+              setInput({
                 ...blank(),
-                workspace: previous.workspace,
                 name: host.alias,
                 host: host.host,
                 port: host.port,
@@ -295,7 +293,7 @@ export function ConnectionDialog({
                 auth: host.availableIdentityFiles.length ? 'key' : 'agent',
                 privateKeyPath: host.availableIdentityFiles[0] || '',
                 sshConfig: { alias: host.alias, path: configList.path },
-              }))
+              })
               setConfigHost(host)
               setError('')
               setSaved(false)
@@ -513,19 +511,6 @@ export function ConnectionDialog({
               <KeyRound size={15} /> Uses keys loaded into your local SSH agent.
             </div>
           )}
-          <label className="full">
-            Remote project directory
-            <input
-              aria-describedby="remote-project-hint"
-              placeholder="~/projects/my-app"
-              value={input.workspace}
-              onChange={(e) => update('workspace', e.target.value)}
-              required
-            />
-            <small id="remote-project-hint" aria-hidden="true">
-              The existing project folder on the remote machine.
-            </small>
-          </label>
         </fieldset>
         <div className="form-hint">
           <ShieldCheck size={15} /> Passwords and passphrases are never saved.

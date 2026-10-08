@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildCustomizationPrompt,
   extractCustomizationProposal,
+  extractCustomizationResponse,
   planLocalCustomization,
 } from '../src/renderer/customization'
 import { defaultLifeConfig } from '../src/shared/customization'
@@ -56,6 +57,21 @@ describe('offline Life customization', () => {
     expect(preferences.fontSize).toBe(18)
   })
 
+  it('controls automatic port forwarding through an ordinary offline Life request', () => {
+    expect(planLocalCustomization('Make Life auto port forward off', current())).toEqual({
+      autoPortForward: false,
+    })
+    expect(planLocalCustomization('Please enable automatic port forwarding', current())).toEqual({
+      autoPortForward: true,
+    })
+    expect(planLocalCustomization('Set port forwarding to disabled', current())).toEqual({
+      autoPortForward: false,
+    })
+    expect(planLocalCustomization("Turn on Life's auto port forwarding", current())).toEqual({
+      autoPortForward: true,
+    })
+  })
+
   it('delegates unrecognized clauses and contradictory edits without partial settings', () => {
     expect(planLocalCustomization('Use light and add a calendar', current())).toBeNull()
     expect(planLocalCustomization('Use dark and use light', current())).toBeNull()
@@ -69,6 +85,30 @@ describe('offline Life customization', () => {
 })
 
 describe('agent customization proposal boundary', () => {
+  it('accepts explanations and clarification without requiring a settings mutation', () => {
+    const answer = 'Actual shadcn components require a source rebuild. Would you like that change?'
+    expect(extractCustomizationResponse(answer)).toEqual({ kind: 'message', message: answer })
+    expect(extractCustomizationResponse(`Your theme is already dark.\n${proposal('{}')}`)).toEqual({
+      kind: 'message',
+      message: 'Your theme is already dark.',
+      noChange: true,
+    })
+    expect(extractCustomizationResponse(proposal('{}'))).toEqual({
+      kind: 'message',
+      message: 'No changes were needed.',
+      noChange: true,
+    })
+    expect(
+      extractCustomizationResponse(`Switching theme.\n${proposal('{"theme":"light"}')}`),
+    ).toEqual({
+      kind: 'settings',
+      patch: { theme: 'light' },
+      message: 'Switching theme.',
+    })
+    expect(() => extractCustomizationResponse(proposal('{"theme":"purple"}'))).toThrow('invalid')
+    expect(() => extractCustomizationResponse('<life-customization>{}')).toThrow('Expected one')
+  })
+
   it('extracts one validated block and accepts declarative commands and widgets', () => {
     expect(
       extractCustomizationProposal(

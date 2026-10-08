@@ -94,6 +94,70 @@ life.handle('inspect', async () => ({ hasRequire: typeof require === 'function' 
   return `<life-extension>${JSON.stringify(manifest)}</life-extension>`
 }
 
+// Ordinary thread requests retain their existing remote session. These responses
+// exercise the validated boundary without paid inference or project mutations.
+function lifeThreadResponse(prompt) {
+  if (!prompt.startsWith('The user is asking about Life itself from an ordinary chat thread.'))
+    return undefined
+  const marker = 'User customization request:\n'
+  let request = ''
+  try {
+    request = JSON.parse(prompt.slice(prompt.lastIndexOf(marker) + marker.length))
+  } catch {
+    throw new Error('The Life thread prompt did not include a complete request.')
+  }
+  if (request === 'hang customization') return null
+  if (request === 'clarify customization') return 'Which part of Life would you like me to change?'
+  if (request === 'no change customization')
+    return 'Life already has this behavior.\n<life-customization>{}</life-customization>'
+  if (request === 'explain customization')
+    return 'Life supports settings and executable extensions in this same conversation.'
+  if (/shadcn/i.test(request))
+    return 'Replacing built-in components with actual shadcn requires source and dependency changes, followed by an application rebuild. A live extension can provide a custom view; would you like that alternative?'
+  if (request === 'invalid customization')
+    return '<life-customization>{"theme":"purple"}</life-customization>'
+  if (request === 'mixed customization')
+    return (
+      customizationResponse('You are configuring Life,\nAllowed settings patch schema:') +
+      extensionResponse(
+        'You are extending Life, a local Electron research application\nAllowed manifest schema:',
+      )
+    )
+  if (
+    [
+      'disabled customization extension',
+      'worker failure customization extension',
+      'delayed customization extension',
+    ].includes(request)
+  ) {
+    const source = extensionResponse(
+      'You are extending Life, a local Electron research application\nAllowed manifest schema:',
+    )
+    const manifest = JSON.parse(
+      source.slice('<life-extension>'.length, -'</life-extension>'.length),
+    )
+    if (request === 'disabled customization extension') {
+      manifest.id = 'disabled-fixture-extension'
+      manifest.name = 'Disabled fixture extension'
+      manifest.enabled = false
+    } else if (request === 'worker failure customization extension') {
+      manifest.id = 'broken-fixture-extension'
+      manifest.name = 'Broken fixture extension'
+      manifest.main = 'throw new Error("Life fixture activation failure");'
+    } else {
+      manifest.id = 'delayed-fixture-extension'
+      manifest.name = 'Delayed fixture extension'
+      manifest.main = 'await new Promise(resolve => setTimeout(resolve, 1500));\n' + manifest.main
+    }
+    return `<life-extension>${JSON.stringify(manifest)}</life-extension>`
+  }
+  if (/counter|executable extension/.test(request))
+    return extensionResponse(
+      'You are extending Life, a local Electron research application\nAllowed manifest schema:',
+    )
+  return customizationResponse('You are configuring Life,\nAllowed settings patch schema:')
+}
+
 record({ argv })
 if (argv.includes('--version')) {
   console.log(provider === 'codex' ? 'codex-cli test.0' : '2.test.0 (Claude Code fixture)')
@@ -140,6 +204,15 @@ function codexTurn(message) {
   const extension = extensionResponse(text)
   if (extension) {
     codexComplete(turn, extension)
+    return
+  }
+  const life = lifeThreadResponse(text)
+  if (life !== undefined) {
+    if (life !== null) codexComplete(turn, life)
+    return
+  }
+  if (text === 'remote-life-markers') {
+    codexComplete(turn, '<life-customization>{"theme":"light"}</life-customization>')
     return
   }
   if (text === 'hang' || text === 'delay-start') return
@@ -240,6 +313,15 @@ function claudeTurn(message) {
   const extension = extensionResponse(text)
   if (extension) {
     claudeComplete(extension)
+    return
+  }
+  const life = lifeThreadResponse(text)
+  if (life !== undefined) {
+    if (life !== null) claudeComplete(life)
+    return
+  }
+  if (text === 'remote-life-markers') {
+    claudeComplete('<life-customization>{"theme":"light"}</life-customization>')
     return
   }
   if (text === 'hang') return

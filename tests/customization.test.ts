@@ -27,6 +27,16 @@ async function createStore(onUpdate = vi.fn()) {
 }
 
 describe('Life customization boundaries', () => {
+  it('enables forwarding for old configurations without injecting defaults into unrelated patches', () => {
+    const legacy = { ...defaultLifeConfig } as Record<string, unknown>
+    delete legacy.autoPortForward
+    expect(parseLifeConfig(legacy).autoPortForward).toBe(true)
+    expect(parseLifeConfigPatch({ theme: 'light' })).toEqual({ theme: 'light' })
+    expect(mergeLifeConfig(defaultLifeConfig, { autoPortForward: false }).autoPortForward).toBe(
+      false,
+    )
+    expect(() => parseLifeConfig({ ...legacy, autoPortForward: 'false' })).toThrow()
+  })
   it('rejects unsupported palettes, unsafe extensions, duplicate IDs and out-of-range layout settings', () => {
     expect(() => parseLifeConfigPatch({ theme: 'purple' })).toThrow()
     expect(() => parseLifeConfigPatch({ fontSize: 100 })).toThrow()
@@ -97,6 +107,13 @@ describe('Life customization boundaries', () => {
 })
 
 describe('installed Life live configuration', () => {
+  it('preserves a disabled forwarding preference across restart', async () => {
+    const { store, directory } = await createStore()
+    await store.apply({ autoPortForward: false })
+    const reloaded = new CustomizationStore(directory)
+    stores.push(reloaded)
+    expect((await reloaded.init()).config.autoPortForward).toBe(false)
+  })
   it('persists concurrent prompt changes atomically and reloads the combined config at startup', async () => {
     const { store, directory } = await createStore()
     await Promise.all([

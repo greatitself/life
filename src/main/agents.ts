@@ -107,6 +107,9 @@ export class Agents {
     private emit: (event: AgentEvent) => void,
   ) {
     ssh.on('disconnected', () => this.close())
+    ssh.on('workspace-changing', () =>
+      this.close("Project changed. Select this thread's project to continue."),
+    )
   }
   private event(sessionId: string, event: Omit<AgentEvent, 'sessionId'>) {
     this.emit({ sessionId, ...event })
@@ -169,6 +172,8 @@ export class Agents {
     }
   }
   async models(provider: Provider): Promise<ModelOption[]> {
+    if (this.ssh.state.status !== 'connected') throw new Error('Connect to a machine first')
+    if (!this.ssh.state.workspace) throw new Error('Select a project first')
     if (provider === 'claude')
       return [
         { id: '', name: 'Claude default' },
@@ -191,6 +196,9 @@ export class Agents {
   }
   async start(input: StartInput) {
     if (this.ssh.state.status !== 'connected') throw new Error('Connect to a machine first')
+    if (!this.ssh.state.workspace) throw new Error('Select a project first')
+    if (input.workspace && input.workspace !== this.ssh.state.workspace)
+      throw new Error("The selected project changed. Select this thread's project to continue.")
     const version = this.ssh.state[input.provider]
     if (!version || version === 'missing')
       throw new Error(
@@ -755,7 +763,7 @@ export class Agents {
       this.threads.delete(session.remoteId)
     this.sessions.delete(sessionId)
   }
-  close() {
+  close(reason = 'SSH disconnected. Reconnect to continue this thread.') {
     this.generation++
     this.codex?.channel.signal('TERM')
     this.codex?.channel.close()
@@ -768,7 +776,7 @@ export class Agents {
       session.channel = undefined
       for (const pending of session.controls.values()) {
         clearTimeout(pending.timer)
-        pending.reject(new Error('SSH disconnected'))
+        pending.reject(new Error(reason))
       }
       session.controls.clear()
       channel?.signal('TERM')
@@ -776,7 +784,7 @@ export class Agents {
       if (session.busy)
         this.event(id, {
           type: 'error',
-          text: 'SSH disconnected. Reconnect to continue this thread.',
+          text: reason,
         })
       session.busy = false
       session.stopRequested = true

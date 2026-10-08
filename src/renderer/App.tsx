@@ -41,10 +41,11 @@ import type {
   Provider,
 } from '../shared/types'
 import { api, desktop, errorText } from './api'
-import { applyEvent, readThreads, type Thread } from './state'
+import { applyEvent, bindLegacyThreadWorkspace, readThreads, type Thread } from './state'
 import { RelayMark, ProviderIcon } from './components/Icons'
 import { Modal } from './components/Modal'
 import { ConnectionDialog } from './components/ConnectionDialog'
+import { ProjectDialog } from './components/ProjectDialog'
 import { MessageView, ApprovalCard } from './components/MessageView'
 import { WorkspacePanel } from './components/WorkspacePanel'
 import { RemoteTerminal } from './components/RemoteTerminal'
@@ -60,7 +61,21 @@ import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
 import { readProjects } from './research'
 import { LIFE_VERSION } from '../shared/version'
+import { PortForwardDialog } from './components/PortForwardDialog'
+import { planLocalCustomization } from './customization'
+import {
+  buildLifeThreadPrompt,
+  detectLifeIntent,
+  extractLifeThreadResponse,
+  stripLifeIntent,
+} from './life-thread'
 import './enhancements.css'
+
+interface LifeTurn {
+  turn: number
+  parts: Map<string, string>
+  finishing: boolean
+}
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
 const shortcutModifier = /Mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
@@ -121,6 +136,7 @@ export function App() {
   }, [extensions])
   const [maximized, setMaximized] = useState(false)
   const [updatesOpen, setUpdatesOpen] = useState(false)
+  const [portsOpen, setPortsOpen] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({
     status: 'unsupported',
     currentVersion: LIFE_VERSION,
@@ -143,6 +159,8 @@ export function App() {
   const [models, setModels] = useState<ModelOption[]>([{ id: '', name: 'Agent default' }])
   const [draft, setDraft] = useState('')
   const [connectOpen, setConnectOpen] = useState(false)
+  const [projectOpen, setProjectOpen] = useState(false)
+  const [suggestedProject, setSuggestedProject] = useState<string>()
   const [requestedProfileId, setRequestedProfileId] = useState<string>()
   const [helpOpen, setHelpOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -160,12 +178,19 @@ export function App() {
   const conversation = useRef<HTMLDivElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<{ id?: string } | undefined>(undefined)
+  const lifeTurns = useRef(new Map<string, LifeTurn>())
+  const lifeContext = useRef({ preferences, config, extensions })
+  lifeContext.current = { preferences, config, extensions }
   const active = threads.find((t) => t.id === activeId)
   const currentProvider = active?.provider || provider
   const currentModel = active?.model ?? model
   const currentMode = active?.mode || mode
   const connected = connection.status === 'connected'
+  const projectReady = connected && Boolean(connection.workspace)
   const busy = active?.busy || false
+  const applyingLife = active ? lifeTurns.current.get(active.id)?.finishing === true : false
+  const projectIntent = /^\s*(?:\/project|@project)(?:\s|$)/i.test(draft)
+  const lifeIntent = !projectIntent && (detectLifeIntent(draft) || active?.lifeScope === true)
   const refreshProfiles = useCallback(() => {
     void api?.profiles
       .list()
@@ -209,16 +234,61 @@ export function App() {
   useEffect(() => {
     refreshProfiles()
     if (!api) return
-    void api.connection.state().then(setConnection)
-    const offConnection = api.onConnection((state) => {
+    const updateConnection = (state: ConnectionState) => {
       setConnection(state)
-      if (state.status === 'disconnected') setTerminalOpen(false)
-    })
+      if (state.status === 'connected')
+        setThreads((previous) => previous.map((thread) => bindLegacyThreadWorkspace(thread, state)))
+      if (state.status === 'disconnected') {
+        setTerminalOpen(false)
+        const interrupted = new Set<string>()
+        for (const [id, turn] of lifeTurns.current) {
+          // Once a validated local mutation starts, disconnecting its remote
+          // provider cannot cancel it. Keep its eventual result in the thread.
+          if (!turn.finishing) {
+            interrupted.add(id)
+            lifeTurns.current.delete(id)
+          }
+        }
+        setThreads((previous) =>
+          previous.map((thread) =>
+            interrupted.has(thread.id) ? { ...thread, busy: false, pending: [] } : thread,
+          ),
+        )
+      }
+    }
+    void api.connection.state().then(updateConnection)
+    const offConnection = api.onConnection(updateConnection)
     const offHost = api.onHostKey(setHostKey)
     const offAgent = api.onAgent((event) => {
+      const lifeTurn = lifeTurns.current.get(event.sessionId)
+      // The completed provider turn has handed over to a local atomic write.
+      // Late provider events cannot cancel or replace that result.
+      if (lifeTurn?.finishing) return
+      if (lifeTurn && event.type === 'text') {
+        const key = event.itemId || 'response'
+        lifeTurn.parts.set(
+          key,
+          event.status === 'replace'
+            ? event.text || ''
+            : (lifeTurn.parts.get(key) || '') + (event.text || ''),
+        )
+      }
+      const applyLife =
+        lifeTurn &&
+        event.type === 'complete' &&
+        event.status !== 'interrupted' &&
+        !lifeTurn.finishing
+      if (lifeTurn && (event.type === 'error' || event.status === 'interrupted'))
+        lifeTurns.current.delete(event.sessionId)
+      if (applyLife) lifeTurn.finishing = true
       setThreads((previous) =>
-        previous.map((t) => (t.id === event.sessionId ? applyEvent(t, event) : t)),
+        previous.map((t) => {
+          if (t.id !== event.sessionId) return t
+          const next = applyEvent(t, event)
+          return applyLife ? { ...next, busy: true } : next
+        }),
       )
+      if (applyLife) void finishLifeTurn(event.sessionId, lifeTurn)
       if (event.type === 'complete') setRefreshKey((key) => key + 1)
     })
     return () => {
@@ -227,6 +297,71 @@ export function App() {
       offAgent()
     }
   }, [refreshProfiles])
+
+  async function finishLifeTurn(id: string, lifeTurn: LifeTurn) {
+    const current = () => lifeTurns.current.get(id) === lifeTurn
+    const response = extractLifeThreadResponse([...lifeTurn.parts.values()].join('\n'))
+    let message = response.message
+    let failure: string | undefined
+    try {
+      if (!current()) return
+      if (response.kind === 'error') failure = response.error
+      else if (response.kind === 'settings') {
+        await lifeContext.current.preferences.apply(response.patch)
+        message = [
+          message,
+          `Updated Life settings: ${Object.keys(response.patch).join(', ')}. Undo is available in Settings.`,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+      } else if (response.kind === 'extension') {
+        if (!api) throw new Error('Live extensions require the desktop application.')
+        const state = await api.extensions.apply(response.manifest)
+        if (state.errors[response.manifest.id]) throw new Error(state.errors[response.manifest.id])
+        const installed = state.extensions.find((item) => item.id === response.manifest.id)
+        if (!installed)
+          throw new Error(
+            'Life could not save the extension. Try again or inspect Manage extensions.',
+          )
+        message = [
+          message,
+          installed.enabled
+            ? `Installed ${installed.name}. The extension is live; its source and rollback are available in Manage extensions.`
+            : `Saved ${installed.name} disabled. Enable it or restore its previous version in Manage extensions.`,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+        if (current() && installed.enabled) setExtensionRecovery(false)
+      }
+    } catch (error) {
+      failure = errorText(error)
+    }
+    if (!current()) return
+    lifeTurns.current.delete(id)
+    setThreads((previous) =>
+      previous.map((thread) => {
+        if (thread.id !== id || thread.turn !== lifeTurn.turn) return thread
+        const messages = thread.messages.filter(
+          (item) => item.turn !== lifeTurn.turn || item.role !== 'assistant',
+        )
+        if (message.trim())
+          messages.push({
+            id: `${lifeTurn.turn}:life-response`,
+            role: 'assistant',
+            text: message,
+            turn: lifeTurn.turn,
+          })
+        if (failure)
+          messages.push({
+            id: `${lifeTurn.turn}:life-error`,
+            role: 'error',
+            text: failure,
+            turn: lifeTurn.turn,
+          })
+        return { ...thread, messages, busy: false, pending: [] }
+      }),
+    )
+  }
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -241,7 +376,7 @@ export function App() {
     return () => clearTimeout(timer)
   }, [threads])
   useEffect(() => {
-    if (!api || !connected || connection[currentProvider] === 'missing') {
+    if (!api || !projectReady || connection[currentProvider] === 'missing') {
       setModels(
         currentProvider === 'claude'
           ? [
@@ -269,7 +404,16 @@ export function App() {
     return () => {
       valid = false
     }
-  }, [connected, currentProvider, connection.codex, connection.claude])
+  }, [projectReady, connection.workspace, currentProvider, connection.codex, connection.claude])
+  useEffect(() => {
+    if (connected && !connection.workspace) {
+      setSuggestedProject(undefined)
+      setProjectOpen(true)
+    } else if (!connected) {
+      setProjectOpen(false)
+    }
+    setTerminalOpen(false)
+  }, [connected, connection.workspace])
   useEffect(() => {
     if (stickToBottom && conversation.current)
       conversation.current.scrollTop = conversation.current.scrollHeight
@@ -302,9 +446,11 @@ export function App() {
         e.isComposing ||
         hostKey ||
         connectOpen ||
+        projectOpen ||
         helpOpen ||
         searchOpen ||
         customizeOpen ||
+        portsOpen ||
         updatesOpen ||
         extensionsOpen
       )
@@ -325,7 +471,9 @@ export function App() {
         }
         if (e.code === 'Backquote') {
           e.preventDefault()
-          setTerminalOpen((v) => !v)
+          if (projectReady) setTerminalOpen((v) => !v)
+          else if (connected) setProjectOpen(true)
+          else setConnectOpen(true)
         }
         if (key === 'b') {
           e.preventDefault()
@@ -340,34 +488,82 @@ export function App() {
     newThread,
     hostKey,
     connectOpen,
+    projectOpen,
+    projectReady,
+    connected,
     helpOpen,
     searchOpen,
     customizeOpen,
+    portsOpen,
     updatesOpen,
     extensionsOpen,
   ])
   async function send() {
     if (!draft.trim() || busy || submitting.current) return
-    if (!connected || !api) {
+    const prompt = draft.trim()
+    const projectRequest = /^\s*(?:\/project|@project)(?:\s|$)/i.test(prompt)
+    const isLife = !projectRequest && (detectLifeIntent(prompt) || active?.lifeScope === true)
+    const userRequest = isLife
+      ? stripLifeIntent(prompt)
+      : prompt.replace(/^(?:\/project|@project)(?:\s+|$)/i, '').trim()
+    if (!userRequest) {
+      setToast(
+        isLife
+          ? 'Describe what you want to change or ask about Life.'
+          : 'Describe your project request.',
+      )
+      return
+    }
+    const localPatch = isLife ? planLocalCustomization(userRequest, config) : null
+    const offlineLocal = Boolean(localPatch) && (!projectReady || !api)
+    if ((!connected || !api) && !offlineLocal) {
       setConnectOpen(true)
       return
     }
-    if (active && active.profileId !== connection.profile?.id) {
+    if (!projectReady && !offlineLocal) {
+      setSuggestedProject(active?.workspace)
+      setProjectOpen(true)
+      return
+    }
+    if (
+      !offlineLocal &&
+      active &&
+      active.profileId !== 'life-local' &&
+      active.profileId !== connection.profile?.id
+    ) {
       setToast(
         'Connect to this thread’s machine to continue, or start a new thread on the current machine.',
       )
       return
     }
+    if (
+      !offlineLocal &&
+      active &&
+      active.profileId !== 'life-local' &&
+      ((active.workspace && active.workspace !== connection.workspace) ||
+        (active.remoteId && !active.workspace))
+    ) {
+      setToast(
+        active.workspace
+          ? 'Select this thread’s project to continue, or start a new thread in the current project.'
+          : 'This older thread’s project could not be resolved. Start a new thread in the selected project.',
+      )
+      if (active.workspace) {
+        setSuggestedProject(active.workspace)
+        setProjectOpen(true)
+      }
+      return
+    }
     const submission = { id: active?.id }
     submitting.current = submission
-    const prompt = draft.trim()
     setDraft('')
     setStickToBottom(true)
     let thread = active
     if (!thread) {
       thread = {
         id: crypto.randomUUID(),
-        profileId: connection.profile!.id,
+        profileId: connection.profile?.id || 'life-local',
+        ...(projectReady ? { workspace: connection.workspace } : {}),
         provider,
         title: prompt.slice(0, 54),
         messages: [],
@@ -385,25 +581,69 @@ export function App() {
     const turn = thread.turn + 1
     const next: Thread = {
       ...thread,
+      profileId: offlineLocal ? thread.profileId : connection.profile!.id,
+      workspace: offlineLocal ? thread.workspace : connection.workspace,
       turn,
       busy: true,
+      lifeScope: isLife,
       updatedAt: Date.now(),
       messages: [...thread.messages, { id: crypto.randomUUID(), role: 'user', text: prompt, turn }],
     }
     setThreads((previous) => [next, ...previous.filter((t) => t.id !== id)])
     try {
-      await api.agent.start({
+      // A connected thread sends even simple Life changes to its existing harness so
+      // follow-up questions share the actual provider conversation and remote identity.
+      if (offlineLocal && localPatch) {
+        lifeTurns.current.set(id, { turn, parts: new Map(), finishing: true })
+        await preferences.apply(localPatch)
+        lifeTurns.current.delete(id)
+        setThreads((previous) =>
+          previous.map((item) =>
+            item.id === id && item.turn === turn
+              ? {
+                  ...item,
+                  busy: false,
+                  messages: [
+                    ...item.messages,
+                    {
+                      id: `${turn}:life-local`,
+                      role: 'assistant',
+                      text: `Updated Life settings locally: ${Object.keys(localPatch).join(', ')}. Undo is available in Settings.`,
+                      turn,
+                    },
+                  ],
+                }
+              : item,
+          ),
+        )
+        return
+      }
+      const agentPrompt = isLife
+        ? buildLifeThreadPrompt(
+            userRequest,
+            config,
+            extensions.extensions,
+            api!.extensions.capabilities,
+          )
+        : userRequest
+      if (isLife) lifeTurns.current.set(id, { turn, parts: new Map(), finishing: false })
+      await api!.agent.start({
         sessionId: id,
         provider: thread.provider,
         remoteId: thread.remoteId,
-        prompt,
+        workspace: connection.workspace,
+        prompt: agentPrompt,
         model: thread.model,
-        mode: thread.mode,
+        mode: isLife ? 'plan' : thread.mode,
       })
     } catch (e) {
+      const lifeTurn = lifeTurns.current.get(id)
+      if (lifeTurn?.turn === turn) lifeTurns.current.delete(id)
       setThreads((previous) =>
         previous.map((t) =>
-          t.id === id ? applyEvent(t, { sessionId: id, type: 'error', text: errorText(e) }) : t,
+          t.id === id && t.turn === turn
+            ? applyEvent(t, { sessionId: id, type: 'error', text: errorText(e) })
+            : t,
         ),
       )
     } finally {
@@ -412,8 +652,17 @@ export function App() {
   }
   async function stop() {
     if (!active || !api) return
+    if (lifeTurns.current.get(active.id)?.finishing) return
+    lifeTurns.current.delete(active.id)
     try {
       await api.agent.stop(active.id)
+      setThreads((previous) =>
+        previous.map((thread) =>
+          thread.id === active.id && thread.turn === active.turn
+            ? { ...thread, busy: false, pending: [] }
+            : thread,
+        ),
+      )
       if (submitting.current?.id === active.id) submitting.current = undefined
     } catch (e) {
       setToast(errorText(e))
@@ -662,11 +911,6 @@ export function App() {
               ) : null}
             </div>
             <div className="sidebar-bottom">
-              <button className="customize-life-button" onClick={() => setCustomizeOpen(true)}>
-                <Sparkles size={15} />
-                <span>Customize Life</span>
-                <ArrowUpRight size={13} />
-              </button>
               <button
                 className={`machine-card ${connected ? 'connected' : ''}`}
                 onClick={() => setConnectOpen(true)}
@@ -695,9 +939,22 @@ export function App() {
                 <span>Live extensions</span>
                 <small>{extensions.extensions.length}</small>
               </button>
+              <button className="extension-sidebar-entry" onClick={() => setPortsOpen(true)}>
+                <Network size={14} />
+                <span>Ports</span>
+                <small>{config.autoPortForward ? 'Auto' : 'Off'}</small>
+              </button>
               <div className="sidebar-bottom-actions">
                 <button onClick={() => setConnectOpen(true)}>
-                  <Settings2 size={15} /> Connections
+                  <Server size={15} /> Connections
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label="Settings"
+                  title="Settings"
+                  onClick={() => setCustomizeOpen(true)}
+                >
+                  <Settings2 size={15} />
                 </button>
                 <button
                   className="icon-button"
@@ -745,7 +1002,7 @@ export function App() {
                   <strong>{selectedView.name}</strong>
                 </div>
                 <button className="button secondary" onClick={() => setExtensionsOpen(true)}>
-                  Edit with a prompt
+                  Manage extensions
                 </button>
               </header>
               {extensionHost(selectedView)}
@@ -772,7 +1029,7 @@ export function App() {
                   </button>
                   <button
                     className="icon-button"
-                    aria-label="Customize Life"
+                    aria-label="Settings"
                     onClick={() => setCustomizeOpen(true)}
                   >
                     <Settings2 size={17} />
@@ -822,6 +1079,24 @@ export function App() {
                   <strong>{active?.title || 'New thread'}</strong>
                 </div>
                 <div className="header-actions">
+                  {connected ? (
+                    <button
+                      className="project-picker-button"
+                      aria-label="Select project"
+                      title={connection.workspace || 'Choose a remote project'}
+                      onClick={() => {
+                        setSuggestedProject(undefined)
+                        setProjectOpen(true)
+                      }}
+                    >
+                      <Folder size={14} />
+                      <span>
+                        {connection.workspace?.split('/').filter(Boolean).pop() ||
+                          (connection.workspace === '/' ? '/' : 'Select project')}
+                      </span>
+                      <ChevronDown size={12} />
+                    </button>
+                  ) : null}
                   <span className={`connection-pill ${connected ? 'connected' : ''}`}>
                     <span className={`status-dot ${connected ? 'online' : ''}`} />
                     {connection.status === 'connecting'
@@ -834,7 +1109,11 @@ export function App() {
                     className={`icon-button ${terminalOpen ? 'selected' : ''}`}
                     aria-label="Toggle remote terminal"
                     aria-pressed={terminalOpen}
-                    onClick={() => setTerminalOpen((v) => !v)}
+                    onClick={() => {
+                      if (projectReady) setTerminalOpen((v) => !v)
+                      else if (connected) setProjectOpen(true)
+                      else setConnectOpen(true)
+                    }}
                   >
                     <Terminal size={17} />
                   </button>
@@ -879,6 +1158,31 @@ export function App() {
                             }}
                           >
                             Export thread
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => {
+                              setThreads((previous) =>
+                                previous.map((thread) =>
+                                  thread.id === active.id
+                                    ? { ...thread, lifeScope: !active.lifeScope }
+                                    : thread,
+                                ),
+                              )
+                              setThreadMenu(false)
+                            }}
+                          >
+                            {active.lifeScope
+                              ? 'Return to project messages'
+                              : 'Message Life in this thread'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setCustomizeOpen(true)
+                              setThreadMenu(false)
+                            }}
+                          >
+                            Settings and undo
                           </button>
                           <button
                             disabled={busy}
@@ -994,14 +1298,22 @@ export function App() {
                         />
                       ))}
                       {busy && !active.pending.length ? (
-                        <div className="agent-working">
+                        <div className="agent-working" role="status">
                           <span className="working-indicator">
                             <i />
                             <i />
                             <i />
                           </span>
-                          {providerName(currentProvider)} is working
-                          <span>on your remote machine</span>
+                          {applyingLife
+                            ? 'Applying Life change'
+                            : `${providerName(currentProvider)} is working`}
+                          <span>
+                            {applyingLife
+                              ? 'Saving and checking the result'
+                              : active?.lifeScope
+                                ? 'on your Life request'
+                                : 'on your remote machine'}
+                          </span>
                         </div>
                       ) : null}
                     </div>
@@ -1054,9 +1366,13 @@ export function App() {
                       ref={textarea}
                       aria-label="Message your coding agent"
                       placeholder={
-                        connected
-                          ? 'What are we building?'
-                          : 'What are we building? Connect a machine to get started.'
+                        lifeIntent
+                          ? 'Describe a Life change, or /project to return to your code…'
+                          : projectReady
+                            ? 'What are we building?'
+                            : connected
+                              ? 'Choose a project, or /life switch to light for local settings…'
+                              : 'Connect a machine, or /life switch to light for local settings…'
                       }
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
@@ -1134,24 +1450,36 @@ export function App() {
                       {busy ? (
                         <button
                           className="send-button stop-button"
-                          aria-label="Stop agent"
+                          aria-label={applyingLife ? 'Applying Life change' : 'Stop agent'}
+                          disabled={applyingLife}
                           onClick={() => void stop()}
                         >
-                          <Square size={13} fill="currentColor" />
+                          {applyingLife ? (
+                            <LoaderCircle size={15} className="spinning" />
+                          ) : (
+                            <Square size={13} fill="currentColor" />
+                          )}
                         </button>
                       ) : (
                         <button
-                          className={`send-button ${!connected ? 'connect-send' : ''}`}
-                          aria-label={connected ? 'Send message' : 'Connect to send'}
-                          disabled={connected && !draft.trim()}
+                          className={`send-button ${!projectReady ? 'connect-send' : ''}`}
+                          aria-label={
+                            projectReady || lifeIntent
+                              ? 'Send message'
+                              : connected
+                                ? 'Select project to send'
+                                : 'Connect to send'
+                          }
+                          disabled={(projectReady || lifeIntent) && !draft.trim()}
                           onClick={() => {
-                            if (!connected) setConnectOpen(true)
+                            if (!connected && !lifeIntent) setConnectOpen(true)
+                            else if (!projectReady && !lifeIntent) setProjectOpen(true)
                             else void send()
                           }}
                         >
-                          {!connected ? (
+                          {!projectReady && !lifeIntent ? (
                             <>
-                              <span>Connect</span>
+                              <span>{connected ? 'Select project' : 'Connect'}</span>
                               <ArrowUpRight size={15} />
                             </>
                           ) : (
@@ -1164,7 +1492,40 @@ export function App() {
                   <div className="composer-caption">
                     <span>
                       <span className={`status-dot ${connected ? 'online' : ''}`} />
-                      {connected ? connection.workspace : 'Agents run on your remote machine'}
+                      {lifeIntent ? (
+                        <>
+                          Life scope
+                          {active?.lifeScope ? (
+                            <button
+                              type="button"
+                              className="life-scope-reset"
+                              disabled={busy}
+                              onClick={() => {
+                                setThreads((previous) =>
+                                  previous.map((thread) =>
+                                    thread.id === active.id
+                                      ? { ...thread, lifeScope: false }
+                                      : thread,
+                                  ),
+                                )
+                              }}
+                            >
+                              Return to project
+                            </button>
+                          ) : (
+                            <span> · This message changes Life</span>
+                          )}
+                        </>
+                      ) : (
+                        <span>
+                          {projectReady
+                            ? connection.workspace
+                            : connected
+                              ? 'Choose a remote project'
+                              : 'Remote agents'}{' '}
+                          · /life changes this app
+                        </span>
+                      )}
                     </span>
                     <span>
                       <kbd>↵</kbd> Send <span className="caption-dot">·</span> <kbd>⇧ ↵</kbd> New
@@ -1176,7 +1537,7 @@ export function App() {
               {terminalOpen ? (
                 <RemoteTerminal
                   theme={config.theme}
-                  connected={connected}
+                  connected={projectReady}
                   onClose={() => setTerminalOpen(false)}
                 />
               ) : null}
@@ -1185,7 +1546,7 @@ export function App() {
           {workspaceOpen && view === 'workspace' ? (
             <WorkspacePanel
               connection={connection}
-              onConnect={() => setConnectOpen(true)}
+              onConnect={() => (connected ? setProjectOpen(true) : setConnectOpen(true))}
               onClose={() => setWorkspaceOpen(false)}
               refreshKey={refreshKey}
               onAttach={(path) => {
@@ -1195,7 +1556,11 @@ export function App() {
                 )
                 textarea.current?.focus()
               }}
-              onTerminal={() => setTerminalOpen(true)}
+              onTerminal={() => {
+                if (projectReady) setTerminalOpen(true)
+                else if (connected) setProjectOpen(true)
+                else setConnectOpen(true)
+              }}
             />
           ) : null}
         </div>
@@ -1228,6 +1593,12 @@ export function App() {
           await api?.updates.install()
         }}
       />
+      <PortForwardDialog
+        open={portsOpen}
+        onOpenChange={setPortsOpen}
+        enabled={config.autoPortForward}
+        onEnabledChange={(enabled) => preferences.apply({ autoPortForward: enabled })}
+      />
       <CustomizationDialog
         open={customizeOpen}
         onOpenChange={setCustomizeOpen}
@@ -1250,6 +1621,29 @@ export function App() {
         profiles={profiles}
         refreshProfiles={refreshProfiles}
         connection={connection}
+      />
+      <ProjectDialog
+        open={projectOpen && connected && !connectOpen && !hostKey}
+        onOpenChange={setProjectOpen}
+        connection={connection}
+        suggestedPath={suggestedProject}
+        hasActiveTurns={threads.some(
+          (thread) => thread.busy && thread.profileId === connection.profile?.id,
+        )}
+        onSelected={(state) => {
+          setConnection(state)
+          setTerminalOpen(false)
+          setView('workspace')
+          refreshProfiles()
+          if (
+            active &&
+            (active.profileId !== state.profile?.id || active.workspace !== state.workspace)
+          ) {
+            setActiveId(undefined)
+            setThreadMenu(false)
+            setStickToBottom(true)
+          }
+        }}
       />
       <Modal
         open={Boolean(hostKey)}

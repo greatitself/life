@@ -96,13 +96,20 @@ export function buildExtensionPrompt(
   prompt: string,
   currentManifests: readonly LifeExtensionManifest[],
   capabilities: readonly string[] = [],
+  options: { conversation?: boolean } = {},
 ): string {
   const instructions = [
     'You are extending Life, a local Electron research application for Codex and Claude Code.',
-    'Implement the requested customization as a working live code extension for Life itself.',
+    options.conversation
+      ? 'You are in an ordinary Life conversation. Only create or update an extension when a requested change needs live executable code and can be implemented with the available runtime.'
+      : 'Implement the requested customization as a working live code extension for Life itself.',
     'Do not use tools, run commands, inspect repositories, or create or modify files on the remote machine.',
-    'Return exactly one <life-extension>...</life-extension> block containing one JSON manifest matching the schema below.',
-    'Do not include markdown fences, explanations, a second manifest, or those marker strings inside code.',
+    options.conversation
+      ? 'When proposing executable changes, return one <life-extension>...</life-extension> block containing one JSON manifest matching the schema below. Settings changes use the separate <life-customization> protocol supplied for this conversation. Answers and clarification questions need no block.'
+      : 'Return exactly one <life-extension>...</life-extension> block containing one JSON manifest matching the schema below.',
+    options.conversation
+      ? 'A brief explanation outside a proposal is allowed. Do not include markdown fences inside a manifest, a second proposal, or proposal marker strings inside code.'
+      : 'Do not include markdown fences, explanations, a second manifest, or those marker strings inside code.',
     'The manifest is JSON data: encode executable code as strings, escaping quotes and newlines correctly.',
     'Keep the complete manifest smaller than 500 KB when encoded as UTF-8.',
     'Use a stable lowercase slug ID. To update an existing extension, keep its ID and increment its version.',
@@ -193,6 +200,13 @@ export function buildExtensionPrompt(
 const maximumPromptLength = 900_000
 
 const extensionCallExamples = [
+  {
+    method: 'forwarding.get',
+    signature: '()',
+    args: null,
+    notes:
+      'Returns enabled, active and discovered remotePort/localPort/url mappings. Toggle automatic forwarding with customization.apply({autoPortForward:true}) or false; app.openExternal(url) opens a forwarded service.',
+  },
   { method: 'profiles.list', signature: '()', args: null },
   { method: 'profiles.remove', signature: '(profileId)', args: 'profile-id' },
   { method: 'connection.state', signature: '()', args: null },
@@ -207,10 +221,25 @@ const extensionCallExamples = [
       username: 'researcher',
       auth: 'agent',
       privateKeyPath: '',
-      workspace: '~/research',
     },
+    notes:
+      'Connects to the machine first. workspace is optional last-project metadata; it does not select a project. Wait for host trust and a connected state, then call connection.selectWorkspace before using agents, files or the terminal. Automatic forwarding can run without a selected project.',
   },
   { method: 'connection.trust', signature: '(requestId, accepted)', args: ['request-id', true] },
+  {
+    method: 'connection.listDirectories',
+    signature: '(remotePath?)',
+    args: '~/projects',
+    notes:
+      'Returns {path,parent?,entries:[{name,path}]} for remote folder browsing after machine connection. With no path, browses the remote home directory.',
+  },
+  {
+    method: 'connection.selectWorkspace',
+    signature: '(remotePath)',
+    args: '~/projects/research',
+    notes:
+      'Selects and saves an existing remote project directory after machine connection. Returns the canonical workspace path in ConnectionState. A different project closes previous agent sessions and terminal, while preserving SSH and automatic tunnels.',
+  },
   {
     method: 'agent.start',
     signature: '(StartInput)',
@@ -221,7 +250,7 @@ const extensionCallExamples = [
       mode: 'review',
     },
     notes:
-      'provider is codex or claude; mode is review, edit or plan; model and remoteId are optional strings. Listen to agent events for this sessionId.',
+      'Requires a selected project. provider is codex or claude; mode is review, edit or plan; model and remoteId are optional strings. Pass the canonical workspace string from connection.state to guard against a concurrent project switch. Listen to agent events for this sessionId.',
   },
   { method: 'agent.stop', signature: '(sessionId)', args: 'session-id' },
   {

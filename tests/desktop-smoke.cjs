@@ -11,6 +11,7 @@ const { existsSync } = require('node:fs')
 const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
+const { createServer } = require('node:http')
 const { spawn, spawnSync } = require('node:child_process')
 const { _electron: electron } = require('playwright')
 const { build } = require('esbuild')
@@ -66,6 +67,17 @@ async function run() {
   const { SSHFixture } = require(bundledFixture)
   const configurationRoot = await mkdtemp(join(tmpdir(), 'life-desktop-smoke-'))
   const fixture = await new SSHFixture(join(repository, 'tests/fixtures/fake-provider.cjs')).start()
+  const remoteService = createServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' })
+    response.end(JSON.stringify({ service: 'Life SSH forwarding fixture', path: request.url }))
+  })
+  await new Promise((resolveListening, rejectListening) => {
+    remoteService.once('error', rejectListening)
+    remoteService.listen(0, '127.0.0.1', resolveListening)
+  })
+  const remoteServicePort = remoteService.address().port
+  fixture.discoveryPorts = [remoteServicePort]
+  fixture.allowedForwardPorts.add(remoteServicePort)
   const input = fixture.input()
   const packagedBinary =
     process.platform === 'linux'
@@ -132,18 +144,13 @@ async function run() {
   const workspace = () =>
     navigation().getByRole('button', { name: 'Workspace', exact: true }).click()
   const configuration = () => page.evaluate(() => window.relay.customization.get())
-  const openCustomization = async () => {
-    await page.getByRole('button', { name: 'Customize Life', exact: true }).first().click()
-    const dialog = page.getByRole('dialog', { name: 'Make Life yours' })
+  const openSettings = async () => {
+    await page.getByRole('button', { name: 'Settings', exact: true }).first().click()
+    const dialog = page.getByRole('dialog', { name: 'Settings', exact: true })
     await dialog.waitFor()
     return dialog
   }
   const closeDialog = () => page.keyboard.press('Escape')
-  const applyPrompt = async (dialog, prompt) => {
-    await dialog.getByRole('textbox', { name: 'Describe how to customize Life' }).fill(prompt)
-    await dialog.getByRole('button', { name: 'Apply prompt', exact: true }).click()
-    await dialog.locator('.form-success').waitFor()
-  }
   const waitForGraph = async () => {
     await page.locator('.research-graph-svg svg g.node').first().waitFor()
     await page.locator('.research-rendering').waitFor({ state: 'hidden' })
@@ -163,6 +170,60 @@ async function run() {
   }
   const waitForSend = () =>
     page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+  const chooseProject = async ({
+    reopen = false,
+    browse = false,
+    path = input.workspace,
+    previousWorkspace,
+  } = {}) => {
+    if (reopen)
+      await page
+        .locator('.workspace-header')
+        .getByRole('button', { name: 'Select project', exact: true })
+        .click()
+    const picker = page.getByRole('dialog', { name: 'Select a project', exact: true })
+    await picker.waitFor()
+    assert.equal(
+      (await page.evaluate(() => window.relay.connection.state())).workspace,
+      previousWorkspace,
+    )
+    if (browse) {
+      await picker
+        .getByRole('button', { name: "Open folder workspace's project", exact: true })
+        .waitFor()
+      assert.equal(
+        await picker.locator('.remote-directories header span').getAttribute('title'),
+        fixture.root,
+      )
+      await picker.getByRole('button', { name: 'Refresh remote folders', exact: true }).click()
+      await picker
+        .getByRole('button', { name: "Open folder workspace's project", exact: true })
+        .click()
+      await picker.getByRole('button', { name: 'Open folder src', exact: true }).waitFor()
+      await picker.getByRole('button', { name: 'Parent folder', exact: true }).click()
+      await picker
+        .getByRole('button', { name: "Open folder workspace's project", exact: true })
+        .waitFor()
+      await picker.getByRole('button', { name: 'Remote home folder', exact: true }).click()
+      await picker
+        .getByRole('button', { name: "Open folder workspace's project", exact: true })
+        .click()
+      await picker.getByRole('button', { name: 'Open folder src', exact: true }).waitFor()
+      assert.equal(
+        await picker.getByRole('textbox', { name: 'Project directory', exact: true }).inputValue(),
+        input.workspace,
+      )
+      await screenshot('life-project-picker.png')
+    } else {
+      await picker.getByRole('textbox', { name: 'Project directory', exact: true }).fill(path)
+    }
+    await picker.getByRole('button', { name: 'Open project', exact: true }).click()
+    await picker.waitFor({ state: 'hidden' })
+    await waitUntil(
+      async () => (await page.evaluate(() => window.relay.connection.state())).workspace === path,
+      'remote project selected after machine connection',
+    )
+  }
   const extensions = () => page.evaluate(() => window.relay.extensions.get())
   const extensionFrame = () => page.frameLocator('iframe[title="Research tools"]')
   const openExtensions = async () => {
@@ -172,8 +233,13 @@ async function run() {
     })
     if (await replacementManager.isVisible()) await replacementManager.click()
     else await page.getByRole('button', { name: /^Live extensions/ }).click()
-    const manager = page.getByRole('dialog', { name: 'Build Life by prompting' })
+    const manager = page.getByRole('dialog', { name: 'Manage extensions', exact: true })
     await manager.waitFor()
+    assert.equal(await manager.getByRole('tab', { name: 'Prompt', exact: true }).count(), 0)
+    assert.equal(
+      await manager.getByRole('button', { name: 'Build & apply', exact: true }).count(),
+      0,
+    )
     return manager
   }
   const applyExtensionSource = async (manifest) => {
@@ -256,13 +322,12 @@ async function run() {
       await page.locator('.native-traffic-light-space').waitFor()
     }
 
-    phase = 'offline customization and persisted theme'
+    phase = 'offline ordinary-thread customization, Settings undo and persisted theme'
     const original = (await configuration()).config
-    let dialog = await openCustomization()
-    await applyPrompt(
-      dialog,
-      'Switch to light theme and set font size to 16 and use compact layout',
-    )
+    assert.equal(original.autoPortForward, true)
+    assert.equal(await page.getByRole('button', { name: 'Customize Life', exact: true }).count(), 0)
+    await workspace()
+    await send('/life Switch to light theme and set font size to 16 and use compact layout')
     await waitUntil(async () => {
       const current = (await configuration()).config
       return current.theme === 'light' && current.fontSize === 16 && current.density === 'compact'
@@ -274,16 +339,37 @@ async function run() {
         .evaluate((element) => element.style.getPropertyValue('--life-font-size')),
       '16px',
     )
+    await page
+      .locator('.markdown')
+      .getByText(/Updated Life settings locally:/)
+      .waitFor()
+    let dialog = await openSettings()
+    assert.equal(await dialog.locator('textarea, select').count(), 0)
     await dialog.getByRole('button', { name: 'Undo', exact: true }).click()
     await waitUntil(
       async () => JSON.stringify((await configuration()).config) === JSON.stringify(original),
       'customization undo',
     )
     await closeDialog()
+    await map()
     await page.getByRole('button', { name: 'Switch to light theme', exact: true }).click()
     await waitUntil(
       async () => (await configuration()).config.theme === 'light',
       'theme toggle persistence',
+    )
+    await waitUntil(
+      async () =>
+        (
+          await page.evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+        ).some((thread) =>
+          thread.messages.some(
+            (message) =>
+              message.role === 'user' &&
+              message.text ===
+                '/life Switch to light theme and set font size to 16 and use compact layout',
+          ),
+        ),
+      'offline Life conversation persisted',
     )
     await application.close()
     application = undefined
@@ -425,13 +511,25 @@ async function run() {
     await connection.getByPlaceholder('My development server').fill('Loopback test workspace')
     await connection.getByLabel('Authentication').selectOption('password')
     await connection.getByPlaceholder('Your SSH password').fill(input.password)
-    await connection.getByPlaceholder('~/projects/my-app').fill(input.workspace)
+    assert.equal(await connection.getByPlaceholder('~/projects/my-app').count(), 0)
+    assert.equal(
+      await connection.getByRole('textbox', { name: 'Project directory', exact: true }).count(),
+      0,
+    )
     await connection.getByRole('button', { name: 'Connect machine', exact: true }).click()
     const trust = page.getByRole('dialog', { name: 'Trust this machine?' })
     await trust.waitFor()
     assert.match(await trust.locator('code').textContent(), /^SHA256:/)
     await trust.getByRole('button', { name: 'Trust and connect', exact: true }).click()
     await connection.waitFor({ state: 'hidden' })
+    const initialPicker = page.getByRole('dialog', { name: 'Select a project', exact: true })
+    await initialPicker.waitFor()
+    const machineOnly = await page.evaluate(() => window.relay.connection.state())
+    assert.equal(machineOnly.status, 'connected')
+    assert.equal(machineOnly.workspace, undefined)
+    assert.equal(machineOnly.home, fixture.root)
+    await initialPicker.getByRole('button', { name: 'Choose later', exact: true }).click()
+    await initialPicker.waitFor({ state: 'hidden' })
     await workspace()
     await page.getByText('SSH connected', { exact: true }).waitFor()
     const profiles = await page.evaluate(() => window.relay.profiles.list())
@@ -441,6 +539,148 @@ async function run() {
     const state = await page.evaluate(() => window.relay.connection.state())
     assert.match(state.codex, /test/)
     assert.match(state.claude, /test/)
+    const blockedProjectOperations = await page.evaluate(async () => {
+      const blocked = []
+      for (const action of [
+        () => window.relay.files.list(),
+        () => window.relay.terminal.open(),
+        () =>
+          window.relay.agent.start({
+            sessionId: 'machine-only-smoke',
+            provider: 'codex',
+            prompt: 'hello',
+            model: '',
+            mode: 'plan',
+          }),
+      ]) {
+        try {
+          await action()
+          blocked.push('unexpected success')
+        } catch (error) {
+          blocked.push(error.message)
+        }
+      }
+      return blocked
+    })
+    for (const message of blockedProjectOperations)
+      assert.match(message, /select.*project|choose.*project|connect to a workspace first/i)
+
+    phase =
+      'automatic port forwarding, local collision mapping, browser address and persisted toggle'
+    const forwarding = () => page.evaluate(() => window.relay.forwarding.get())
+    await page.getByRole('button', { name: /^Ports(?:\s|$)/ }).click()
+    let portsDialog = page.getByRole('dialog', { name: 'Port forwarding', exact: true })
+    await portsDialog.waitFor()
+    const automaticPorts = () =>
+      portsDialog.getByRole('switch', { name: 'Automatic port forwarding', exact: true })
+    assert.equal(await automaticPorts().isChecked(), true)
+    await waitUntil(
+      async () => (await forwarding()).ports.some((port) => port.remotePort === remoteServicePort),
+      'isolated SSH service discovered and forwarded',
+    )
+    let forwarded = (await forwarding()).ports.find((port) => port.remotePort === remoteServicePort)
+    assert.equal(forwarded.localHost, '127.0.0.1')
+    assert.notEqual(
+      forwarded.localPort,
+      remoteServicePort,
+      'The occupied matching local port maps to an available port',
+    )
+    assert.deepEqual(
+      await (
+        await fetch(`${forwarded.url}/desktop-smoke`, { signal: AbortSignal.timeout(5000) })
+      ).json(),
+      { service: 'Life SSH forwarding fixture', path: '/desktop-smoke' },
+    )
+    assert.ok(
+      fixture.forwardRequests.some(
+        (request) => request.host === '127.0.0.1' && request.port === remoteServicePort,
+      ),
+    )
+    await portsDialog
+      .getByRole('button', {
+        name: `Copy local address for remote port ${remoteServicePort}`,
+        exact: true,
+      })
+      .click()
+    const expectedClipboard = `127.0.0.1:${forwarded.localPort}`
+    await portsDialog.getByText(`Copied ${expectedClipboard}`, { exact: true }).waitFor()
+    await waitUntil(
+      async () =>
+        (await application.evaluate(({ clipboard }) => clipboard.readText())) === expectedClipboard,
+      'mapped local service address copied to the system clipboard',
+    )
+    await application.evaluate(({ shell }) => {
+      globalThis.__lifePortURLs = []
+      globalThis.__lifePortOpenExternal = shell.openExternal
+      shell.openExternal = async (url) => {
+        globalThis.__lifePortURLs.push(url)
+      }
+    })
+    try {
+      await portsDialog
+        .getByRole('link', {
+          name: `Open remote port ${remoteServicePort} in browser`,
+          exact: true,
+        })
+        .click()
+      await waitUntil(
+        async () =>
+          (await application.evaluate(() => globalThis.__lifePortURLs)).some(
+            (url) => new URL(url).href === new URL(forwarded.url).href,
+          ),
+        'browser opens the mapped local service URL',
+      )
+    } finally {
+      await writeFile(
+        join(artifacts, 'desktop-port-browser-address.json'),
+        JSON.stringify(
+          {
+            declared: forwarded.url,
+            captured: await application.evaluate(() => globalThis.__lifePortURLs),
+          },
+          null,
+          2,
+        ),
+      )
+      await application.evaluate(({ shell }) => {
+        shell.openExternal = globalThis.__lifePortOpenExternal
+        delete globalThis.__lifePortOpenExternal
+      })
+    }
+    const formerURL = forwarded.url
+    await automaticPorts().click()
+    await waitUntil(
+      async () => !(await forwarding()).enabled && (await forwarding()).ports.length === 0,
+      'automatic forwarding disabled and tunnels removed',
+    )
+    const forwardingConfig = await configuration()
+    assert.equal(forwardingConfig.config.autoPortForward, false)
+    assert.equal(JSON.parse(await readFile(forwardingConfig.path, 'utf8')).autoPortForward, false)
+    await assert.rejects(fetch(`${formerURL}/closed`, { signal: AbortSignal.timeout(3000) }))
+    await closeDialog()
+
+    await page.getByRole('button', { name: /^Ports(?:\s|$)/ }).click()
+    portsDialog = page.getByRole('dialog', { name: 'Port forwarding', exact: true })
+    await portsDialog.waitFor()
+    assert.equal(await automaticPorts().isChecked(), false)
+    await automaticPorts().click()
+    await waitUntil(
+      async () =>
+        (await forwarding()).enabled &&
+        (await forwarding()).ports.some((port) => port.remotePort === remoteServicePort),
+      'discovery resumes after automatic forwarding is enabled',
+    )
+    forwarded = (await forwarding()).ports.find((port) => port.remotePort === remoteServicePort)
+    assert.deepEqual(
+      await (
+        await fetch(`${forwarded.url}/reenabled`, { signal: AbortSignal.timeout(5000) })
+      ).json(),
+      { service: 'Life SSH forwarding fixture', path: '/reenabled' },
+    )
+    await closeDialog()
+
+    phase = 'post-connect project browsing, canonical selection and SFTP'
+    await chooseProject({ reopen: true, browse: true })
     await page.getByRole('button', { name: 'src', exact: true }).click()
     await page.getByRole('button', { name: 'index.ts', exact: true }).click()
     await page
@@ -452,10 +692,12 @@ async function run() {
 
     phase = 'both agent providers, approvals, questions, interruption and current chat'
     for (const provider of ['codex', 'claude']) {
-      if (provider === 'claude') {
-        await page.getByRole('button', { name: 'New thread', exact: false }).click()
-        await page.getByRole('button', { name: 'Claude Code By Anthropic' }).click()
-      }
+      await page.getByRole('button', { name: 'New thread', exact: false }).click()
+      await page
+        .getByRole('button', {
+          name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
+        })
+        .click()
       await send('hello')
       await page
         .locator('.markdown')
@@ -523,18 +765,328 @@ async function run() {
     assert.ok((await page.locator('.search-results button').count()) >= 2)
     await closeDialog()
 
-    phase = 'remote agent customization, commands and Mermaid panels'
-    dialog = await openCustomization()
-    await dialog.getByRole('combobox', { name: 'Customization agent' }).selectOption('codex')
-    await applyPrompt(
-      dialog,
-      'Add a research notes panel, an experiment workflow diagram, and a reusable review command',
+    phase = 'changing projects preserves the existing conversation scope'
+    const readProjectThread = () =>
+      page.evaluate(() =>
+        JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+          (thread) =>
+            thread.provider === 'claude' &&
+            thread.messages.some(
+              (message) => message.role === 'user' && message.text === 'question',
+            ),
+        ),
+      )
+    await waitUntil(
+      async () => Boolean((await readProjectThread())?.remoteId),
+      'original project conversation persisted',
     )
-    assert.match(
-      await dialog.locator('.customization-output pre').textContent(),
-      /<life-customization>/,
+    const originalProjectThread = await readProjectThread()
+    assert.equal(originalProjectThread.workspace, input.workspace)
+    const otherProject = join(input.workspace, 'src')
+    await chooseProject({ reopen: true, path: otherProject, previousWorkspace: input.workspace })
+    const otherFiles = await page.evaluate(() => window.relay.files.list())
+    assert.deepEqual(
+      otherFiles.map((file) => file.name),
+      ['index.ts'],
     )
-    await closeDialog()
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
+    await page.getByRole('dialog', { name: 'Find a thread' }).waitFor()
+    await page.getByRole('textbox', { name: 'Search saved threads' }).fill('question')
+    await page.locator('.search-results button').filter({ hasText: 'Claude Code' }).click()
+    const originalConversationLog = await fixture.log()
+    await send('project mismatch must not reach the agent')
+    const scopedPicker = page.getByRole('dialog', { name: 'Select a project', exact: true })
+    await scopedPicker.waitFor()
+    assert.equal(
+      await scopedPicker
+        .getByRole('textbox', { name: 'Project directory', exact: true })
+        .inputValue(),
+      input.workspace,
+    )
+    const unchangedProjectThread = await readProjectThread()
+    assert.equal(unchangedProjectThread.workspace, input.workspace)
+    assert.equal(unchangedProjectThread.remoteId, originalProjectThread.remoteId)
+    assert.deepEqual(unchangedProjectThread.messages, originalProjectThread.messages)
+    assert.deepEqual(
+      await fixture.log(),
+      originalConversationLog,
+      'A project mismatch never sends a provider turn',
+    )
+    await chooseProject({ previousWorkspace: otherProject })
+    await send('hello')
+    await waitForSend()
+    await waitUntil(
+      async () =>
+        (await readProjectThread()).messages.length > originalProjectThread.messages.length,
+      'old conversation resumes in its original project',
+    )
+    assert.equal((await readProjectThread()).id, originalProjectThread.id)
+    assert.equal((await readProjectThread()).remoteId, originalProjectThread.remoteId)
+    assert.equal((await readProjectThread()).workspace, input.workspace)
+    assert.ok(
+      (await fixture.log())
+        .slice(originalConversationLog.length)
+        .some(
+          (entry) =>
+            entry.provider === 'claude' &&
+            entry.argv?.includes(`--resume=${originalProjectThread.remoteId}`),
+        ),
+    )
+
+    phase = 'remote ordinary-thread settings, replies, clarification and preserved native selects'
+    const ordinaryLifeThreads = new Map()
+    for (const provider of ['codex', 'claude']) {
+      await page.getByRole('button', { name: 'New thread', exact: false }).click()
+      await page
+        .getByRole('button', {
+          name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
+        })
+        .click()
+      await send('hello')
+      await page
+        .locator('.markdown')
+        .getByText(`Hello from ${provider === 'codex' ? 'Codex' : 'Claude'} 👋`, { exact: true })
+        .waitFor()
+      await waitForSend()
+      const harnessBaseline = (await fixture.log()).length
+      const settingsPrompt =
+        provider === 'codex' ? '/life add research panels' : '@life add research panels'
+      await send(settingsPrompt)
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText(/Updated Life settings:/)
+        .waitFor()
+      assert.equal(await page.locator('.chat-error').count(), 0)
+      assert.equal(await page.locator('.composer-options select').count(), 3)
+      const unchanged = await configuration()
+      const unchangedExtensions = await extensions()
+      for (const [prompt, response] of [
+        ['no change customization', 'Life already has this behavior.'],
+        ['clarify customization', 'Which part of Life would you like me to change?'],
+        [
+          'explain customization',
+          'Life supports settings and executable extensions in this same conversation.',
+        ],
+        [
+          '/life make select components use shadcn',
+          /Replacing built-in components with actual shadcn requires source and dependency changes/,
+        ],
+      ]) {
+        await send(prompt)
+        await waitForSend()
+        await page
+          .locator('.markdown')
+          .getByText(response, { exact: typeof response === 'string' })
+          .waitFor()
+        assert.equal(await page.locator('.chat-error').count(), 0)
+        assert.deepEqual((await configuration()).config, unchanged.config)
+        assert.equal((await configuration()).revision, unchanged.revision)
+        assert.equal((await extensions()).revision, unchangedExtensions.revision)
+        assert.equal(await page.locator('.composer-options select').count(), 3)
+        for (const label of ['Coding agent', 'Agent model', 'Agent permission mode'])
+          assert.equal(
+            await page
+              .getByRole('combobox', { name: label, exact: true })
+              .evaluate((element) => element.tagName),
+            'SELECT',
+          )
+      }
+      const remoteLog = (await fixture.log()).slice(harnessBaseline)
+      assert.equal(
+        remoteLog.filter(
+          (entry) => entry.provider === provider && entry.message?.method === 'thread/start',
+        ).length,
+        0,
+      )
+      if (provider === 'codex')
+        assert.equal(
+          remoteLog.filter((entry) => entry.provider === provider && entry.argv).length,
+          0,
+        )
+      await waitUntil(async () => {
+        const saved = await page.evaluate(() =>
+          JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+        )
+        const thread = saved.find(
+          (item) =>
+            item.provider === provider &&
+            item.messages.some(
+              (message) => message.role === 'user' && message.text === settingsPrompt,
+            ),
+        )
+        if (
+          !thread?.messages.some(
+            (message) =>
+              message.role === 'user' && message.text === '/life make select components use shadcn',
+          )
+        )
+          return false
+        ordinaryLifeThreads.set(provider, thread)
+        return true
+      }, 'same ordinary thread and remote identity persisted')
+      assert.ok(ordinaryLifeThreads.get(provider).remoteId)
+      if (provider === 'claude') {
+        const resumedProcesses = remoteLog.filter(
+          (entry) => entry.provider === provider && entry.argv,
+        )
+        assert.equal(resumedProcesses.length, 5)
+        for (const entry of resumedProcesses)
+          assert.ok(entry.argv.includes(`--resume=${ordinaryLifeThreads.get(provider).remoteId}`))
+      }
+      assert.ok(
+        ordinaryLifeThreads
+          .get(provider)
+          .messages.some((message) => message.role === 'user' && message.text === 'hello'),
+      )
+      await page.getByRole('button', { name: 'Switch to dark theme', exact: true }).click()
+      await waitUntil(
+        async () => (await configuration()).config.theme === 'dark',
+        'contrasting theme for project marker confinement',
+      )
+      const projectMarkerConfig = await configuration()
+      await send('/project remote-life-markers')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText('<life-customization>{"theme":"light"}</life-customization>', { exact: true })
+        .waitFor()
+      assert.deepEqual((await configuration()).config, projectMarkerConfig.config)
+      assert.equal((await configuration()).revision, projectMarkerConfig.revision)
+      await page.getByRole('button', { name: 'Switch to light theme', exact: true }).click()
+      await waitUntil(
+        async () => (await configuration()).config.theme === 'light',
+        'light theme restored after project marker confinement',
+      )
+      await send('Customize Life by adding research panels')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText(/Updated Life settings:/)
+        .last()
+        .waitFor()
+      assert.equal(
+        await page.getByRole('button', { name: 'Customize Life', exact: true }).count(),
+        0,
+      )
+      phase = `${provider} Life turn cancellation, disconnect and remote conversation resume`
+      const beforeCancellation = await configuration()
+      const beforeCancellationExtensions = await extensions()
+      const startHangingLifeTurn = async () => {
+        const baseline = (await fixture.log()).length
+        await send('/life hang customization')
+        await waitUntil(
+          async () =>
+            (await fixture.log()).slice(baseline).some((entry) => {
+              const text =
+                entry.message?.params?.input?.[0]?.text ||
+                entry.message?.message?.content?.[0]?.text ||
+                ''
+              return (
+                entry.provider === provider &&
+                text.startsWith(
+                  'The user is asking about Life itself from an ordinary chat thread.',
+                ) &&
+                text.endsWith('"hang customization"')
+              )
+            }),
+          'Life request received by the existing remote conversation',
+        )
+      }
+      await startHangingLifeTurn()
+      await page.getByRole('button', { name: 'Stop agent', exact: true }).click()
+      await waitForSend()
+      assert.deepEqual((await configuration()).config, beforeCancellation.config)
+      assert.equal((await configuration()).revision, beforeCancellation.revision)
+      assert.equal((await extensions()).revision, beforeCancellationExtensions.revision)
+      await send('explain customization')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText('Life supports settings and executable extensions in this same conversation.', {
+          exact: true,
+        })
+        .last()
+        .waitFor()
+      await startHangingLifeTurn()
+      await page.evaluate(() => window.relay.connection.disconnect())
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).status === 'disconnected',
+        'Life turn interrupted on SSH disconnect',
+      )
+      assert.deepEqual((await configuration()).config, beforeCancellation.config)
+      assert.equal((await configuration()).revision, beforeCancellation.revision)
+      assert.equal((await extensions()).revision, beforeCancellationExtensions.revision)
+      const connectionLoss = 'SSH disconnected. Reconnect to continue this thread.'
+      await page.locator('.chat-error').getByText(connectionLoss, { exact: true }).waitFor()
+      assert.deepEqual(
+        (await page.locator('.chat-error').allTextContents()).map((text) => text.trim()),
+        [connectionLoss],
+      )
+      const resumeBaseline = (await fixture.log()).length
+      await page.getByRole('button', { name: 'Connections', exact: true }).click()
+      const reconnect = page.getByRole('dialog', { name: 'Connect a machine' })
+      await reconnect.waitFor()
+      assert.equal(await reconnect.getByPlaceholder('~/projects/my-app').count(), 0)
+      await waitUntil(
+        async () =>
+          (await reconnect.getByPlaceholder('dev.example.com').inputValue()) === input.host,
+        'saved machine profile selected',
+      )
+      await reconnect.getByPlaceholder('Your SSH password').fill(input.password)
+      await reconnect.getByRole('button', { name: 'Connect machine', exact: true }).click()
+      await reconnect.waitFor({ state: 'hidden' })
+      await chooseProject()
+      await page.getByText('SSH connected', { exact: true }).waitFor()
+      assert.equal(await page.getByRole('dialog', { name: 'Trust this machine?' }).count(), 0)
+      await send('explain customization')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText('Life supports settings and executable extensions in this same conversation.', {
+          exact: true,
+        })
+        .last()
+        .waitFor()
+      const resumedLog = (await fixture.log()).slice(resumeBaseline)
+      const originalThread = ordinaryLifeThreads.get(provider)
+      if (provider === 'codex')
+        assert.ok(
+          resumedLog.some(
+            (entry) =>
+              entry.provider === provider &&
+              entry.message?.method === 'thread/resume' &&
+              entry.message.params.threadId === originalThread.remoteId,
+          ),
+        )
+      else
+        assert.ok(
+          resumedLog.some(
+            (entry) =>
+              entry.provider === provider &&
+              entry.argv?.includes(`--resume=${originalThread.remoteId}`),
+          ),
+        )
+      await waitUntil(async () => {
+        const saved = await page.evaluate(() =>
+          JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+        )
+        const resumed = saved.find((thread) => thread.id === originalThread.id)
+        return (
+          resumed?.remoteId === originalThread.remoteId &&
+          resumed.turn >= originalThread.turn + 6 &&
+          resumed.messages.filter(
+            (message) => message.role === 'user' && message.text === '/life hang customization',
+          ).length === 2
+        )
+      }, 'same local history and remote identity after cancellation and reconnect')
+      assert.deepEqual(
+        (await page.locator('.chat-error').allTextContents()).map((text) => text.trim()),
+        [connectionLoss],
+      )
+      phase = 'remote ordinary-thread settings, replies, clarification and preserved native selects'
+    }
     const extended = (await configuration()).config
     assert.equal(extended.commands[0].name, 'Review research')
     assert.equal(extended.widgets.length, 2)
@@ -581,7 +1133,7 @@ async function run() {
         .evaluate((element) => element.style.getPropertyValue('--life-font-size')),
       '15px',
     )
-    dialog = await openCustomization()
+    dialog = await openSettings()
     await dialog.getByRole('button', { name: 'Undo', exact: true }).click()
     await waitUntil(
       async () => (await configuration()).config.theme === 'light',
@@ -658,26 +1210,61 @@ async function run() {
       false,
     )
 
-    phase = 'Codex and Claude live executable extension generation'
+    phase = 'Codex and Claude ordinary-thread executable extension generation'
     let generatedExtension
     for (const provider of ['codex', 'claude']) {
-      const manager = await openExtensions()
-      await manager.getByRole('tab', { name: 'Prompt', exact: true }).click()
-      await manager.getByRole('combobox', { name: 'Extension coding agent' }).selectOption(provider)
-      await manager
-        .getByRole('textbox', { name: 'Describe a Life extension' })
-        .fill(
-          'Add a research experiment counter with local executable JavaScript and a Node worker',
-        )
-      await manager.getByRole('button', { name: 'Build & apply', exact: true }).click()
-      await manager.locator('.form-success').waitFor()
-      assert.match(await manager.locator('.form-success').textContent(), /Research tools is live/)
+      await workspace()
+      await page.getByRole('button', { name: 'New thread', exact: false }).click()
+      await page
+        .getByRole('button', {
+          name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
+        })
+        .click()
+      await send('hello')
+      await waitForSend()
+      const extensionHarnessBaseline = (await fixture.log()).length
+      await send('/life add executable extension counter')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText(/Installed Research tools/)
+        .waitFor()
+      const extensionLog = (await fixture.log()).slice(extensionHarnessBaseline)
+      assert.equal(
+        extensionLog.filter(
+          (entry) => entry.provider === provider && entry.message?.method === 'thread/start',
+        ).length,
+        0,
+      )
+      const extensionProcesses = extensionLog.filter(
+        (entry) => entry.provider === provider && entry.argv,
+      )
+      if (provider === 'codex') assert.equal(extensionProcesses.length, 0)
+      else {
+        assert.equal(extensionProcesses.length, 1)
+        let extensionThread
+        await waitUntil(async () => {
+          extensionThread = await page.evaluate(() =>
+            JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+              (thread) =>
+                thread.provider === 'claude' &&
+                thread.messages.some(
+                  (message) =>
+                    message.role === 'user' &&
+                    message.text === '/life add executable extension counter',
+                ),
+            ),
+          )
+          return Boolean(extensionThread?.remoteId)
+        }, 'extension generated in the persisted ordinary Claude conversation')
+        assert.ok(extensionProcesses[0].argv.includes(`--resume=${extensionThread.remoteId}`))
+      }
       const state = await extensions()
       assert.deepEqual(state.errors, {})
       generatedExtension = state.extensions.find((extension) => extension.id === 'research-tools')
       assert.equal(generatedExtension?.renderer.placement, 'view')
       assert.equal(generatedExtension?.enabled, true)
-      await closeDialog()
+      await page.getByRole('button', { name: 'Research tools', exact: true }).click()
       await extensionFrame()
         .getByRole('heading', { name: 'Research counter', exact: true })
         .waitFor()
@@ -714,6 +1301,81 @@ async function run() {
           parentDocument: 'denied',
         },
       )
+      phase = `${provider} ordinary-thread disabled and failed extension activation`
+      await workspace()
+      await send('/life disabled customization extension')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText(
+          'Saved Disabled fixture extension disabled. Enable it or restore its previous version in Manage extensions.',
+          { exact: true },
+        )
+        .waitFor()
+      let activationState = await extensions()
+      assert.equal(
+        activationState.extensions.find(
+          (extension) => extension.id === 'disabled-fixture-extension',
+        )?.enabled,
+        false,
+      )
+      assert.equal(activationState.errors['disabled-fixture-extension'], undefined)
+      assert.equal(await page.locator('.chat-error').count(), 0)
+      await send('/life worker failure customization extension')
+      await waitForSend()
+      await page
+        .locator('.chat-error')
+        .getByText(/Life fixture activation failure/)
+        .waitFor()
+      activationState = await extensions()
+      assert.equal(
+        activationState.extensions.find((extension) => extension.id === 'broken-fixture-extension')
+          ?.enabled,
+        false,
+      )
+      assert.match(
+        activationState.errors['broken-fixture-extension'],
+        /Life fixture activation failure/,
+      )
+      assert.doesNotMatch(
+        await page.locator('.messages').textContent(),
+        /Installed Broken fixture extension|Broken fixture extension is live/,
+      )
+
+      phase = `${provider} local extension finalization disables streaming stop`
+      const errorsBeforeDelayedApply = await page.locator('.chat-error').count()
+      await send('/life delayed customization extension')
+      const applying = page.getByRole('button', { name: 'Applying Life change', exact: true })
+      await applying.waitFor()
+      assert.equal(await applying.isDisabled(), true)
+      assert.equal(await page.getByRole('button', { name: 'Stop agent', exact: true }).count(), 0)
+      assert.match(await page.locator('.agent-working').textContent(), /Applying Life change/)
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText(/Installed Delayed fixture extension/)
+        .waitFor()
+      assert.equal(
+        (await extensions()).extensions.find(
+          (extension) => extension.id === 'delayed-fixture-extension',
+        )?.enabled,
+        true,
+      )
+      assert.equal(await page.locator('.chat-error').count(), errorsBeforeDelayedApply)
+      await page.evaluate(async () => {
+        for (const id of [
+          'disabled-fixture-extension',
+          'broken-fixture-extension',
+          'delayed-fixture-extension',
+        ])
+          await window.relay.extensions.remove(id)
+      })
+      assert.deepEqual((await extensions()).errors, {})
+      await page.getByRole('button', { name: 'Research tools', exact: true }).click()
+      await extensionFrame()
+        .getByRole('heading', { name: 'Research counter', exact: true })
+        .waitFor()
+      phase = 'Codex and Claude ordinary-thread executable extension generation'
       if (provider === 'codex') {
         await page.evaluate(() => window.relay.extensions.remove('research-tools'))
         await page
@@ -935,7 +1597,7 @@ async function run() {
     page = await recoveredWindow
     page.setDefaultTimeout(15000)
     page.on('pageerror', (error) => rendererErrors.push(error.message))
-    await page.getByRole('dialog', { name: 'Build Life by prompting' }).waitFor()
+    await page.getByRole('dialog', { name: 'Manage extensions', exact: true }).waitFor()
     await closeDialog()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
@@ -969,24 +1631,40 @@ async function run() {
           projectCount: projects.length,
           providerLogEntries: (await fixture.log()).length,
           rendererErrors,
-          screenshots: ['life.png', 'life-light.png', 'life-workspace.png'],
+          screenshots: [
+            'life.png',
+            'life-light.png',
+            'life-workspace.png',
+            'life-project-picker.png',
+          ],
           assertions: [
             'fresh empty research map',
             'isolated sandboxed Electron',
             'platform window controls',
             'persisted dark/light themes',
-            'local customization and undo',
+            'offline ordinary-thread customization and Settings undo',
             'research dependencies and filters',
             'Mermaid SVG and download',
             'OpenSSH config resolution',
             'real loopback host trust and SFTP',
+            'machine connection before project selection with coding and files blocked until chosen',
+            'post-connect SFTP directory browsing and project choice after reconnect',
+            'switching projects preserves thread scope and requires returning to its original directory',
+            'real SSH HTTP forwarding with local collision mapping and browser URL',
+            'automatic port forwarding default, persisted toggle and socket cleanup',
             'Codex and Claude streaming, approvals and questions',
             'interruption and saved chat navigation',
             'early initialization cancellation and replacement send',
-            'remote declarative customization',
+            'same-thread Codex and Claude declarative customization',
+            'normal replies, clarification and no-op proposals leave settings unchanged',
+            'Life turn cancellation and SSH reconnect preserve local and remote conversation identity',
+            'project response markers are never applied as Life settings',
+            'existing native selects preserved and shadcn limitations explained',
             'custom commands and Mermaid panels',
             'live configuration file watch and undo',
-            'Codex and Claude executable extension generation',
+            'same-thread Codex and Claude executable extension generation',
+            'disabled and startup-failed extensions never report a live install',
+            'local extension finalization disables streaming interruption until applied',
             'sandboxed iframe and local Node worker',
             'worker core capabilities and UI capability rejection',
             'extension hot reload, rollback, disable and remove',
@@ -1044,6 +1722,8 @@ async function run() {
       }
     }
     await fixture.close()
+    remoteService.closeAllConnections()
+    await new Promise((resolveClosed) => remoteService.close(resolveClosed))
     await rm(configurationRoot, { recursive: true, force: true })
   }
 }

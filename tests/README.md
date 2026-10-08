@@ -2,7 +2,9 @@ Run `npm test` for unit tests and the loopback SSH integration suite. No account
 
 The integration fixture opens a real encrypted `ssh2` connection on `127.0.0.1`, authenticates with a fixture password, executes deterministic local `codex` and `claude` stand-ins, and serves SFTP from temporary files. Each connection must explicitly trust the generated host fingerprint. Temporary provider programs are placed first in the fixture command path.
 
-Coverage includes host trust and changed keys, credential redaction, stream framing and Unicode, command quoting, workspace confinement including symlinks, preview limits, terminal input and SSH PTY/resize requests, both provider permission and question protocols, interruptions, remote session resumption, crashed-process restart, and provider failures.
+Coverage includes host trust and changed keys, credential redaction, stream framing and Unicode, command quoting, workspace confinement including symlinks, preview limits, terminal input and SSH PTY/resize requests, both provider permission and question protocols, interruptions, remote session resumption, crashed-process restart, and provider failures. Ordinary-thread Life tests verify conversational replies, no-change proposals, follow-up context, and returning to project permissions with both providers.
+
+Forwarding tests send real HTTP traffic through SSH direct-TCP channels and cover discovery, occupied local ports, IPv6 listeners, cancellation, polling, disconnects, and the saved on/off preference. The desktop smoke fixture restricts discovery and forwarding to its own HTTP service through `fixture.discoveryPorts` and `fixture.allowedForwardPorts`; it does not expose unrelated services on the test host.
 
 The fixture accepts SSH PTY requests but runs its shell through pipes; it does not allocate a native pseudoterminal or verify terminal control sequences. Fake providers validate the desktop's protocol behavior against deterministic messages; actual upstream provider releases and login flows still require testing on a real SSH machine.
 

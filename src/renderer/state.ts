@@ -1,4 +1,10 @@
-import type { AgentEvent, ConnectionProfile, PermissionMode, Provider } from '../shared/types'
+import type {
+  AgentEvent,
+  ConnectionProfile,
+  ConnectionState,
+  PermissionMode,
+  Provider,
+} from '../shared/types'
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'tool' | 'error'
@@ -10,6 +16,10 @@ export interface Message {
 export interface Thread {
   id: string
   profileId: string
+  /** Canonical remote project folder associated with the provider conversation. */
+  workspace?: string
+  /** A previous remote conversation had no resolvable project; never adopt a later project's folder. */
+  workspaceUnknown?: boolean
   provider: Provider
   title: string
   remoteId?: string
@@ -20,6 +30,8 @@ export interface Thread {
   updatedAt: number
   turn: number
   pending: AgentEvent[]
+  /** Follow-up messages retain Life scope until the user returns to their project. */
+  lifeScope?: boolean
 }
 export function readThreads(): Thread[] {
   try {
@@ -37,6 +49,12 @@ export function readThreads(): Thread[] {
       .map((t) => ({
         id: t.id,
         profileId: t.profileId,
+        ...(typeof t.workspace === 'string' &&
+        t.workspace.startsWith('/') &&
+        !/[\x00-\x1f]/.test(t.workspace)
+          ? { workspace: t.workspace }
+          : {}),
+        ...(t.workspaceUnknown === true ? { workspaceUnknown: true } : {}),
         provider: t.provider as Provider,
         title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled thread',
         remoteId: typeof t.remoteId === 'string' ? t.remoteId : undefined,
@@ -61,6 +79,7 @@ export function readThreads(): Thread[] {
           })),
         busy: false,
         pending: [],
+        ...(t.lifeScope === true ? { lifeScope: true } : {}),
         turn: Number.isInteger(t.turn) && t.turn >= 0 ? t.turn : 0,
         mode: ['review', 'edit', 'plan'].includes(t.mode)
           ? (t.mode as PermissionMode)
@@ -73,6 +92,19 @@ export function readThreads(): Thread[] {
   } catch {
     return []
   }
+}
+export function bindLegacyThreadWorkspace(thread: Thread, connection: ConnectionState): Thread {
+  if (
+    connection.status !== 'connected' ||
+    thread.profileId !== connection.profile?.id ||
+    !thread.remoteId ||
+    thread.workspace ||
+    thread.workspaceUnknown
+  )
+    return thread
+  return connection.lastWorkspace
+    ? { ...thread, workspace: connection.lastWorkspace }
+    : { ...thread, workspaceUnknown: true }
 }
 export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   if (event.type === 'session') return { ...thread, remoteId: event.remoteId }

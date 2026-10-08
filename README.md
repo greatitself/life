@@ -22,32 +22,48 @@ From **0.2.2**, open **Updates** to check, download, and restart into subsequent
 
 ## Tell Life to change itself
 
-Open **Customize Life** and describe the change. Common settings work offline:
+Ask Life from any existing Codex or Claude Code thread. Use `/life`, `@life`, or name Life explicitly so it can distinguish changes to the application from changes to your connected project. The composer shows the current scope; use `/project` or the scope control to return to project work. There is no separate customization conversation or prompt button.
 
-- “Switch to light theme and use a compact layout.”
-- “Set font size to 16.”
-- “Hide the workspace panel.”
+Common settings work offline in the same thread:
 
-A connected Codex or Claude Code agent can change defaults, labels, reusable prompt commands, and Markdown/Mermaid research panels. Proposals are validated and applied immediately, with undo, reset, and reload. The local `life.config.json` file also reloads when edited externally.
+- “/life switch to light theme and use a compact layout.”
+- “Life, set font size to 16.”
+- “/life hide the workspace panel.”
+
+A connected Codex or Claude Code agent can change defaults, labels, reusable prompt commands, Markdown/Mermaid research panels, and executable extensions. It uses the same thread and provider session, including follow-up questions. Valid proposals are applied immediately; explanations, questions, and replies that propose no changes remain ordinary chat messages. Unsupported requests no longer fail with an empty settings patch. Open **Settings** for undo, reset, and reload. The local `life.config.json` file also reloads when edited externally.
 
 **Live extensions** go further: prompts can generate executable UI and behavior, including new views, CSS changes to the existing interface, or replacements for the entire workspace. Renderer extensions run in isolated frames and use the Life bridge to access connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers and can use local files, commands, and Node modules with your user permissions. Enable, disable, edit, reload, and roll back extensions without rebuilding the app. The built-in workspace remains accessible through the recovery control and **Ctrl/Cmd + Shift + L**.
 
 Extensions are stored as editable manifests in Life’s local data directory. They can change the application experience and add behavior; changes to Electron itself, bundled native dependencies, or the installer still require a source build. Open a checkout of this repository as an agent workspace to develop those changes.
 
+The existing select controls are unchanged in this release so you can test customization yourself. Replacing built-in React components with shadcn source components needs a source change and build; a CSS restyle does not install shadcn.
+
+## Release signing
+
+Signing is deferred until publisher credentials are available. Current Windows and macOS installers remain unsigned, and platform trust warnings may still appear. See [signing setup](docs/signing.md) for trusted Windows signing, macOS Developer ID signing and notarization, and Linux distribution details. Signing does not guarantee immediate Windows SmartScreen reputation.
+
 ## Connect a research machine
 
 1. Click **Connect a machine** or **Connect** on the map.
 2. Select a host from your local `~/.ssh/config`, or enter connection details manually. You can choose another config file.
-3. Choose an existing remote project directory, such as `~/projects/research`.
-4. Use a local private key, SSH agent, or password. Encrypted private keys accept a passphrase.
-5. Verify and accept the target machine’s SSH fingerprint on its first connection.
+3. Use a local private key, SSH agent, or password. Encrypted private keys accept a passphrase.
+4. Verify and accept the target machine’s SSH fingerprint on its first connection.
+5. After the machine connects, choose a remote project folder. Browse its directories or enter a path such as `~/projects/research`. You can choose a project later or switch folders from the workspace header.
 6. Select an agent, model, and permission mode, then send a prompt.
+
+![Choose a project after connecting](docs/images/life-project-picker.png)
 
 Life shows OpenSSH’s resolved options, including `Include` files, `HostName`, `User`, `Port`, `IdentityFile`, `IdentityAgent`, algorithms, keepalives, and `ProxyJump`. Saved aliases resolve again when connecting. Reading config requires the local OpenSSH client; Windows users can install **OpenSSH Client** from Optional Features.
 
 Jump hosts use OpenSSH with key/agent authentication and must already be trusted in OpenSSH `known_hosts`. Life verifies and pins the final target separately. Unsupported features such as `ProxyCommand`, certificate/hardware-key providers, configured forwarding, and local commands are reported explicitly. Life does not import OpenSSH’s target trust or reuse multiplexed sessions.
 
-Profiles save connection details and key **paths**. Passwords, passphrases, and key contents are never saved. A changed pinned target fingerprint fails the connection. One SSH connection is active at a time; multiple agent threads can use it.
+Profiles save connection details, key **paths**, and the last selected project. Passwords, passphrases, and key contents are never saved. A changed pinned target fingerprint fails the connection. One SSH connection is active at a time; multiple agent threads can use it. Connecting does not require a project folder, and automatic forwarding starts before project selection. Threads keep their original project so switching folders cannot silently move their coding work.
+
+## Automatic port forwarding
+
+Automatic forwarding is enabled by default. While connected over SSH, Life checks for TCP services listening on loopback or all interfaces, on ports 1024 and above, and exposes up to 32 of them on `127.0.0.1` on your computer. Open **Ports** to see the remote-to-local mappings, copy an address, or open a web service in your browser. If a matching local port is occupied, Life selects an available port and shows it in the list.
+
+Turn off **Automatic port forwarding** in the Ports panel to close its tunnels. This preference survives restarts. You can also say “/life turn off automatic port forwarding” in any thread. Disconnecting closes the tunnels; reconnecting discovers services again when forwarding is enabled. Linux discovery uses `ss` or `lsof`, and macOS uses `lsof`.
 
 ## Prepare the remote agents
 

@@ -1,0 +1,123 @@
+.project-modal {
+  max-width: 620px;
+}
+.project-directory-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.project-directory-field input {
+  min-height: 40px;
+  padding: 10px 12px;
+  font-family: var(--mono);
+}
+.project-recent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 9px 0;
+  color: var(--muted);
+  text-align: left;
+  font-size: 11px;
+}
+.project-recent span {
+  flex: 1;
+  min-width: 0;
+}
+.project-recent strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+.remote-directories {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.remote-directories header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.remote-directories header > span {
+  flex: 1;
+  min-width: 0;
+  font: 11px var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.remote-directories ul {
+  list-style: none;
+  margin: 0;
+  padding: 5px;
+  max-height: 260px;
+  overflow: auto;
+}
+.remote-directories li button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 10px;
+  border-radius: 5px;
+  text-align: left;
+  color: var(--muted);
+}
+.remote-directories li button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.remote-directories li button span {
+  flex: 1;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+.project-folders-empty {
+  min-height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.project-picker-button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 230px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.project-picker-button:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.project-picker-button span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 700px) {
+  .project-picker-button {
+    max-width: 140px;
+  }
+}

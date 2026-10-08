@@ -418,6 +418,22 @@
   color: var(--muted);
   text-align: left;
 }
+.life-scope-reset {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: inherit;
+}
+.life-scope-reset:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.life-scope-reset:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
 .extension-sidebar-entry span,
 .extension-sidebar-view span {
   flex: 1;

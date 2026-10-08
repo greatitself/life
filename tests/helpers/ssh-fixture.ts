@@ -12,7 +12,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from 'node:fs/promis
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createServer, type Server as TCPServer, type Socket } from 'node:net'
+import {
+  createServer,
+  connect as connectTCP,
+  type Server as TCPServer,
+  type Socket,
+} from 'node:net'
 import type { ConnectInput } from '../../src/shared/types'
 
 type LogEntry = { provider: 'codex' | 'claude'; argv?: string[]; message?: Record<string, any> }
@@ -33,6 +38,9 @@ export class SSHFixture {
   readonly commands: string[] = []
   readonly ptys: PseudoTtyInfo[] = []
   readonly resizes: WindowChangeInfo[] = []
+  readonly allowedForwardPorts = new Set<number>()
+  readonly forwardRequests: Array<{ host: string; port: number }> = []
+  discoveryPorts?: number[]
   private server?: Server
   private transport?: TCPServer
   private sockets = new Set<Socket>()
@@ -81,6 +89,31 @@ export class SSHFixture {
           context.accept()
         else context.reject()
       })
+      client.on('ready', () => {
+        client.on('tcpip', (accept, reject, info) => {
+          this.forwardRequests.push({ host: info.destIP, port: info.destPort })
+          if (
+            !['127.0.0.1', '::1'].includes(info.destIP) ||
+            !this.allowedForwardPorts.has(info.destPort)
+          ) {
+            reject()
+            return
+          }
+          let accepted = false
+          const socket = connectTCP(info.destPort, info.destIP, () => {
+            accepted = true
+            const channel = accept()
+            socket.pipe(channel).pipe(socket)
+            channel.on('error', () => socket.destroy())
+            channel.on('close', () => socket.destroy())
+          })
+          this.sockets.add(socket)
+          socket.on('close', () => this.sockets.delete(socket))
+          socket.on('error', () => {
+            if (!accepted) reject()
+          })
+        })
+      })
       client.on('ready', () =>
         client.on('session', (accept) => {
           const session = accept()
@@ -96,6 +129,17 @@ export class SSHFixture {
           session.on('exec', (acceptExec, _reject, info) => {
             this.commands.push(info.command)
             const channel = acceptExec()
+            if (this.discoveryPorts && /LIFE_PORTS_(SS|LSOF)/.test(info.command)) {
+              channel.write(
+                'LIFE_PORTS_SS\n' +
+                  this.discoveryPorts
+                    .map((port) => `LISTEN 0 511 127.0.0.1:${port} 0.0.0.0:*\n`)
+                    .join(''),
+              )
+              channel.exit(0)
+              channel.end()
+              return
+            }
             const child = spawn('/bin/bash', ['--noprofile', '--norc', '-c', info.command], {
               cwd: this.workspace,
               env: {

@@ -51,6 +51,7 @@ export const lifeConfigSchema = z
     sidebarWidth: z.number().int().min(220).max(420),
     workspacePanelWidth: z.number().int().min(260).max(520),
     workspacePanel: z.boolean(),
+    autoPortForward: z.boolean(),
     defaultProvider: provider,
     defaultMode: mode,
     defaultModel: z.string().max(200),
@@ -88,6 +89,7 @@ export const defaultLifeConfig: LifeConfig = {
   sidebarWidth: 260,
   workspacePanelWidth: 320,
   workspacePanel: true,
+  autoPortForward: true,
   defaultProvider: 'codex',
   defaultMode: 'review',
   defaultModel: '',
@@ -128,7 +130,16 @@ function assertPlainJson(value: unknown, seen = new WeakSet<object>(), depth = 0
 
 export function parseLifeConfig(value: unknown): LifeConfig {
   assertPlainJson(value)
-  const config = lifeConfigSchema.parse(value)
+  // Existing version-1 files predate forwarding. Default full configurations,
+  // rather than patches, so an empty agent response cannot enable a feature.
+  const compatible =
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    !Object.hasOwn(value, 'autoPortForward')
+      ? { ...value, autoPortForward: true }
+      : value
+  const config = lifeConfigSchema.parse(compatible)
   if (JSON.stringify(config).length > 300000)
     throw new Error('Life configuration must be smaller than 300,000 characters')
   return config

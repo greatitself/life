@@ -1,6 +1,7 @@
 import type { LifeConfigPatch, LifeConfigState } from './customization'
 import type { LifeUpdatesAPI } from './updates'
 import type { LifeExtensionManifest, LifeExtensionsSnapshot } from './extensions'
+import type { PortForwardingState } from './port-forwarding'
 export type Provider = 'codex' | 'claude'
 export type PermissionMode = 'review' | 'edit' | 'plan'
 export interface SSHConfigSource {
@@ -37,13 +38,16 @@ export interface ConnectionProfile {
   workspace: string
   sshConfig?: SSHConfigSource
 }
-export interface ConnectInput extends ConnectionProfile {
+export interface ConnectInput extends Omit<ConnectionProfile, 'workspace'> {
+  workspace?: string
   password?: string
   passphrase?: string
 }
 export interface ConnectionState {
   status: 'disconnected' | 'connecting' | 'connected'
   profile?: ConnectionProfile
+  home?: string
+  lastWorkspace?: string
   workspace?: string
   codex?: string
   claude?: string
@@ -56,6 +60,12 @@ export interface StartInput {
   prompt: string
   model?: string
   mode: PermissionMode
+  workspace?: string
+}
+export interface RemoteDirectoryList {
+  path: string
+  parent?: string
+  entries: { name: string; path: string }[]
 }
 export interface FileEntry {
   name: string
@@ -105,6 +115,10 @@ export interface ModelOption {
 }
 export interface RelayAPI {
   platform: string
+  forwarding: {
+    get(): Promise<PortForwardingState>
+    onState(callback: (state: PortForwardingState) => void): () => void
+  }
   updates: LifeUpdatesAPI
   extensions: {
     capabilities: readonly string[]
@@ -148,6 +162,8 @@ export interface RelayAPI {
   }
   connection: {
     connect(input: ConnectInput): Promise<ConnectionState>
+    selectWorkspace(path: string): Promise<ConnectionState>
+    listDirectories(path?: string): Promise<RemoteDirectoryList>
     disconnect(): Promise<void>
     state(): Promise<ConnectionState>
     trust(id: string, accepted: boolean): Promise<void>

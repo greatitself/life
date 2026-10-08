@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { RelayAPI } from '../shared/types'
+import { extensionCapabilities } from '../shared/extension-core'
 
 const subscribe = <T>(channel: string, callback: (data: T) => void) => {
   const listener = (_: Electron.IpcRendererEvent, data: T) => callback(data)
@@ -7,6 +8,41 @@ const subscribe = <T>(channel: string, callback: (data: T) => void) => {
   return () => ipcRenderer.removeListener(channel, listener)
 }
 const api: RelayAPI = {
+  platform: process.platform,
+  extensions: {
+    capabilities: extensionCapabilities,
+    get: () => ipcRenderer.invoke('extensions:get'),
+    apply: (manifest) => ipcRenderer.invoke('extensions:apply', manifest),
+    enable: (id, enabled) => ipcRenderer.invoke('extensions:enable', id, enabled),
+    remove: (id) => ipcRenderer.invoke('extensions:remove', id),
+    rollback: (id) => ipcRenderer.invoke('extensions:rollback', id),
+    call: (id, method, args) => ipcRenderer.invoke('extensions:call', id, method, args),
+    invoke: (method, args) => ipcRenderer.invoke('extensions:invoke', method, args),
+    openFolder: () => ipcRenderer.invoke('extensions:open-folder'),
+    recover: () => ipcRenderer.invoke('extensions:recover'),
+    onState: (callback) => subscribe('extensions:state', callback),
+    onEvent: (callback) => subscribe('extensions:event', callback),
+    onRecovery: (callback) => subscribe('extensions:recover', callback),
+  },
+  updates: {
+    get: () => ipcRenderer.invoke('updates:get'),
+    check: () => ipcRenderer.invoke('updates:check'),
+    download: () => ipcRenderer.invoke('updates:download'),
+    install: () => ipcRenderer.invoke('updates:install'),
+    onState: (callback) => subscribe('updates:state', callback),
+  },
+  customization: {
+    get: () => ipcRenderer.invoke('customization:get'),
+    apply: (patch) => ipcRenderer.invoke('customization:apply', patch),
+    undo: () => ipcRenderer.invoke('customization:undo'),
+    reset: () => ipcRenderer.invoke('customization:reset'),
+    reload: () => ipcRenderer.invoke('customization:reload'),
+    onChange: (callback) => subscribe('customization:state', callback),
+  },
+  sshConfig: {
+    list: (path) => ipcRenderer.invoke('ssh-config:list', path),
+    resolve: (alias, path) => ipcRenderer.invoke('ssh-config:resolve', alias, path),
+  },
   profiles: {
     list: () => ipcRenderer.invoke('profiles:list'),
     save: (profile) => ipcRenderer.invoke('profiles:save', profile),
@@ -21,6 +57,7 @@ const api: RelayAPI = {
   agent: {
     start: (input) => ipcRenderer.invoke('agent:start', input),
     stop: (id) => ipcRenderer.invoke('agent:stop', id),
+    dispose: (id) => ipcRenderer.invoke('agent:dispose', id),
     respond: (id, requestId, accepted, answers) =>
       ipcRenderer.invoke('agent:respond', id, requestId, accepted, answers),
     models: (provider) => ipcRenderer.invoke('agent:models', provider),
@@ -41,6 +78,8 @@ const api: RelayAPI = {
     minimize: () => ipcRenderer.send('window:action', 'minimize'),
     maximize: () => ipcRenderer.send('window:action', 'maximize'),
     close: () => ipcRenderer.send('window:action', 'close'),
+    state: () => ipcRenderer.invoke('window:state'),
+    onState: (callback) => subscribe('window:state', callback),
   },
   onConnection: (callback) => subscribe('connection:state', callback),
   onAgent: (callback) => subscribe('agent:event', callback),

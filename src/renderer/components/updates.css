@@ -1,0 +1,90 @@
+.updates-modal {
+  max-width: 520px;
+}
+.updates-card {
+  padding: 26px 24px 22px;
+  margin: 20px 0 16px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.updates-symbol {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 16px;
+  color: var(--text-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.updates-card h3 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  color: var(--text-strong);
+}
+.updates-card p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.updates-card p strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.updates-progress {
+  margin-top: 22px;
+}
+.updates-progress progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+  border: 0;
+  border-radius: 5px;
+  overflow: hidden;
+  accent-color: var(--accent);
+  background: var(--border);
+}
+.updates-progress progress::-webkit-progress-bar {
+  background: var(--border);
+}
+.updates-progress progress::-webkit-progress-value {
+  background: var(--accent);
+}
+.updates-progress > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 9px;
+  color: var(--muted);
+  font: 11px var(--mono);
+}
+.updates-error {
+  text-align: left;
+  overflow-wrap: anywhere;
+  margin-top: 16px;
+}
+.updates-running {
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.updates-actions {
+  justify-content: space-between;
+}
+.updates-actions a {
+  text-decoration: none;
+}
+.updates-source {
+  text-align: center;
+  margin: 16px 0 0;
+  color: var(--dim);
+  font-size: 11px;
+}

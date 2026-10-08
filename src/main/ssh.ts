@@ -1,13 +1,26 @@
-import { Client, type ClientChannel, type SFTPWrapper, type VerifyCallback } from 'ssh2'
+import {
+  Client,
+  type AnyAuthMethod,
+  type ClientChannel,
+  type SFTPWrapper,
+  type VerifyCallback,
+} from 'ssh2'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { posix, join } from 'node:path'
 import { homedir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { StringDecoder } from 'node:string_decoder'
-import type { ConnectInput, ConnectionState, FileEntry, HostKeyRequest } from '../shared/types'
+import type {
+  ConnectInput,
+  ConnectionState,
+  FileEntry,
+  HostKeyRequest,
+  SSHConfigHost,
+} from '../shared/types'
 import { shellQuote, profileSchema } from '../shared/validation'
 import { Store } from './store'
+import { openProxyJump, resolveSSHConfig, sshConfigTransportOptions } from './ssh-config'
 
 export function remoteCommand(command: string) {
   return `exec "$SHELL" -lc ${shellQuote('export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:$PATH"; ' + command)}`
@@ -19,6 +32,7 @@ export function remotePath(path: string) {
 export class SSHConnection extends EventEmitter {
   state: ConnectionState = { status: 'disconnected' }
   private client?: Client
+  private jump?: ReturnType<typeof openProxyJump>
   private sftp?: SFTPWrapper
   private pendingTrust = new Map<string, (accepted: boolean) => void>()
   private terminal?: ClientChannel
@@ -34,33 +48,105 @@ export class SSHConnection extends EventEmitter {
   async connect(input: ConnectInput): Promise<ConnectionState> {
     if (this.state.status === 'connecting') throw new Error('A connection is already in progress')
     this.disconnect()
-    const profile = profileSchema.parse(input)
+    let profile = profileSchema.parse(input)
     this.update({ status: 'connecting', profile })
     const client = new Client()
     this.client = client
+    let jump: ReturnType<typeof openProxyJump> | undefined
     try {
-      const privateKey =
+      let config: SSHConfigHost | undefined
+      if (profile.sshConfig) {
+        config = await resolveSSHConfig(profile.sshConfig.alias, profile.sshConfig.path)
+        if (this.client !== client) throw new Error('SSH connection cancelled')
+        if (config.unsupportedOptions.length)
+          throw new Error(
+            `This SSH config uses options Life cannot apply: ${config.unsupportedOptions.join(', ')}. Use another alias or switch this profile to manual settings.`,
+          )
+        profile = profileSchema.parse({
+          ...profile,
+          host: config.host,
+          port: config.port,
+          username: config.username,
+        })
+        input = { ...input, ...profile }
+        this.update({ status: 'connecting', profile })
+        if (input.auth !== 'password' && config.options.pubkeyauthentication?.[0] === 'no')
+          throw new Error(
+            'Public-key authentication is disabled by this SSH config. Choose password authentication.',
+          )
+        if (input.auth === 'password' && config.options.passwordauthentication?.[0] === 'no')
+          throw new Error(
+            'Password authentication is disabled by this SSH config. Choose a private key or agent.',
+          )
+        if (input.auth === 'agent' && config.identitiesOnly)
+          throw new Error(
+            'IdentitiesOnly is enabled. Choose SSH private key authentication to use the IdentityFile entries, or switch to manual settings.',
+          )
+      }
+      const privateKeyPaths =
         input.auth === 'key'
-          ? await readFile(
-              input.privateKeyPath.startsWith('~/')
-                ? join(homedir(), input.privateKeyPath.slice(2))
-                : input.privateKeyPath,
-            )
-          : undefined
+          ? config
+            ? config.availableIdentityFiles
+            : [
+                input.privateKeyPath.startsWith('~/')
+                  ? join(homedir(), input.privateKeyPath.slice(2))
+                  : input.privateKeyPath,
+              ]
+          : []
+      if (input.auth === 'key' && !privateKeyPaths.length)
+        throw new Error(
+          'No configured SSH private key exists on this computer. Choose agent/password authentication or switch to manual settings.',
+        )
+      const privateKeys = await Promise.all(privateKeyPaths.map((path) => readFile(path)))
+      const privateKey = privateKeys[0]
       if (this.client !== client) throw new Error('SSH connection cancelled')
+      const configuredAgent = config?.options.identityagent?.[0]
+      const defaultAgent =
+        process.env.SSH_AUTH_SOCK ||
+        (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined)
+      const forwardAgent = config?.options.forwardagent?.[0] === 'yes'
       const agent =
-        input.auth === 'agent'
-          ? process.env.SSH_AUTH_SOCK ||
-            (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined)
+        input.auth === 'agent' ||
+        (config && input.auth === 'key' && !config.identitiesOnly) ||
+        forwardAgent
+          ? configuredAgent === 'none'
+            ? undefined
+            : (config?.identityAgent ?? defaultAgent)
           : undefined
       if (input.auth === 'agent' && !agent)
         throw new Error('No SSH agent found. Choose a private key or password instead.')
+      if (forwardAgent && !agent)
+        throw new Error(
+          'ForwardAgent is enabled in SSH config, but no local SSH agent is available. Start the configured agent or disable ForwardAgent.',
+        )
+      const authHandler: AnyAuthMethod[] | undefined =
+        config && input.auth === 'key'
+          ? [
+              { type: 'none', username: input.username },
+              ...privateKeys.map((key): AnyAuthMethod => ({
+                type: 'publickey',
+                username: input.username,
+                key,
+                passphrase: input.passphrase,
+              })),
+              ...(agent && !config.identitiesOnly
+                ? [{ type: 'agent' as const, username: input.username, agent }]
+                : []),
+            ]
+          : undefined
+      if (config?.proxyJump) {
+        jump = this.jump = openProxyJump(profile.sshConfig!.path, config)
+        // A failed spawn can report asynchronously before client.connect has attached listeners.
+        this.jump.stream.on('error', (error) => this.emit('diagnostic', error.message))
+      }
       await new Promise<void>((resolve, reject) => {
         client.once('ready', resolve)
         client.on('error', reject)
         client.once('close', () => {
           reject(new Error('SSH connection closed'))
           if (this.client === client) {
+            this.jump?.stream.destroy()
+            this.jump = undefined
             this.client = undefined
             this.sftp = undefined
             this.terminal = undefined
@@ -83,9 +169,13 @@ export class SSHConnection extends EventEmitter {
           passphrase: input.passphrase,
           password: input.auth === 'password' ? input.password : undefined,
           agent,
+          authHandler,
           readyTimeout: 90000,
           keepaliveInterval: 15000,
           keepaliveCountMax: 3,
+          ...(config ? sshConfigTransportOptions(config) : {}),
+          ...(this.jump ? { sock: this.jump.stream } : {}),
+          agentForward: forwardAgent,
           hostVerifier: (key: Buffer, callback: VerifyCallback) => {
             if (this.client !== client) {
               callback(false)
@@ -93,7 +183,7 @@ export class SSHConnection extends EventEmitter {
             }
             const fingerprint =
               'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '')
-            const host = `${input.host}:${input.port}`
+            const host = `${config?.options.hostkeyalias?.[0] || input.host}:${input.port}`
             const known = this.store.hostKey(host)
             if (known) {
               if (known !== fingerprint) {
@@ -157,9 +247,12 @@ export class SSHConnection extends EventEmitter {
       })
       return this.state
     } catch (error) {
-      if (this.client !== client)
-        throw new Error((error as Error).message || 'SSH connection cancelled')
-      const message = this.state.error || (error as Error).message
+      const proxyDiagnostic = jump?.diagnostic()
+      const failureMessage = proxyDiagnostic
+        ? `OpenSSH ProxyJump failed: ${proxyDiagnostic}. Jump hosts need key/agent authentication and must already be trusted in OpenSSH known_hosts.`
+        : (error as Error).message || 'SSH connection cancelled'
+      if (this.client !== client) throw new Error(failureMessage)
+      const message = this.state.error || failureMessage
       this.disconnect()
       this.update({ status: 'disconnected', profile, error: message })
       throw new Error(message)
@@ -180,6 +273,8 @@ export class SSHConnection extends EventEmitter {
     this.update({ status: 'disconnected' })
     this.emit('disconnected')
     client?.end()
+    this.jump?.stream.destroy()
+    this.jump = undefined
   }
   channel(command: string, pty?: { cols: number; rows: number }): Promise<ClientChannel> {
     const client = this.client

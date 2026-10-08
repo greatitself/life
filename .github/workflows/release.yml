@@ -19,6 +19,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
+      - run: xvfb-run -a npm run test:desktop
 
   build:
     needs: verify
@@ -50,6 +52,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: Verify Windows upgrade from Life 0.1.0
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: ./tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName
       - uses: actions/upload-artifact@v4
         with:
           name: life-${{ matrix.platform }}
@@ -59,6 +65,8 @@ jobs:
             release/*.deb
             release/*.exe
             release/*.dmg
+            release/*.blockmap
+            release/latest*.yml
 
   publish:
     needs: build
@@ -79,17 +87,23 @@ jobs:
         run: |
           set -euo pipefail
           cd installers
-          sha256sum Life-* > SHA256SUMS.txt
+          sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life is a desktop workspace for Codex and Claude Code over SSH.
+          Life 0.2 is a customizable research workspace for Codex and Claude Code over SSH.
 
-          - Projects and threads, streamed conversations, and agent approval requests.
-          - Remote file previews, Git changes, and an interactive SSH terminal.
-          - SSH private key, agent, and password authentication with host-key verification.
+          - Monochrome dark and light themes, a new Life logo, and official SVGL company icons.
+          - Research map with Mermaid diagrams, dependencies, notes, filters, and project backups.
+          - Agent workspace with remote files, Git changes, terminal, and provider approvals.
+          - SSH config aliases, resolved options, and ProxyJump with trusted OpenSSH jump hosts.
+          - Prompt-driven live settings, commands, panels, executable UI/backend extensions, hot reload and rollback.
+          - Windows installer upgrades the existing Life installation; in-app updates for future Windows releases.
 
-          Install the package for your platform. Agent CLIs must be installed and signed in on the remote Linux or macOS machine. These initial builds are unsigned; macOS users may need to use Open Anyway in System Settings, and Windows may show an unrecognized publisher prompt.
+          Windows users on 0.1.0: run the new .exe once to upgrade. Profiles, conversation history, and local research data are preserved. Then use Updates inside Life for subsequent releases. Executable extensions can replace views and add local behavior immediately. Electron/native dependency and installer changes still require a source build.
+
+          Agent CLIs must be installed and signed in on the remote Linux or macOS machine. Builds are unsigned; macOS users may need to use Open Anyway in System Settings, and Windows may show an unrecognized publisher prompt. macOS and Debian updates use the new installer; AppImage and Windows support in-app updates.
           NOTES
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --title "Life $RELEASE_TAG" --notes-file release-notes.md
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG" --notes-file release-notes.md
           fi
-          gh release upload "$RELEASE_TAG" Life-* SHA256SUMS.txt --clobber
+          gh release upload "$RELEASE_TAG" Life-* latest*.yml SHA256SUMS.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

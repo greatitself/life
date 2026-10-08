@@ -1,23 +1,39 @@
-export function RelayMark({ size = 24 }: { size?: number }) {
+import codexIcon from '../assets/svgl/codex.svg'
+import claudeIcon from '../assets/svgl/claude.svg'
+
+/** Life's branching L represents research paths that share a common starting point. */
+export function LifeMark({ size = 24 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className="life-mark"
+      aria-hidden="true"
+    >
       <path
-        d="M5 18V6h12M27 14v12H15"
+        d="M7 5v22h19M7 16h10l8-8"
         stroke="currentColor"
-        strokeWidth="3.5"
+        strokeWidth="2.75"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path
-        d="m6 25 19-19M16 6h9v9"
-        stroke="currentColor"
-        strokeWidth="3.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <g fill="currentColor">
+        <circle cx="7" cy="5" r="2.75" />
+        <circle cx="7" cy="16" r="2.75" />
+        <circle cx="7" cy="27" r="2.75" />
+        <circle cx="26" cy="27" r="2.75" />
+        <circle cx="25" cy="8" r="2.75" />
+      </g>
     </svg>
   )
 }
+
+// Existing callers keep working while the application adopts the Life name.
+export const RelayMark = LifeMark
+
+/** Original SVGL artwork, rendered in the current theme's foreground color. */
 export function ProviderIcon({
   provider,
   size = 20,
@@ -25,30 +41,29 @@ export function ProviderIcon({
   provider: 'codex' | 'claude'
   size?: number
 }) {
-  return provider === 'claude' ? (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className="claude-icon"
+  const source = provider === 'claude' ? claudeIcon : codexIcon
+
+  return (
+    <span
+      className="provider-icon"
+      data-provider={provider}
       aria-hidden="true"
-    >
-      <path
-        d="M12 2v20M2 12h20M5 5l14 14M5 19 19 5M8 3l8 18M3 8l18 8M3 16l18-8M8 21l8-18"
-        stroke="currentColor"
-        strokeWidth="1.7"
-      />
-    </svg>
-  ) : (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+      style={{
+        display: 'inline-block',
+        width: size,
+        height: size,
+        flexShrink: 0,
+        backgroundColor: 'currentColor',
+        maskImage: `url("${source}")`,
+        maskRepeat: 'no-repeat',
+        maskPosition: 'center',
+        maskSize: 'contain',
+        WebkitMaskImage: `url("${source}")`,
+        WebkitMaskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        WebkitMaskSize: 'contain',
+        verticalAlign: 'middle',
+      }}
+    />
   )
 }

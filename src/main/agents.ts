@@ -148,7 +148,7 @@ export class Agents {
       })
       try {
         await rpc.request('initialize', {
-          clientInfo: { name: 'life_desktop', title: 'Life', version: '0.1.0' },
+          clientInfo: { name: 'life_desktop', title: 'Life', version: '0.2.0' },
           capabilities: { experimentalApi: false },
         })
         if (this.generation !== generation) throw new Error('SSH connection cancelled')
@@ -736,6 +736,23 @@ export class Agents {
     session.busy = false
     session.approvals.clear()
     this.event(sessionId, { type: 'complete', status: 'interrupted' })
+  }
+  async dispose(sessionId: string) {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    await this.stop(sessionId)
+    if (this.sessions.get(sessionId) !== session) return
+    session.stopRequested = true
+    session.channel?.signal('TERM')
+    session.channel?.close()
+    for (const pending of session.controls.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('Agent session disposed'))
+    }
+    session.controls.clear()
+    if (session.remoteId && this.threads.get(session.remoteId) === sessionId)
+      this.threads.delete(session.remoteId)
+    this.sessions.delete(sessionId)
   }
   close() {
     this.generation++

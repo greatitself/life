@@ -1,92 +1,92 @@
 # Life
 
-Life is an Electron workspace for running **Codex and Claude Code over SSH**, with a compact interface inspired by [T3 Code](https://github.com/pingdotgg/t3code). Connect to a Linux or macOS machine, open an existing project, and work with either agent using its login on that machine.
+Life is an Electron research workspace for **Codex and Claude Code over SSH**, with an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a Mermaid project map, and prompt-driven customization.
 
-![Life desktop workspace](docs/images/life.png)
+![Life research map](docs/images/life.png)
 
-Download installers from [GitHub Releases](https://github.com/greatitself/life/releases). Initial releases are unsigned. On macOS, you may need to use **Open Anyway** in System Settings; Windows may display an unrecognized publisher prompt.
+Download installers from [GitHub Releases](https://github.com/greatitself/life/releases/latest). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
 
-## Run the desktop app
+## Upgrade your installed Life
 
-Use Node.js 22.12 or later and npm on your local computer.
+If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-```bash
-npm install
-npm run dev
-```
+From **0.2.0**, open **Updates** to check, download, and restart into subsequent releases. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 release, upgrades it, and checks that the installation identity and saved data survive.
 
-For a production build:
+## Two views, two monochrome themes
 
-```bash
-npm run build
-npm start
-```
+- **Research map:** Track projects, hypotheses, notes, tags, status, and dependencies. Link projects to saved SSH workspaces and agent threads. Switch between Mermaid graph and list views, filter and search, group by status or machine, change direction, zoom, and export SVG or Mermaid source. JSON backups preserve all project data and can be imported later.
+- **Agent workspace:** Chat with Codex or Claude Code, review approvals and questions, browse remote files, inspect Git changes, and use an interactive terminal. Threads retain their original provider and resume remote sessions after reconnecting.
+- **Dark and light:** Neutral black, white, and gray surfaces. Theme changes apply to diagrams and the terminal. Windows has rectangular controls on the right; macOS uses native traffic lights. Official Codex and Claude marks come from [SVGL](https://github.com/pheralb/svgl), with its MIT notice bundled in installers.
 
-The browser preview is available with `npm run dev:web` at `http://localhost:5173`. SSH, key selection, and remote agents require the Electron app.
+![Life light theme](docs/images/life-light.png)
 
-## Connect a workspace
+## Tell Life to change itself
 
-1. Click **Connect a machine**.
-2. Enter the hostname or IP, SSH port, username, and an existing remote project directory, such as `~/projects/my-app`.
-3. Choose a local SSH private key, your local SSH agent, or an SSH password. Encrypted private keys accept a passphrase.
-4. Verify and accept the machine’s SSH host key fingerprint on its first connection.
-5. Select **Codex** or **Claude Code**, choose a model and permission mode, and send a message.
+Open **Customize Life** and describe the change. Common settings work offline:
 
-Connection profiles save the hostname, username, port, project directory, authentication method, and private key **path**. Passwords, passphrases, and private key contents are not saved. Host keys are pinned; a changed host key fails the connection. Confirm a legitimate change out of band before removing that machine’s entry from `knownHosts` in the local `connections.json` file.
+- “Switch to light theme and use a compact layout.”
+- “Set font size to 16.”
+- “Hide the workspace panel.”
 
-Life uses a direct SSH connection. This version accepts hostnames and IP addresses; it does not import `~/.ssh/config` aliases, `ProxyJump`, or SSH tunnels. Each saved workspace identifies one machine and one project directory. One SSH connection is active at a time; multiple agent threads can run on that connection.
+A connected Codex or Claude Code agent can change defaults, labels, reusable prompt commands, and Markdown/Mermaid research panels. Proposals are validated and applied immediately, with undo, reset, and reload. The local `life.config.json` file also reloads when edited externally.
+
+**Live extensions** go further: prompts can generate executable UI and behavior, including new views, CSS changes to the existing interface, or replacements for the entire workspace. Renderer extensions run in isolated frames and use the Life bridge to access connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers and can use local files, commands, and Node modules with your user permissions. Enable, disable, edit, reload, and roll back extensions without rebuilding the app. The built-in workspace remains accessible through the recovery control and **Ctrl/Cmd + Shift + L**.
+
+Extensions are stored as editable manifests in Life’s local data directory. They can change the application experience and add behavior; changes to Electron itself, bundled native dependencies, or the installer still require a source build. Open a checkout of this repository as an agent workspace to develop those changes.
+
+## Connect a research machine
+
+1. Click **Connect a machine** or **Connect** on the map.
+2. Select a host from your local `~/.ssh/config`, or enter connection details manually. You can choose another config file.
+3. Choose an existing remote project directory, such as `~/projects/research`.
+4. Use a local private key, SSH agent, or password. Encrypted private keys accept a passphrase.
+5. Verify and accept the target machine’s SSH fingerprint on its first connection.
+6. Select an agent, model, and permission mode, then send a prompt.
+
+Life shows OpenSSH’s resolved options, including `Include` files, `HostName`, `User`, `Port`, `IdentityFile`, `IdentityAgent`, algorithms, keepalives, and `ProxyJump`. Saved aliases resolve again when connecting. Reading config requires the local OpenSSH client; Windows users can install **OpenSSH Client** from Optional Features.
+
+Jump hosts use OpenSSH with key/agent authentication and must already be trusted in OpenSSH `known_hosts`. Life verifies and pins the final target separately. Unsupported features such as `ProxyCommand`, certificate/hardware-key providers, configured forwarding, and local commands are reported explicitly. Life does not import OpenSSH’s target trust or reuse multiplexed sessions.
+
+Profiles save connection details and key **paths**. Passwords, passphrases, and key contents are never saved. A changed pinned target fingerprint fails the connection. One SSH connection is active at a time; multiple agent threads can use it.
 
 ## Prepare the remote agents
 
-Install and authenticate one or both CLIs **on the remote machine**. Life detects the installed versions when connecting. If you install a CLI while connected, reconnect to refresh its availability.
-
-For Codex:
+Install and authenticate either or both CLIs **on the remote Linux or macOS machine**:
 
 ```bash
 npm install -g @openai/codex
 codex login --device-auth
 ```
 
-For Claude Code:
-
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 claude auth login
 ```
 
-The CLIs must be available to the remote login shell. Life also checks the standard `~/.local/bin`, `~/.npm-global/bin`, and `/opt/homebrew/bin` locations. The integrated terminal lets you finish setup and sign in. Account access and model availability follow each remote CLI’s configuration.
+Life starts the installed CLI through SSH, using its remote account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard local CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
 
-Codex is controlled through its [app-server protocol](https://developers.openai.com/codex/app-server/). Claude Code is controlled through its [streaming CLI](https://code.claude.com/docs/en/headless) and the bidirectional control protocol used by Anthropic’s Agent SDK. No agent runtime is uploaded to your machine; Life starts the installed CLI through an SSH channel.
+Codex models come from the remote CLI. Claude supports default, `sonnet`, `opus`, and `haiku`. **Review actions** surfaces approval requests, **Allow edits** allows workspace edits, and **Plan only** selects the provider’s planning/read-only behavior. Account access and actual provider behavior follow the remote installation.
 
-## Working in Life
+Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Conversation history and project maps are stored locally.
 
-- **Threads:** Separate conversations per workspace and provider. Saved history resumes the remote provider session after reconnecting. A thread keeps its original provider; start a new thread to switch.
-- **Models:** Codex models are fetched from the remote CLI. Claude supports its default model and the `sonnet`, `opus`, and `haiku` aliases.
-- **Permissions:** Review actions surfaces provider approval requests. Allow edits permits workspace edits while retaining other approval checks. Plan only uses the provider’s planning or read-only mode.
-- **Files:** Browse the remote directory over SFTP, read text files up to 1 MB, and add a file reference to your prompt. File previews are confined to the connected workspace, including resolved symbolic links.
-- **Changes:** Review tracked changes against `HEAD`, including staged changes. Untracked files appear in the status list and can be read in Files.
-- **Terminal:** Use an interactive remote shell alongside the chat.
-- **History:** Search, export, or delete local conversation history. Chat history and displayed command output are stored locally in the app’s browser storage.
+## Run and build
 
-| Action              | Shortcut            |
-| ------------------- | ------------------- |
-| New thread          | Ctrl/Cmd + N        |
-| Search threads      | Ctrl/Cmd + K        |
-| Connections         | Ctrl/Cmd + ,        |
-| Toggle terminal     | Ctrl/Cmd + backtick |
-| Toggle sidebar      | Ctrl/Cmd + B        |
-| Send message        | Enter               |
-| Insert a line break | Shift + Enter       |
-
-## Build installers
+Use Node.js **22.12 or newer**:
 
 ```bash
+npm install
+npm run dev
+```
+
+```bash
+npm run build
+npm start
 npm run dist
 ```
 
-Electron Builder creates installers in `release/`: AppImage and Debian packages on Linux, DMG on macOS, and NSIS on Windows. Build on the target platform for the most reliable packaging. `npm run dist:dir` produces an unpacked app. Release signing and notarization credentials are not configured.
+Installers appear in `release/`. Build on the target platform. `npm run dev:web` provides a browser preview at `http://localhost:5173`; SSH, native updates, and executable backend extensions require Electron.
 
-Pushing a version tag such as `v0.1.0` runs the release workflow: it verifies the project, builds Linux x64, Windows x64, macOS Apple Silicon, and macOS Intel installers, then publishes them with SHA-256 checksums.
+Pushing a version tag runs verification, builds Windows x64, Linux x64, and both macOS architectures, tests Windows upgrades, and publishes installers, updater metadata, blockmaps, and SHA-256 checksums.
 
 ## Verify changes
 
@@ -94,19 +94,21 @@ Pushing a version tag such as `v0.1.0` runs the release workflow: it verifies th
 npm run typecheck
 npm test
 npm run build
+npm run test:desktop
+npm run format:check
 ```
 
-The integration suite uses a loopback SSH server and deterministic provider fixtures to test transport and protocol behavior without making paid model requests. Real agent inference requires a remote machine with an authenticated CLI.
+The desktop smoke test launches real Electron with isolated temporary data and a loopback SSH server. On Linux it uses Xvfb when needed. Protocol tests use deterministic Codex/Claude fixtures, avoiding paid inference; real authenticated model inference requires your remote machine. Extension tests exercise real Node workers and runtime recovery. Windows CI verifies the old installer upgrades to the new one.
 
-## Project structure
+| Action                     | Shortcut             |
+| -------------------------- | -------------------- |
+| New thread                 | Ctrl/Cmd + N         |
+| Search threads             | Ctrl/Cmd + K         |
+| Connections                | Ctrl/Cmd + ,         |
+| Toggle terminal            | Ctrl/Cmd + backtick  |
+| Toggle sidebar             | Ctrl/Cmd + B         |
+| Recover built-in workspace | Ctrl/Cmd + Shift + L |
+| Send message               | Enter                |
+| Insert a line break        | Shift + Enter        |
 
-```text
-src/main/        Electron lifecycle, SSH/SFTP, provider protocols, profile storage
-src/preload/     Typed IPC bridge with context isolation
-src/renderer/    React interface, remote terminal, local conversation state
-src/shared/      IPC types and input validation
-tests/          Unit and SSH integration coverage
-build/          Application icon
-```
-
-The renderer has no Node integration. SSH credentials and local key access stay in the main process. The preload bridge exposes specific operations, and incoming IPC requests validate their arguments and sender.
+The built-in renderer has no Node integration. Validated IPC keeps SSH and local key access in the main process. Executable extensions are separate, intentional local code; their frames remain sandboxed while backend workers have local user permissions.

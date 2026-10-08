@@ -8,6 +8,92 @@ const argv = process.argv.slice(2)
 const record = (value) =>
   appendFileSync(process.env.RELAY_TEST_LOG, JSON.stringify({ provider, ...value }) + '\n')
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
+
+function customizationResponse(prompt) {
+  if (
+    !prompt.startsWith('You are configuring Life,') ||
+    !prompt.includes('Allowed settings patch schema:')
+  )
+    return undefined
+  const patch = {
+    labels: { researchTitle: 'Research lab' },
+    commands: [
+      {
+        id: 'review-research',
+        name: 'Review research',
+        prompt: 'Review the research goals and propose the next experiment.',
+        mode: 'plan',
+      },
+    ],
+    widgets: [
+      {
+        id: 'research-notes',
+        title: 'Research notes',
+        kind: 'markdown',
+        content: '## Experiment log\nRecord a hypothesis, run an experiment, and compare results.',
+        placement: 'research',
+      },
+      {
+        id: 'experiment-flow',
+        title: 'Experiment workflow',
+        kind: 'mermaid',
+        content: 'flowchart LR\n  Hypothesis --> Experiment --> Result',
+        placement: 'both',
+      },
+    ],
+  }
+  return `<life-customization>${JSON.stringify(patch)}</life-customization>`
+}
+
+function extensionResponse(prompt) {
+  if (
+    !prompt.startsWith('You are extending Life, a local Electron research application') ||
+    !prompt.includes('Allowed manifest schema:')
+  )
+    return undefined
+  const manifest = {
+    id: 'research-tools',
+    name: 'Research tools',
+    description: 'Test executable extension',
+    version: '1.0.0',
+    enabled: true,
+    renderer: {
+      placement: 'view',
+      html: '<main class="research-tools"><p class="eyebrow">LIFE RESEARCH</p><h1>Research counter</h1><p>Track experiments with a live extension.</p><button id="increment" type="button">Increment</button><output id="count" aria-live="polite">Count: 0</output><p id="connection" class="connection">Checking SSH state…</p></main>',
+      css: '.research-tools{padding:32px;max-width:640px;color:var(--text)}.eyebrow,.connection{color:var(--muted);font-size:12px}.eyebrow{letter-spacing:.12em}h1{font-size:28px}button{border:1px solid var(--border);border-radius:6px;padding:9px 16px;background:var(--surface);color:var(--text)}button:disabled{opacity:.5}output{display:block;margin-top:20px;font-size:24px}',
+      js: `const button = document.getElementById('increment');
+const output = document.getElementById('count');
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const result = await life.call('increment', { by: 1 });
+    output.textContent = 'Count: ' + result.count;
+  } catch (error) {
+    output.textContent = 'Error: ' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+(async () => {
+  try {
+    const state = await life.invoke('connection.state', {});
+    document.getElementById('connection').textContent = 'SSH: ' + state.status;
+  } catch (error) {
+    document.getElementById('connection').textContent = 'SSH: ' + error.message;
+  }
+})();`,
+    },
+    main: `let count = 0;
+life.handle('increment', async (args) => {
+  if (!args || !Number.isFinite(args.by)) throw new Error('Specify an increment amount');
+  count += args.by;
+  return { count };
+});
+life.handle('inspect', async () => ({ hasRequire: typeof require === 'function' }));`,
+  }
+  return `<life-extension>${JSON.stringify(manifest)}</life-extension>`
+}
+
 record({ argv })
 if (argv.includes('--version')) {
   console.log(provider === 'codex' ? 'codex-cli test.0' : '2.test.0 (Claude Code fixture)')
@@ -46,6 +132,16 @@ function codexTurn(message) {
     method: 'item/agentMessage/delta',
     params: { threadId, itemId: turn.itemId, delta: 'from Codex 👋' },
   })
+  const customization = customizationResponse(text)
+  if (customization) {
+    codexComplete(turn, customization)
+    return
+  }
+  const extension = extensionResponse(text)
+  if (extension) {
+    codexComplete(turn, extension)
+    return
+  }
   if (text === 'hang' || text === 'delay-start') return
   if (text === 'provider-error') {
     send({
@@ -136,6 +232,16 @@ function claudeTurn(message) {
     parent_tool_use_id: null,
     event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'from Claude 👋' } },
   })
+  const customization = customizationResponse(text)
+  if (customization) {
+    claudeComplete(customization)
+    return
+  }
+  const extension = extensionResponse(text)
+  if (extension) {
+    claudeComplete(extension)
+    return
+  }
   if (text === 'hang') return
   if (text === 'provider-error') {
     send({

@@ -1,0 +1,51 @@
+// Every core call still goes through the same validated operation used by the built-in UI.
+export const extensionCapabilities = [
+  'app.info',
+  'app.openExternal',
+  'app.chooseKey',
+  'profiles.list',
+  'profiles.save',
+  'profiles.remove',
+  'connection.state',
+  'connection.connect',
+  'connection.disconnect',
+  'connection.trust',
+  'sshConfig.list',
+  'sshConfig.resolve',
+  'agent.start',
+  'agent.stop',
+  'agent.dispose',
+  'agent.respond',
+  'agent.models',
+  'files.list',
+  'files.read',
+  'files.git',
+  'terminal.open',
+  'terminal.close',
+  'terminal.write',
+  'terminal.resize',
+  'customization.get',
+  'customization.apply',
+  'customization.undo',
+  'customization.reset',
+  'customization.reload',
+  'window.state',
+  'window.configure',
+  'window.minimize',
+  'window.maximize',
+  'window.close',
+  'updates.get',
+  'updates.check',
+  'updates.download',
+  'ui.navigate',
+  'ui.notify',
+  'ui.threads',
+  'ui.research.list',
+] as const
+export type ExtensionCoreMethod = (typeof extensionCapabilities)[number]
+export function extensionCoreArguments(method: string, args: unknown): unknown[] {
+  if (!(extensionCapabilities as readonly string[]).includes(method) || method.startsWith('ui.'))
+    throw new Error(`This Life core method is unavailable: ${method}`)
+  if (args == null) return []
+  return Array.isArray(args) ? args : [args]
+}

@@ -3,19 +3,33 @@ name: Release Life
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to build and release'
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  LIFE_RELEASE_REF: ${{ inputs.tag || github.ref }}
+  LIFE_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.LIFE_RELEASE_REF }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Verify release version
+        run: node -e "if (process.env.LIFE_RELEASE_TAG !== 'v' + require('./package.json').version) throw new Error('Release tag must match package.json version')"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -45,6 +59,8 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.LIFE_RELEASE_REF }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,10 +68,18 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: Check out maintained Windows verification
+        if: matrix.platform == 'windows-x64'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-verification
+          sparse-checkout: tests/windows-upgrade.ps1
+          sparse-checkout-cone-mode: false
       - name: Verify Windows upgrade from Life 0.1.0
         if: matrix.platform == 'windows-x64'
         shell: pwsh
-        run: ./tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName
+        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version
       - uses: actions/upload-artifact@v4
         with:
           name: life-${{ matrix.platform }}
@@ -82,7 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ env.LIFE_RELEASE_TAG }}
         shell: bash
         run: |
           set -euo pipefail

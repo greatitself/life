@@ -27,6 +27,10 @@ if (-not $ExpectedVersion) {
 }
 if ($ExpectedVersion -eq '0.1.0') { throw 'The upgrade must target a version newer than 0.1.0.' }
 
+# electron-builder UUID v5 for appId dev.life.desktop, namespace
+# 50e065bc-3134-11e6-9bab-38c9862bdaf3. This must stay stable after the first release.
+$script:LifeInstallGuid = 'c341d2d7-15bb-5180-bedb-0a3c99a55fe4'
+
 function Read-RegistryValue($Record, [string]$Name) {
     # An empty registry key makes Get-ItemProperty return no object. Unrelated
     # uninstall keys can be empty; skip them before inspecting adapted members.
@@ -44,7 +48,14 @@ function Get-LifeRegistrations {
             if (-not (Test-Path -LiteralPath $root)) { continue }
             foreach ($key in Get-ChildItem -LiteralPath $root) {
                 $record = Get-ItemProperty -LiteralPath $key.PSPath
-                if ((Read-RegistryValue $record 'DisplayName') -ne 'Life') { continue }
+                $guid = $key.PSChildName.Trim('{}')
+                $name = Read-RegistryValue $record 'DisplayName'
+                # NSIS defaults to a versioned name such as "Life 0.1.0". The
+                # GUID is the installation identity; names also detect a parallel
+                # Life install accidentally created with a different appId.
+                $stableIdentity = $guid -eq $script:LifeInstallGuid
+                $lifeName = $name -match '^Life(?:$|\s+\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$)'
+                if (-not $stableIdentity -and -not $lifeName) { continue }
                 $location = Read-RegistryValue $record 'InstallLocation'
                 # electron-builder stores InstallLocation in Software\{app GUID}, separately
                 # from the Programs and Features uninstall registration.
@@ -76,6 +87,8 @@ function Get-LifeRegistrations {
                 }
                 [pscustomobject]@{
                     Key = "${hive}:\$prefix\Microsoft\Windows\CurrentVersion\Uninstall\$($key.PSChildName)"
+                    Guid = $guid
+                    Name = $name
                     Hive = $hive
                     Version = Read-RegistryValue $record 'DisplayVersion'
                     Location = $location
@@ -92,7 +105,8 @@ function Assert-SingleLifeInstallation([string]$Version) {
         throw "Expected one Life installation; found $($registrations.Count): $($registrations | ConvertTo-Json -Compress)"
     }
     $registration = $registrations[0]
-    if ($registration.Hive -ne 'HKCU' -or $registration.Version -ne $Version) {
+    if ($registration.Guid -ne $script:LifeInstallGuid -or
+        $registration.Hive -ne 'HKCU' -or $registration.Version -ne $Version) {
         throw "Expected per-user Life $Version; found $($registration | ConvertTo-Json -Compress)"
     }
     if (-not $registration.Location -or -not $registration.Executable -or
@@ -172,6 +186,7 @@ try {
 
     Install-Life $baselineInstaller
     $before = Assert-SingleLifeInstallation '0.1.0'
+    Write-Host ("Verified baseline registration: " + ($before | ConvertTo-Json -Compress))
     Stop-InstalledLife $before.Executable
     $binaryHashBefore = (Get-FileHash -LiteralPath $before.Executable -Algorithm SHA256).Hash
 
@@ -198,6 +213,7 @@ try {
 
     Install-Life $Installer
     $after = Assert-SingleLifeInstallation $ExpectedVersion
+    Write-Host ("Verified upgraded registration: " + ($after | ConvertTo-Json -Compress))
     Stop-InstalledLife $after.Executable
     if ((Get-FileHash -LiteralPath $after.Executable -Algorithm SHA256).Hash -eq $binaryHashBefore) {
         throw 'The upgrade did not replace the installed Life executable.'
@@ -214,6 +230,7 @@ try {
         (Get-FileHash -LiteralPath $connections -Algorithm SHA256).Hash -ne $connectionsHash) {
         throw 'Upgrade changed existing Life user data.'
     }
+    Write-Host "Preserved connections.json SHA256=$connectionsHash and upgrade marker SHA256=$markerHash."
     Write-Host "Verified Life 0.1.0 -> ${ExpectedVersion}: same installation, one registration, saved user data preserved."
 } finally {
     # Only remove the temporary installer we downloaded, never installed application/user data.

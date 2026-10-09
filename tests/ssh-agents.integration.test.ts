@@ -589,7 +589,9 @@ describe.each<Provider>(['codex', 'claude'])(
       expect(
         events.some((event) => event.type === 'complete' && event.status === 'interrupted'),
       ).toBe(true)
-      if (provider === 'codex') expect(startupSettled).toBe(false)
+      await starting
+      expect(startupSettled).toBe(true)
+      expect(agents.hasRunningSessions()).toBe(false)
       fixture.initializationDelay = 0
       events.length = 0
       await agents.start(start(provider, 'hello'))
@@ -653,6 +655,76 @@ describe.each<Provider>(['codex', 'claude'])(
 describe('provider configuration and cancellation', () => {
   beforeEach(async () => {
     await connect()
+  })
+
+  it('resumes a large saved Codex conversation without downloading its historical turns or replacing its ID', async () => {
+    const baseline = (await fixture.log()).length
+    await agents.start(start('codex', 'hello', { remoteId: 'codex-large-history' }))
+    await waitFor(() => eventOf('complete'))
+    expect(eventOf('session')?.remoteId).toBe('codex-large-history')
+    expect(eventOf('error')).toBeUndefined()
+    const messages = (await fixture.log()).slice(baseline).map((entry) => entry.message)
+    expect(messages.find((message) => message?.method === 'thread/resume')?.params).toMatchObject({
+      threadId: 'codex-large-history',
+      excludeTurns: true,
+      cwd: fixture.workspace,
+    })
+    expect(messages.some((message) => message?.method === 'thread/start')).toBe(false)
+    expect(messages.filter((message) => message?.method === 'turn/start')).toHaveLength(1)
+  })
+
+  it('cancels a hung Codex resume immediately and permits another project thread to run', async () => {
+    const baseline = (await fixture.log()).length
+    const starting = agents.start(
+      start('codex', 'never-send-this', { remoteId: 'codex-hung-resume' }),
+    )
+    await waitFor(async () =>
+      (await fixture.log())
+        .slice(baseline)
+        .some(
+          (entry) =>
+            entry.message?.method === 'thread/resume' &&
+            entry.message?.params.threadId === 'codex-hung-resume',
+        ),
+    )
+    await agents.stop('codex-local')
+    await starting
+    expect(agents.hasRunningSessions()).toBe(false)
+    expect(eventOf('error')).toBeUndefined()
+    events.length = 0
+    await agents.start(start('codex', 'hello', { sessionId: 'another-project-thread' }))
+    await waitFor(() => eventOf('complete', 'another-project-thread'))
+    expect(
+      (await fixture.log())
+        .slice(baseline)
+        .some(
+          (entry) =>
+            entry.message?.method === 'turn/start' &&
+            entry.message?.params.input?.[0]?.text === 'never-send-this',
+        ),
+    ).toBe(false)
+  })
+
+  it('ignores a cancelled delayed resume response and retries the same saved conversation without replaying the cancelled prompt', async () => {
+    const baseline = (await fixture.log()).length
+    const starting = agents.start(
+      start('codex', 'cancelled-resume-prompt', { remoteId: 'codex-delayed-resume' }),
+    )
+    await waitFor(async () =>
+      (await fixture.log())
+        .slice(baseline)
+        .some((entry) => entry.message?.method === 'thread/resume'),
+    )
+    await agents.stop('codex-local')
+    await starting
+    events.length = 0
+    await agents.start(start('codex', 'hello'))
+    await waitFor(() => eventOf('complete'))
+    const messages = (await fixture.log()).slice(baseline).map((entry) => entry.message)
+    expect(messages.filter((message) => message?.method === 'thread/resume')).toHaveLength(2)
+    expect(messages.filter((message) => message?.method === 'turn/start')).toHaveLength(1)
+    expect(eventOf('session')?.remoteId).toBe('codex-delayed-resume')
+    expect(eventOf('error')).toBeUndefined()
   })
 
   it('discovers Codex models through app-server and offers Claude aliases', async () => {

@@ -34,6 +34,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npx playwright install chromium --with-deps
+      - run: npm run test:recovery
       - run: xvfb-run -a npm run test:desktop
 
   build:
@@ -87,10 +89,17 @@ jobs:
           path: .release-verification
           sparse-checkout: tests/windows-upgrade.ps1
           sparse-checkout-cone-mode: false
-      - name: Verify Windows upgrade from Life 0.1.0
+      - name: Verify Windows upgrades from Life 0.1.0 and 0.5.1
         if: matrix.platform == 'windows-x64'
         shell: pwsh
-        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version
+        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1')
+      - name: Save Windows upgrade proof
+        if: matrix.platform == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-upgrade-proof
+          path: output/windows-upgrade-proof.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: life-${{ matrix.platform }}
@@ -124,23 +133,24 @@ jobs:
           cd installers
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Life 0.5.1 brings a T3-style research workspace, individual source extensions and explicit public sharing.
+          Life 0.6.0 incorporates the workspace customization backup and fixes project, conversation and renderer stability.
 
-          - A compact project/thread rail, open conversation area and wide diff pane bring the agent workspace closer to T3 Code in monochrome dark and light themes.
-          - Each /life React/TypeScript/CSS change becomes a separate source extension over the immutable installed base. Enable, disable, remove, export and import individual changes.
-          - Enabled source layers compose and compile together. Conflicts or failed builds preserve the previous working interface; dependent changes may need adaptation.
-          - Existing 0.4 source customizations migrate into one legacy extension with their edits preserved.
-          - Preview one source or runtime extension, then explicitly publish a public GitHub Gist with your own token. The token is used once and not stored; Life does not automatically publish customizations.
-          - Inspect a public Gist's files, dependencies and complete code before choosing Install extension. Portable bundles include extension code and metadata, without Life's saved connections or conversation history.
-          - Real React/npm component changes, optional Tailwind v4 generation, same-thread source reads and bounded automatic repair remain available through bundled tools, without a separate Node.js installation.
-          - Tailwind native processing runs in a separate bundled compiler process, so compiler crashes leave Life and its previous working interface active. Cancellation, timeouts and bounded diagnostics remain supported.
-          - Revision checks, saved conversations before reload, rollback and native Ctrl/Cmd + Shift + L recovery protect ongoing work.
-          - Research maps, SSH config aliases, project selection, provider model controls and automatic port forwarding remain available.
-          - Windows upgrades the existing Life installation and preserves its local data; Windows and AppImage support in-app updates.
+          - Fix the black screen when adding or selecting a project: absent attachment progress can no longer dereference an undefined value and unmount the application.
+          - Saved threads automatically restore their machine and project. Context changes are serialized and obsolete requests cannot send prompts into another folder.
+          - Codex resumes request metadata without downloading full remote history. Oversized or invalid frames produce explicit errors, and canceled or failed transports release affected turns promptly while preserving remote conversation IDs.
+          - SSH directory, SFTP and command requests have bounded deadlines and settle on disconnect. Failed project selection unlocks for retry; late callbacks cannot replace the current context.
+          - Large edit summaries use one bounded diff computation, cached previews and memoized historical turns instead of repeatedly blocking the renderer.
+          - Late React failures show a recovery panel. Native renderer crashes and frozen windows have bounded recovery choices, retaining saved data, machine state and window geometry.
+          - Emergency extension recovery opens one review dialog and keeps SSH disconnected. It preserves saved threads and remote conversation IDs; selecting a thread later restores its project normally.
+          - All 27 supplied workspace customizations are permanently included: project-grouped search/filter/sort, settle and snooze, resizable/collapsible rails, attachments and uploads, queued follow-ups, compact activity timelines, message navigation, provider artwork and the reference composer.
+          - Browser, Terminal, Files, Diff, Git and pull-request surfaces, branch and host details, Radix run menus, and export-all extension backup are included in the installed interface.
+          - Exact incorporated source bundles become exportable Built into Life archive records. Matching includes the entire bundle content; modified or unrelated extensions are preserved for adaptation.
+          - Prompt-driven source extensions, public Gist sharing, research maps, SSH config aliases, provider controls and automatic port forwarding remain available.
+          - Windows upgrades the existing Life installation and preserves its local data. CI verifies upgrades from both 0.1.0 and 0.5.1, alongside packaged source compilation and extension checks.
 
-          Windows users on 0.1.0: run the new .exe once to upgrade. Existing users on 0.2.2 or later can use Updates inside Life. Profiles, conversation history, research data, extensions and local source files remain in the existing data directory. When an update changes the built-in source baseline, Life preserves source extensions and starts with its built-in interface; ask /life to update your customization. Patches must compose and compile against the new baseline; this is not an automatic semantic merge.
+          Run the new Windows .exe over the current installation, or use Updates on Life 0.2.2 or later. Profiles, conversation history, research data, extensions and local source files remain in the existing data directory. The incorporated backup needs no import or rebuild. Other source customizations are preserved when the installed baseline changes; ask /life to adapt them before enabling. This is not an automatic semantic merge of arbitrary edits.
 
-          Existing select controls are unchanged so users can test Life's customization themselves. Ask /life to replace a control with real React component source and dependencies. The native host, preload and recovery loader remain the installed copy; native binaries and installer signing require a packaged release.
+          Passwords and key passphrases are never stored; reconnecting profiles that require them still needs credentials. Provider CLIs must be installed and authenticated on the remote machine. Browser embedding depends on the remote site's frame policy, and pull-request details require remote GitHub CLI authentication. The native host, preload and recovery loader remain the installed copy during live source customization.
 
           Agent CLIs must be installed and signed in on the remote Linux or macOS machine. Signing is deferred until publisher credentials are provided: builds remain unsigned, macOS may require Open Anyway and Windows may show an unrecognized publisher prompt. macOS and Debian updates use the new installer; AppImage and Windows support in-app updates.
           NOTES

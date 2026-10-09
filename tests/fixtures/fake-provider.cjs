@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Deterministic stand-ins: no provider SDK, credentials, network calls or inference.
 const { basename } = require('node:path')
-const { appendFileSync } = require('node:fs')
+const { appendFileSync, readFileSync } = require('node:fs')
+const { createHash } = require('node:crypto')
 const { createInterface } = require('node:readline')
 const provider = basename(process.argv[1])
 const argv = process.argv.slice(2)
@@ -349,7 +350,7 @@ function lifeThreadResponse(prompt) {
   return customizationResponse('You are configuring Life,\nAllowed settings patch schema:')
 }
 
-record({ argv })
+record({ argv, cwd: process.cwd() })
 if (argv.includes('--version')) {
   console.log(provider === 'codex' ? 'codex-cli test.0' : '2.test.0 (Claude Code fixture)')
   process.exit(0)
@@ -371,6 +372,33 @@ function codexComplete(turn, text = 'Hello from Codex 👋') {
     method: 'turn/completed',
     params: { threadId: turn.threadId, turn: { id: turn.turnId, status: 'completed' } },
   })
+}
+function attachmentProbe(text) {
+  if (!text.startsWith('native-attachment-probe')) return undefined
+  const marker = 'The user attached these files as reference data:\n'
+  const references = text.slice(text.indexOf(marker) + marker.length).split('\n')
+  const evidence = []
+  for (const line of references) {
+    if (!line.startsWith('{')) break
+    const reference = JSON.parse(line)
+    if (
+      !/^\/tmp\/life-thread-attachments\.[a-zA-Z0-9]+\/[a-zA-Z0-9-]+-[a-zA-Z0-9._-]+$/.test(
+        reference.path,
+      )
+    )
+      throw new Error('The native attachment probe received an unexpected remote reference path.')
+    const bytes = readFileSync(reference.path)
+    evidence.push({
+      name: reference.name,
+      path: reference.path,
+      mime: reference.mime,
+      size: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    })
+  }
+  if (!evidence.length) throw new Error('The native attachment probe omitted its reference files.')
+  record({ attachmentEvidence: evidence })
+  return `Verified ${evidence.length} remote attachment files.`
 }
 function codexTurn(message) {
   const { threadId, input } = message.params
@@ -408,6 +436,17 @@ function codexTurn(message) {
   }
   if (text === 'Review the fixture changes') {
     codexComplete(turn, fixtureReviewResponse)
+    return
+  }
+  const attachments = attachmentProbe(text)
+  if (attachments) {
+    codexComplete(turn, attachments)
+    return
+  }
+  if (text === 'queue-delay') {
+    setTimeout(() => {
+      if (active === turn) codexComplete(turn, 'The delayed Codex response finished.')
+    }, 4000)
     return
   }
   if (text === 'hang' || text === 'delay-start') return
@@ -523,6 +562,18 @@ function claudeTurn(message) {
     claudeComplete(fixtureReviewResponse)
     return
   }
+  const attachments = attachmentProbe(text)
+  if (attachments) {
+    claudeComplete(attachments)
+    return
+  }
+  if (text === 'queue-delay') {
+    const turn = active
+    setTimeout(() => {
+      if (active === turn) claudeComplete('The delayed Claude response finished.')
+    }, 4000)
+    return
+  }
   if (text === 'hang') return
   if (text === 'provider-error') {
     send({
@@ -602,11 +653,37 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           layers: null,
         },
       })
-    if (message.method === 'thread/start' || message.method === 'thread/resume')
+    if (message.method === 'thread/start')
       send({
         id: message.id,
         result: { thread: { id: message.params.threadId || 'codex-remote-1' } },
       })
+    if (message.method === 'thread/resume') {
+      const threadId = message.params.threadId
+      if (threadId === 'codex-hung-resume') return
+      const reply = () => {
+        // A real old conversation can exceed framing limits if its historical
+        // turns are repeated. Native QA asserts the documented metadata-only flag.
+        const turns = message.params.excludeTurns
+          ? []
+          : Array.from({ length: 4096 }, (_, index) => ({
+              id: `historical-turn-${index}`,
+              items: [
+                { id: `historical-message-${index}`, type: 'agentMessage', text: 'x'.repeat(4096) },
+              ],
+            }))
+        record({
+          resumeEvidence: {
+            threadId,
+            excludeTurns: message.params.excludeTurns === true,
+            returnedTurns: turns.length,
+          },
+        })
+        send({ id: message.id, result: { thread: { id: threadId, turns } } })
+      }
+      if (threadId === 'codex-delayed-resume') setTimeout(reply, 250)
+      else reply()
+    }
     if (message.method === 'turn/start') {
       if (message.params.input[0].text === 'request-error')
         send({ id: message.id, error: { code: -32000, message: 'Codex fixture rejected request' } })

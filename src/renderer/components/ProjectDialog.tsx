@@ -19,6 +19,7 @@ export function ProjectDialog({
   connection,
   onSelected,
   suggestedPath,
+  beforeSelect,
   hasActiveTurns = false,
 }: {
   open: boolean
@@ -26,6 +27,7 @@ export function ProjectDialog({
   connection: ConnectionState
   onSelected: (connection: ConnectionState) => void
   suggestedPath?: string
+  beforeSelect?: () => Promise<void>
   hasActiveTurns?: boolean
 }) {
   const [path, setPath] = useState('')
@@ -34,6 +36,7 @@ export function ProjectDialog({
   const [selecting, setSelecting] = useState(false)
   const [error, setError] = useState('')
   const generation = useRef(0)
+  const selectionGeneration = useRef(0)
   const recent = connection.workspace || connection.profile?.workspace
 
   async function browse(requestedPath?: string, updatePath = true) {
@@ -54,6 +57,9 @@ export function ProjectDialog({
   }
 
   useEffect(() => {
+    selectionGeneration.current++
+    setSelecting(false)
+    setLoading(false)
     if (!open) {
       generation.current++
       return
@@ -66,20 +72,27 @@ export function ProjectDialog({
     return () => {
       generation.current++
     }
-  }, [open, connection.profile?.id])
+  }, [open, connection.profile?.id, connection.status, suggestedPath])
 
   async function selectProject() {
     if (!api || selecting || loading || !path.trim()) return
+    const request = ++selectionGeneration.current
+    const profileId = connection.profile?.id
     setSelecting(true)
     setError('')
     try {
+      await beforeSelect?.()
+      if (selectionGeneration.current !== request) return
       const state = await api.connection.selectWorkspace(path.trim())
+      if (selectionGeneration.current !== request) return
+      if (state.status !== 'connected' || state.profile?.id !== profileId)
+        throw new Error('The connected machine changed. Select the project on its current machine.')
       onSelected(state)
       onOpenChange(false)
     } catch (failure) {
-      setError(errorText(failure))
+      if (selectionGeneration.current === request) setError(errorText(failure))
     } finally {
-      setSelecting(false)
+      if (selectionGeneration.current === request) setSelecting(false)
     }
   }
 

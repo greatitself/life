@@ -6,7 +6,17 @@ import type {
   PermissionMode,
   Provider,
 } from '../shared/types'
+import { normalizeThreadAttachments, type ThreadAttachment } from './attachments'
+import { normalizeQueuedMessages, pauseQueuedMessages, type QueuedMessage } from './thread-queue'
+import { normalizeFileChanges, type ThreadFileChange } from './thread-activity'
+import { normalizeThreadMetadata, type ThreadMetadata } from './thread-metadata'
 export interface Message {
+  createdAt?: number
+  finishedAt?: number
+  finishStatus?: string
+  input?: string
+  fileChanges?: ThreadFileChange[]
+  attachments?: ThreadAttachment[]
   id: string
   role: 'user' | 'assistant' | 'tool' | 'error'
   text: string
@@ -14,7 +24,9 @@ export interface Message {
   status?: string
   turn: number
 }
-export interface Thread {
+export interface Thread extends ThreadMetadata {
+  settled?: boolean
+  snoozedUntil?: number
   id: string
   profileId: string
   /** Canonical remote project folder associated with the provider conversation. */
@@ -25,6 +37,7 @@ export interface Thread {
   title: string
   remoteId?: string
   messages: Message[]
+  queue?: QueuedMessage[]
   busy: boolean
   model: string
   reasoningEffort?: string
@@ -84,6 +97,13 @@ export function readThreads(): Thread[] {
           ? { workspace: t.workspace }
           : {}),
         ...(t.workspaceUnknown === true ? { workspaceUnknown: true } : {}),
+        ...normalizeThreadMetadata(t),
+        ...(t.settled === true ? { settled: true } : {}),
+        ...(typeof t.snoozedUntil === 'number' &&
+        Number.isFinite(t.snoozedUntil) &&
+        t.snoozedUntil > 0
+          ? { snoozedUntil: t.snoozedUntil }
+          : {}),
         provider: t.provider as Provider,
         title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled thread',
         remoteId: typeof t.remoteId === 'string' ? t.remoteId : undefined,
@@ -97,6 +117,23 @@ export function readThreads(): Thread[] {
           )
           .map((message: Message) => ({
             ...message,
+            createdAt:
+              typeof message.createdAt === 'number' &&
+              Number.isFinite(message.createdAt) &&
+              message.createdAt > 0
+                ? message.createdAt
+                : undefined,
+            finishedAt:
+              typeof message.finishedAt === 'number' &&
+              Number.isFinite(message.finishedAt) &&
+              message.finishedAt > 0
+                ? message.finishedAt
+                : undefined,
+            finishStatus:
+              typeof message.finishStatus === 'string' ? message.finishStatus : undefined,
+            input: typeof message.input === 'string' ? message.input : undefined,
+            fileChanges: normalizeFileChanges(message.fileChanges),
+            attachments: normalizeThreadAttachments(message.attachments),
             title: typeof message.title === 'string' ? message.title : undefined,
             status:
               message.role === 'tool' && message.status === 'running'
@@ -108,6 +145,7 @@ export function readThreads(): Thread[] {
           })),
         busy: false,
         pending: [],
+        queue: normalizeQueuedMessages(t.queue),
         ...(t.lifeScope === true ? { lifeScope: true } : {}),
         turn: Number.isInteger(t.turn) && t.turn >= 0 ? t.turn : 0,
         mode: ['review', 'edit', 'plan'].includes(t.mode)
@@ -139,18 +177,32 @@ export function bindLegacyThreadWorkspace(thread: Thread, connection: Connection
     ? { ...thread, workspace: connection.lastWorkspace }
     : { ...thread, workspaceUnknown: true }
 }
+export function finishThreadTurn(thread: Thread, status: string, at = Date.now()): Thread {
+  return {
+    ...thread,
+    messages: thread.messages.map((message) => {
+      if (message.turn !== thread.turn) return message
+      if (message.role === 'user')
+        return { ...message, finishedAt: message.finishedAt ?? at, finishStatus: status }
+      if (message.role === 'tool' && message.status === 'running')
+        return {
+          ...message,
+          finishedAt: at,
+          status:
+            status === 'failed' ? 'failed' : status === 'interrupted' ? 'interrupted' : 'completed',
+        }
+      return message
+    }),
+  }
+}
 export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   if (event.type === 'session') return { ...thread, remoteId: event.remoteId }
   if (event.type === 'complete')
     return {
-      ...thread,
+      ...finishThreadTurn(thread, event.status === 'interrupted' ? 'interrupted' : 'completed'),
       busy: false,
       pending: [],
-      messages: thread.messages.map((m) =>
-        m.role === 'tool' && m.status === 'running'
-          ? { ...m, status: event.status === 'interrupted' ? 'interrupted' : 'completed' }
-          : m,
-      ),
+      queue: event.status === 'interrupted' ? pauseQueuedMessages(thread.queue) : thread.queue,
     }
   if (event.type === 'approval' || event.type === 'question')
     return {
@@ -158,21 +210,25 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       pending: [...thread.pending.filter((p) => p.requestId !== event.requestId), event],
     }
   if (event.type === 'status') return thread
-  if (event.type === 'error')
+  if (event.type === 'error') {
+    const failed = finishThreadTurn(thread, 'failed')
     return {
-      ...thread,
+      ...failed,
       busy: false,
       pending: [],
+      queue: pauseQueuedMessages(thread.queue),
       messages: [
-        ...thread.messages,
+        ...failed.messages,
         {
           id: crypto.randomUUID(),
           role: 'error',
           text: event.text || 'The agent could not finish this turn.',
           turn: thread.turn,
+          createdAt: Date.now(),
         },
       ],
     }
+  }
   const id = `${thread.turn}:${event.itemId || 'response'}`
   const index = thread.messages.findIndex((m) => m.id === id)
   const previous = index >= 0 ? thread.messages[index] : undefined
@@ -184,6 +240,14 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         : (previous?.text || '') + (event.text || '')
   const message: Message = {
     id,
+    createdAt: previous?.createdAt ?? Date.now(),
+    finishedAt:
+      event.type === 'tool' && event.status && event.status !== 'running'
+        ? Date.now()
+        : previous?.finishedAt,
+    input:
+      previous?.input ||
+      (event.type === 'tool' && event.status === 'running' && event.text ? event.text : undefined),
     role: event.type === 'text' ? 'assistant' : 'tool',
     text,
     title: event.title || previous?.title,

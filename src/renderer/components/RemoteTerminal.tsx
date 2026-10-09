@@ -92,7 +92,12 @@ export function RemoteTerminal({
         const unsub = bridge.onTerminal((data) => term.write(data))
         const input = term.onData((data) => bridge.terminal.write(data))
         const resize = () => {
-          if (!disposed) {
+          if (
+            !disposed &&
+            container.current &&
+            container.current.clientWidth > 0 &&
+            container.current.clientHeight > 0
+          ) {
             fit.fit()
             bridge.terminal.resize(term.cols, term.rows)
           }

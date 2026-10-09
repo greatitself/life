@@ -1,0 +1,109 @@
+/* Keep the sidebar's outer inset and each control's own spacing. */
+.app-shell.life-unified-layout.life-refined-layout .sidebar-navigation-toolbar {
+  margin-inline: 0;
+  padding-inline: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-inline-search,
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-inline-search:is(:hover, :focus-within, :active) {
+  border: 0;
+  outline: none;
+  box-shadow: none;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-inline-search:is(:hover, :focus-within) {
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-inline-search input,
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-inline-search
+  input:is(:hover, :focus, :focus-visible, :active) {
+  appearance: none;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-bottom {
+  flex: 0 0 auto;
+  min-height: 0;
+  margin-top: auto;
+  margin-inline: 0;
+  padding-inline: 0;
+  border-top: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-arrangement-target {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-arrangement-footer {
+  max-height: min(45dvh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-arrangement-footer
+  > .life-thread-arrangement-section {
+  margin: 0;
+  padding-inline: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-arrangement-footer
+  > .life-thread-arrangement-section
+  > summary {
+  padding-inline: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .sidebar-arrangement-footer
+  > .life-thread-arrangement-section
+  > .sidebar-project-thread-group {
+  margin-bottom: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-tool-row {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-inline: 0;
+  padding: 4px 0 10px;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-tool-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-tool-actions > button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  min-width: 0;
+  flex: 0 0 28px;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 5px;
+  font-size: inherit;
+  color: var(--dim);
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-tool-actions > button:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.app-shell.life-unified-layout.life-refined-layout .sidebar-tool-row > .sidebar-collapse-control {
+  margin-left: auto;
+  align-self: flex-end;
+  flex: 0 0 28px;
+}

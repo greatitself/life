@@ -1,0 +1,103 @@
+/* Keep thread actions outside the workspace sidebar; sidebar and theme controls share a 4px gap. */
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-content
+  .thread-header-actions {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+@media (min-width: 901px) {
+  .app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+    .titlebar-content
+    .workspace-header:has(> .thread-header-actions) {
+    padding-right: 4px;
+  }
+  .app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout.workspace-hidden
+    .titlebar-content
+    .workspace-header:has(> .thread-header-actions) {
+    padding-right: 0;
+  }
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .life-unified-titlebar
+  .titlebar-tools {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 0 4px;
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-action-slot {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-width: 0;
+  -webkit-app-region: no-drag;
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-action-slot:empty {
+  display: none;
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-action-slot
+  > .icon-button,
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .thread-header-actions
+  > .thread-menu-container
+  > .icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--muted);
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-action-slot
+  .icon-button:hover,
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .thread-header-actions
+  > .thread-menu-container
+  > .icon-button:hover {
+  color: var(--text-strong);
+  background: var(--surface);
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .thread-header-actions
+  > .thread-menu-container {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .thread-header-actions
+  .thread-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  max-width: calc(100vw - 24px);
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout:not(
+    .workspace-hidden
+  )
+  .titlebar-surface-content {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 28px;
+}
+.app-shell.life-header-actions-layout.life-polished-layout.life-unified-layout.life-refined-layout
+  .titlebar-surface-content
+  > .surface-collapse-row {
+  padding: 0;
+  height: var(--life-chrome-row-height, 40px);
+  min-width: 28px;
+  flex: 1 1 auto;
+}

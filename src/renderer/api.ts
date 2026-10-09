@@ -4,7 +4,7 @@ declare global {
     relay?: RelayAPI
   }
 }
-export const api = window.relay
+export const api = typeof window === 'undefined' ? undefined : window.relay
 export const desktop = Boolean(api)
 export const errorText = (error: unknown) =>
   (error instanceof Error ? error.message : String(error)).replace(

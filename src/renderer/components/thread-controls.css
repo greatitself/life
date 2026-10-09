@@ -1,0 +1,327 @@
+.life-run-selectors {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.life-choice-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 220px;
+  min-height: 30px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+}
+.life-choice-trigger:hover,
+.life-choice-trigger[data-state='open'] {
+  color: var(--text);
+  background: var(--hover);
+}
+.life-choice-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.life-choice-content,
+.life-thread-menu {
+  z-index: 75;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 35px var(--overlay);
+  font-size: 13px;
+  overflow: hidden;
+}
+.life-choice-content {
+  width: min(320px, calc(100vw - 24px));
+  min-width: min(260px, calc(100vw - 24px));
+  max-height: min(380px, var(--radix-select-content-available-height));
+}
+.life-choice-viewport {
+  padding: 5px;
+}
+.life-choice-heading {
+  padding: 9px 10px 7px;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 500;
+}
+.life-choice-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 38px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+}
+.life-choice-item[data-highlighted],
+.life-thread-menu-item[data-highlighted] {
+  color: var(--text-strong);
+  background: var(--surface-raised);
+}
+.life-choice-item[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+.life-choice-item-copy {
+  flex: 1;
+  min-width: 0;
+}
+.life-choice-item-copy small {
+  display: block;
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.life-choice-scroll {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  background: var(--surface);
+  color: var(--dim);
+}
+.life-thread-menu {
+  min-width: 190px;
+  padding: 5px;
+}
+.life-thread-menu-item {
+  padding: 9px 10px;
+  min-height: 34px;
+  border-radius: 5px;
+  outline: none;
+  cursor: pointer;
+}
+.thread-card-shell {
+  position: relative;
+  min-width: 0;
+}
+.life-thread-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+.thread-card-shell:hover .life-thread-actions,
+.thread-card-shell:focus-within .life-thread-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.life-thread-action-icon,
+.life-thread-settle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.life-thread-action-icon {
+  width: 24px;
+}
+.life-thread-action-icon:hover,
+.life-thread-settle:hover {
+  color: var(--text-strong);
+  background: var(--hover);
+}
+.thread-card-shell:hover .thread-card-project > time,
+.thread-card-shell:focus-within .thread-card-project > time {
+  opacity: 0;
+}
+.thread-card-shell:hover .thread-card-project .thread-card-run-status,
+.thread-card-shell:focus-within .thread-card-project .thread-card-run-status {
+  opacity: 0;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-meta > .thread-cloud-icon {
+  flex: 0 0 16px;
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-meta > .thread-card-provider {
+  margin-left: 0;
+}
+.life-thread-hover {
+  z-index: 70;
+  width: min(370px, calc(100vw - 24px));
+  max-height: var(--radix-hover-card-content-available-height);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 15px 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 35px var(--overlay);
+  font-size: 13px;
+}
+.life-thread-hover-title {
+  display: block;
+  margin-bottom: 13px;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.life-thread-hover-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  margin: 9px 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.life-thread-hover-row > svg,
+.life-thread-hover-row > .thread-project-badge {
+  flex-shrink: 0;
+}
+.life-thread-hover-row > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.life-thread-hover .thread-project-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: white;
+  font-size: 8px;
+  line-height: 16px;
+}
+.life-thread-hover-settings {
+  margin: 10px 0 0;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.life-thread-hover-footer {
+  margin-top: 13px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.life-thread-hover-footer small {
+  display: block;
+  margin-top: 7px;
+  font-size: 10px;
+  color: var(--dim);
+}
+.life-thread-arrangement-section {
+  margin: 16px 0 8px;
+  color: var(--dim);
+}
+.life-thread-arrangement-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 30px;
+  padding: 4px 12px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+.life-thread-arrangement-section > summary::-webkit-details-marker {
+  display: none;
+}
+.life-thread-arrangement-section > summary > i {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.life-thread-arrangement-section[open] > summary > svg {
+  transform: rotate(90deg);
+}
+.life-thread-arrangement-section > p {
+  margin: 8px 12px 14px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.life-thread-arrangement-section > summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+  border-radius: 5px;
+}
+.life-attachment-transfer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+  padding: 5px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.life-attachment-transfer > progress {
+  flex: 1;
+  min-width: 40px;
+  height: 4px;
+  accent-color: var(--text);
+}
+.life-attachment-transfer > small {
+  width: 100%;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.life-attachment-transfer > button {
+  color: var(--text);
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+@media (hover: none) {
+  .life-thread-actions {
+    opacity: 1;
+    pointer-events: auto;
+    position: static;
+    justify-content: flex-end;
+    background: transparent;
+    margin-top: -6px;
+  }
+  .life-thread-action-icon,
+  .life-thread-settle {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .life-choice-trigger {
+    min-height: 44px;
+  }
+}
+@media (max-width: 760px) {
+  .life-choice-trigger {
+    max-width: 180px;
+    font-size: 11px;
+    padding-inline: 5px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .life-thread-actions {
+    transition: none;
+  }
+}

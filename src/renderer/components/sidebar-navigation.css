@@ -1,0 +1,318 @@
+/* A shared top row aligns the sidebar branding with the active workspace. */
+.app-shell.life-unified-layout {
+  --life-navigation-width: var(--life-sidebar-width, 260px);
+  --titlebar-height: 52px;
+}
+.app-shell.life-unified-layout[data-sidebar-size='adaptive'] {
+  --life-navigation-width: 306px;
+}
+.app-shell.life-unified-layout.life-desktop-layout .sidebar {
+  width: var(--life-navigation-width);
+}
+.app-shell.life-unified-layout .life-unified-titlebar {
+  height: var(--titlebar-height);
+  position: relative;
+  z-index: 30;
+  padding: 0;
+  gap: 0;
+  border-bottom: 0;
+  background: var(--bg);
+  align-items: flex-start;
+}
+.app-shell.life-unified-layout .titlebar-sidebar {
+  width: var(--life-navigation-width);
+  flex: 0 0 var(--life-navigation-width);
+  height: 52px;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  container-type: inline-size;
+}
+.app-shell.life-unified-layout:is(.sidebar-hidden, .life-replacement-active) .titlebar-sidebar {
+  width: 220px;
+  flex-basis: 220px;
+  border-right: 0;
+}
+.app-shell.life-unified-layout .titlebar-sidebar-row {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  -webkit-app-region: drag;
+}
+.app-shell.life-unified-layout .titlebar-brand {
+  padding: 0;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--text-strong);
+}
+.app-shell.life-unified-layout .titlebar-brand strong {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+.app-shell.life-unified-layout .titlebar-sidebar-toggle {
+  width: 28px;
+  height: 28px;
+}
+.app-shell.life-unified-layout .titlebar-view-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.app-shell.life-unified-layout .titlebar-view-switch button {
+  width: 28px;
+  height: 28px;
+}
+.app-shell.life-unified-layout .titlebar-view-switch button[aria-pressed='true'] {
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+.app-shell.life-unified-layout .titlebar-content {
+  flex: 1;
+  min-width: 0;
+  height: 52px;
+  border-bottom: 1px solid var(--border);
+}
+.app-shell.life-unified-layout .titlebar-content .workspace-header {
+  height: 100%;
+  width: 100%;
+  padding: 0 12px 0 20px;
+  border: 0;
+  gap: 10px;
+  -webkit-app-region: drag;
+}
+.app-shell.life-unified-layout .titlebar-content .breadcrumbs {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  gap: 8px;
+  font-size: calc(var(--life-font-size, 14px) * 0.96429);
+}
+.app-shell.life-unified-layout .titlebar-content .breadcrumbs strong {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  font-size: inherit;
+}
+.app-shell.life-unified-layout
+  .titlebar-content
+  .breadcrumbs
+  > span:not(.provider-icon):not(.breadcrumb-separator) {
+  min-width: 0;
+  max-width: 145px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-shell.life-unified-layout .titlebar-content .header-actions {
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+.app-shell.life-unified-layout .titlebar-content .header-actions .icon-button {
+  width: 28px;
+  height: 28px;
+}
+.app-shell.life-unified-layout .titlebar-content .connection-pill {
+  display: none;
+}
+.app-shell.life-unified-layout .titlebar-content .project-picker-button {
+  max-width: 105px;
+  height: 28px;
+  font-size: calc(var(--life-font-size, 14px) * 0.85714);
+}
+.app-shell.life-unified-layout .titlebar-content .project-picker-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-shell.life-unified-layout .life-unified-titlebar .titlebar-tools {
+  height: 52px;
+  margin-left: 0;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+.app-shell.life-unified-layout .life-unified-titlebar .native-window-controls {
+  height: 52px;
+  border-bottom: 1px solid var(--border);
+}
+.app-shell.life-unified-layout .life-unified-titlebar button,
+.app-shell.life-unified-layout .life-unified-titlebar input,
+.app-shell.life-unified-layout .life-unified-titlebar select,
+.app-shell.life-unified-layout .life-unified-titlebar a {
+  -webkit-app-region: no-drag;
+}
+.app-shell.life-unified-layout .sidebar-navigation-toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  margin: 10px 8px 12px;
+}
+.app-shell.life-unified-layout .sidebar-inline-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 4px;
+  border-radius: 6px;
+  color: var(--dim);
+}
+.app-shell.life-unified-layout .sidebar-inline-search:focus-within {
+  background: var(--surface);
+  outline: 2px solid var(--border-interactive);
+  outline-offset: 2px;
+  color: var(--text);
+}
+.app-shell.life-unified-layout .sidebar-inline-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: calc(var(--life-font-size, 14px) * 0.92857);
+}
+.app-shell.life-unified-layout .sidebar-inline-search input:focus-visible {
+  outline: none;
+}
+.app-shell.life-unified-layout .sidebar-navigation-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.app-shell.life-unified-layout .sidebar-navigation-actions .icon-button {
+  width: 28px;
+  height: 30px;
+  padding: 0;
+  position: relative;
+}
+.app-shell.life-unified-layout .sidebar-filter-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-strong);
+}
+.app-shell.life-unified-layout .sidebar-navigation-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 12px 9px;
+  color: var(--dim);
+  font-size: calc(var(--life-font-size, 14px) * 0.78571);
+}
+.app-shell.life-unified-layout .sidebar-navigation-summary button,
+.app-shell.life-unified-layout .sidebar-navigation-empty button {
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 5px;
+}
+.app-shell.life-unified-layout .sidebar-navigation-summary button:hover,
+.app-shell.life-unified-layout .sidebar-navigation-empty button:hover {
+  background: var(--hover);
+}
+.app-shell.life-unified-layout .sidebar-navigation-empty {
+  padding: 20px 10px;
+  text-align: center;
+  color: var(--dim);
+  font-size: calc(var(--life-font-size, 14px) * 0.85714);
+  line-height: 1.6;
+}
+.sidebar-filters-modal {
+  max-width: 390px;
+}
+.sidebar-filters-modal .sidebar-filter-fields {
+  display: grid;
+  gap: 16px;
+}
+.sidebar-filters-modal .sidebar-filter-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.sidebar-filters-modal .sidebar-filter-fields select {
+  width: 100%;
+  color: var(--text);
+}
+@container (max-width: 270px) {
+  .titlebar-mac .titlebar-sidebar-row {
+    padding-inline: 8px;
+    gap: 4px;
+  }
+  .titlebar-mac .titlebar-sidebar-row .titlebar-brand > svg {
+    display: none;
+  }
+  .titlebar-mac .titlebar-sidebar-row .titlebar-brand strong {
+    font-size: 18px;
+  }
+  .titlebar-mac .titlebar-sidebar-row .titlebar-view-switch button {
+    width: 26px;
+  }
+}
+@media (min-width: 1081px) and (max-width: 1280px) {
+  .app-shell.life-unified-layout[data-sidebar-size='adaptive'] {
+    --life-navigation-width: 280px;
+  }
+}
+@media (max-width: 900px) {
+  .app-shell.life-unified-layout:not(.life-replacement-active) {
+    --titlebar-height: 96px;
+  }
+  .app-shell.life-unified-layout .life-unified-titlebar .titlebar-sidebar {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+    border-right: 0;
+  }
+  .app-shell.life-unified-layout .titlebar-content {
+    position: absolute;
+    top: 52px;
+    left: 0;
+    right: 0;
+    height: 44px;
+    border-top: 1px solid var(--border);
+  }
+  .app-shell.life-unified-layout.life-replacement-active .titlebar-content {
+    display: none;
+  }
+  .app-shell.life-unified-layout .life-unified-titlebar .titlebar-tools .version {
+    display: none;
+  }
+  .app-shell.life-unified-layout .titlebar-content .workspace-header {
+    padding-inline: 14px;
+  }
+}
+@media (max-width: 760px) {
+  .app-shell.life-unified-layout[data-sidebar-size='adaptive'] {
+    --life-navigation-width: 260px;
+  }
+  .app-shell.life-unified-layout .titlebar-content .project-picker-button > span {
+    display: none;
+  }
+  .app-shell.life-unified-layout
+    .titlebar-content
+    .breadcrumbs
+    > span:not(.provider-icon):not(.breadcrumb-separator) {
+    display: none;
+  }
+}
+@media (max-width: 600px) {
+  .app-shell.life-unified-layout .life-unified-titlebar .native-window-button {
+    width: 33px;
+  }
+  .app-shell.life-unified-layout .titlebar-sidebar-row {
+    padding-inline: 8px;
+    gap: 6px;
+  }
+}

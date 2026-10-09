@@ -251,9 +251,13 @@ export interface RelayAPI {
   }
   chooseKey(): Promise<string | null>
   window: {
+    /** Consumes the native emergency-recovery intent once for this BrowserWindow. */
+    initialRecovery?(): Promise<boolean>
     minimize(): void
     maximize(): void
     close(): void
+    /** Stop renderer-owned work and reopen the interface without disconnecting SSH or disabling extensions. */
+    restart(): Promise<void>
     state(): Promise<boolean>
     onState(callback: (maximized: boolean) => void): () => void
   }

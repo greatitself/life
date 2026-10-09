@@ -1,0 +1,113 @@
+/* A collapsed sidebar occupies only its bottom branding row. */
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden:not(
+    .life-replacement-active
+  )
+  .titlebar-sidebar {
+  display: none;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  flex: 0 0 0;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden:not(
+    .life-replacement-active
+  )[data-platform='darwin']
+  .titlebar-sidebar {
+  display: block;
+  width: 78px;
+  min-width: 78px;
+  flex: 0 0 78px;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden:not(
+    .life-replacement-active
+  )
+  .titlebar-sidebar-row {
+  padding: 0;
+  gap: 0;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden:not(
+    .life-replacement-active
+  )
+  .titlebar-right {
+  margin-left: auto;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden:not(
+    .life-replacement-active
+  )
+  .titlebar-content
+  .workspace-header {
+  padding-left: 12px;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .app-body {
+  position: relative;
+  background: var(--bg);
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .app-body
+  > :is(.main-workspace, .research-main, .extension-view-main) {
+  padding-bottom: 40px;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar {
+  position: absolute;
+  inset: auto auto 0 10px;
+  width: max-content !important;
+  min-width: 0;
+  height: 40px;
+  min-height: 0;
+  flex: none;
+  padding: 0;
+  overflow: visible;
+  z-index: 20;
+  background: var(--bg);
+  border: 0;
+  box-shadow: none;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-bottom {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-tool-row {
+  height: 40px;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-footer-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  user-select: none;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-footer-brand
+  > svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-footer-brand
+  strong {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.35px;
+}
+.app-shell.life-bottom-brand-layout.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-tool-row
+  > .sidebar-collapse-control {
+  margin-left: 0;
+  align-self: center;
+}

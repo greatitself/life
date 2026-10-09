@@ -42,12 +42,18 @@ export class SSHConnection extends EventEmitter {
   private terminalStarting?: Promise<void>
   private terminalGeneration = 0
   private workspaceGeneration = 0
-  private workspaceSelection?: symbol
+  private workspaceSelection?: AbortController
+  private rendererGeneration = 0
+  private pendingRemoteRequests = new Map<
+    (error: Error) => void,
+    { project: boolean; renderer: boolean }
+  >()
   constructor(private store: Store) {
     super()
     this.forwarding = new PortForwarding(
       {
-        exec: (command, signal) => this.exec(command, { signal, maxOutputBytes: 256_000 }),
+        exec: (command, signal) =>
+          this.exec(command, { signal, maxOutputBytes: 256_000, rendererOwned: false }),
         forwardOut: (remoteHost, remotePort, callback) => {
           const client = this.client
           if (!client || this.state.status !== 'connected') {
@@ -70,6 +76,86 @@ export class SSHConnection extends EventEmitter {
   private update(state: ConnectionState) {
     this.state = state
     this.emit('state', state)
+  }
+  private remoteRequest<T>(
+    operation: string,
+    start: (done: (error: Error | null | undefined, value?: T) => void) => void,
+    options: {
+      timeoutMs?: number
+      signal?: AbortSignal
+      project?: boolean
+      rendererOwned?: boolean
+      discard?: (value: T) => void
+      cancel?: () => void
+    } = {},
+  ): Promise<T> {
+    if (options.signal?.aborted) return Promise.reject(new Error('Remote command cancelled'))
+    return new Promise<T>((resolve, reject) => {
+      let settled = false
+      const timeoutMs = options.timeoutMs ?? 30000
+      const cleanup = () => {
+        clearTimeout(timer)
+        options.signal?.removeEventListener('abort', aborted)
+        this.pendingRemoteRequests.delete(cancel)
+      }
+      const cancel = (error: Error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        try {
+          options.cancel?.()
+        } catch {
+          // Resource cleanup cannot prevent a timed-out request from settling.
+        }
+        reject(error)
+      }
+      const aborted = () => cancel(new Error('Remote command cancelled'))
+      const timer = setTimeout(
+        () => cancel(new Error(`${operation} timed out after ${timeoutMs / 1000} seconds`)),
+        timeoutMs,
+      )
+      this.pendingRemoteRequests.set(cancel, {
+        project: options.project === true,
+        renderer: options.rendererOwned === true || options.project === true,
+      })
+      options.signal?.addEventListener('abort', aborted, { once: true })
+      try {
+        start((error, value) => {
+          // A server may answer after timeout, disconnect, or cancellation. Close
+          // newly acquired resources rather than adopting them into a later session.
+          if (settled || error) {
+            if (value !== undefined) {
+              try {
+                options.discard?.(value)
+              } catch {
+                // A late resource may already have been closed by SSH teardown.
+              }
+            }
+            if (error) cancel(error)
+            return
+          }
+          settled = true
+          cleanup()
+          resolve(value as T)
+        })
+      } catch (error) {
+        cancel(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+  private cancelRemoteRequests(error: Error, scope?: 'project' | 'renderer') {
+    for (const [cancel, owner] of this.pendingRemoteRequests)
+      if (!scope || owner[scope]) cancel(error)
+  }
+  async cancelRendererRequests(): Promise<void> {
+    this.rendererGeneration++
+    this.cancelRemoteRequests(
+      new Error('The Life interface changed. Retry this operation.'),
+      'renderer',
+    )
+    this.workspaceSelection?.abort()
+    this.workspaceSelection = undefined
+    await this.store.settled()
   }
   async connect(input: ConnectInput): Promise<ConnectionState> {
     if (this.state.status === 'connecting') throw new Error('A connection is already in progress')
@@ -165,102 +251,113 @@ export class SSHConnection extends EventEmitter {
         // A failed spawn can report asynchronously before client.connect has attached listeners.
         this.jump.stream.on('error', (error) => this.emit('diagnostic', error.message))
       }
-      await new Promise<void>((resolve, reject) => {
-        client.once('ready', resolve)
-        client.on('error', reject)
-        client.once('close', () => {
-          reject(new Error('SSH connection closed'))
-          if (this.client === client) {
-            this.forwarding.stop()
-            this.jump?.stream.destroy()
-            this.jump = undefined
-            this.client = undefined
-            this.sftp = undefined
-            this.terminal = undefined
-            this.update({
-              status: 'disconnected',
-              profile: this.state.profile,
-              error:
-                this.state.status === 'connected'
-                  ? 'The SSH connection closed. Reconnect to continue.'
-                  : this.state.error,
-            })
-            this.emit('disconnected')
-          }
-        })
-        client.connect({
-          host: input.host,
-          port: input.port,
-          username: input.username,
-          privateKey,
-          passphrase: input.passphrase,
-          password: input.auth === 'password' ? input.password : undefined,
-          agent,
-          authHandler,
-          readyTimeout: 90000,
-          keepaliveInterval: 15000,
-          keepaliveCountMax: 3,
-          ...(config ? sshConfigTransportOptions(config) : {}),
-          ...(this.jump ? { sock: this.jump.stream } : {}),
-          agentForward: forwardAgent,
-          hostVerifier: (key: Buffer, callback: VerifyCallback) => {
-            if (this.client !== client) {
-              callback(false)
-              return
+      await this.remoteRequest<void>(
+        'Connecting to the SSH machine',
+        (done) => {
+          client.once('ready', () => done(null))
+          client.on('error', (error) => done(error))
+          client.once('close', () => {
+            done(new Error('SSH connection closed'))
+            if (this.client === client) {
+              this.forwarding.stop()
+              this.cancelRemoteRequests(new Error('SSH connection closed'))
+              this.workspaceGeneration++
+              this.workspaceSelection = undefined
+              this.closeTerminal()
+              this.jump?.stream.destroy()
+              this.jump = undefined
+              this.client = undefined
+              this.sftp = undefined
+              this.terminal = undefined
+              this.update({
+                status: 'disconnected',
+                profile: this.state.profile,
+                error:
+                  this.state.status === 'connected'
+                    ? 'The SSH connection closed. Reconnect to continue.'
+                    : this.state.error,
+              })
+              this.emit('disconnected')
             }
-            const fingerprint =
-              'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '')
-            const host = `${config?.options.hostkeyalias?.[0] || input.host}:${input.port}`
-            const known = this.store.hostKey(host)
-            if (known) {
-              if (known !== fingerprint) {
-                this.update({
-                  status: 'connecting',
-                  profile,
-                  error:
-                    'SSH host key changed. Verify the machine identity before removing its saved fingerprint from connections.json.',
-                })
-              }
-              callback(known === fingerprint)
-              return
-            }
-            const id = randomUUID()
-            const timer = setTimeout(() => {
-              this.pendingTrust.delete(id)
-              callback(false)
-            }, 60000)
-            this.pendingTrust.set(id, (accepted) => {
-              clearTimeout(timer)
-              this.pendingTrust.delete(id)
-              if (!accepted) {
+          })
+          client.connect({
+            host: input.host,
+            port: input.port,
+            username: input.username,
+            privateKey,
+            passphrase: input.passphrase,
+            password: input.auth === 'password' ? input.password : undefined,
+            agent,
+            authHandler,
+            readyTimeout: 90000,
+            keepaliveInterval: 15000,
+            keepaliveCountMax: 3,
+            ...(config ? sshConfigTransportOptions(config) : {}),
+            ...(this.jump ? { sock: this.jump.stream } : {}),
+            agentForward: forwardAgent,
+            hostVerifier: (key: Buffer, callback: VerifyCallback) => {
+              if (this.client !== client) {
                 callback(false)
                 return
               }
-              void this.store.trust(host, fingerprint).then(
-                () => callback(this.client === client),
-                () => callback(false),
-              )
-            })
-            this.emit('host-key', { id, host, fingerprint } satisfies HostKeyRequest)
-          },
-        })
-      })
+              const fingerprint =
+                'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '')
+              const host = `${config?.options.hostkeyalias?.[0] || input.host}:${input.port}`
+              const known = this.store.hostKey(host)
+              if (known) {
+                if (known !== fingerprint) {
+                  this.update({
+                    status: 'connecting',
+                    profile,
+                    error:
+                      'SSH host key changed. Verify the machine identity before removing its saved fingerprint from connections.json.',
+                  })
+                }
+                callback(known === fingerprint)
+                return
+              }
+              const id = randomUUID()
+              const timer = setTimeout(() => {
+                this.pendingTrust.delete(id)
+                callback(false)
+              }, 60000)
+              this.pendingTrust.set(id, (accepted) => {
+                clearTimeout(timer)
+                this.pendingTrust.delete(id)
+                if (!accepted) {
+                  callback(false)
+                  return
+                }
+                void this.store.trust(host, fingerprint).then(
+                  () => callback(this.client === client),
+                  () => callback(false),
+                )
+              })
+              this.emit('host-key', { id, host, fingerprint } satisfies HostKeyRequest)
+            },
+          })
+        },
+        { timeoutMs: 90000 },
+      )
       if (this.client !== client) throw new Error('SSH connection cancelled')
       client.on('error', (error) => this.emit('diagnostic', error.message))
       // Machine access is independent of any saved project. A moved or deleted
       // last-used folder must not prevent connecting and choosing another one.
-      const home = (await this.exec('cd "$HOME" && pwd -P')).trim()
+      const home = (await this.exec('cd "$HOME" && pwd -P', { rendererOwned: false })).trim()
       if (this.client !== client) throw new Error('SSH connection cancelled')
       if (!home.startsWith('/'))
         throw new Error('The remote home must resolve to an absolute POSIX path')
       const versions = await this.exec(
         'printf "CODEX="; if command -v codex >/dev/null 2>&1; then codex --version; else printf "missing\\n"; fi; printf "CLAUDE="; if command -v claude >/dev/null 2>&1; then claude --version; else printf "missing\\n"; fi',
+        { rendererOwned: false },
       )
       if (this.client !== client) throw new Error('SSH connection cancelled')
       const version = (name: string) =>
         versions.match(new RegExp('^' + name + '=(.*)$', 'm'))?.[1]?.trim()
-      const sftp = await new Promise<SFTPWrapper>((resolve, reject) =>
-        client.sftp((error, sftp) => (error ? reject(error) : resolve(sftp))),
+      const sftp = await this.remoteRequest<SFTPWrapper>(
+        'Opening remote file access',
+        (done) => client.sftp(done),
+        { discard: (value) => value.end() },
       )
       if (this.client !== client) {
         sftp.end()
@@ -271,8 +368,8 @@ export class SSHConnection extends EventEmitter {
       // Legacy threads were associated with the profile's last folder. Resolve
       // that reference for the renderer, but never open it or make it required
       // for machine access. A deleted folder remains an unresolved reference.
-      let previousLookupTimedOut = false
-      let previousLookupTimer: ReturnType<typeof setTimeout> | undefined
+      const previousLookup = new AbortController()
+      const previousLookupTimer = setTimeout(() => previousLookup.abort(), 1000)
       try {
         const previous =
           profile.workspace === '~'
@@ -282,28 +379,18 @@ export class SSHConnection extends EventEmitter {
               : posix.isAbsolute(profile.workspace)
                 ? profile.workspace
                 : posix.join(home, profile.workspace)
-        const lookup = async () => {
-          const canonical = await new Promise<string>((resolve, reject) =>
-            sftp.realpath(previous, (error, resolved) =>
-              error ? reject(error) : resolve(resolved),
-            ),
-          )
-          if (previousLookupTimedOut) return undefined
-          if (this.client !== client) throw new Error('SSH connection cancelled')
-          const stat = await new Promise<import('ssh2').Stats>((resolve, reject) =>
-            sftp.stat(canonical, (error, value) => (error ? reject(error) : resolve(value))),
-          )
-          return posix.isAbsolute(canonical) && stat.isDirectory() ? canonical : undefined
-        }
-        lastWorkspace = await Promise.race([
-          lookup(),
-          new Promise<undefined>((resolve) => {
-            previousLookupTimer = setTimeout(() => {
-              previousLookupTimedOut = true
-              resolve(undefined)
-            }, 1000)
-          }),
-        ])
+        const canonical = await this.remoteRequest<string>(
+          'Resolving the previous project',
+          (done) => sftp.realpath(previous, done),
+          { signal: previousLookup.signal },
+        )
+        if (this.client !== client) throw new Error('SSH connection cancelled')
+        const stat = await this.remoteRequest<import('ssh2').Stats>(
+          'Checking the previous project',
+          (done) => sftp.stat(canonical, done),
+          { signal: previousLookup.signal },
+        )
+        lastWorkspace = posix.isAbsolute(canonical) && stat.isDirectory() ? canonical : undefined
       } catch {
         // The stored project is optional. The picker can choose any other folder.
       } finally {
@@ -339,6 +426,7 @@ export class SSHConnection extends EventEmitter {
   }
   disconnect() {
     this.forwarding.stop()
+    this.cancelRemoteRequests(new Error('SSH connection cancelled'))
     this.workspaceGeneration++
     this.workspaceSelection = undefined
     for (const reply of this.pendingTrust.values()) reply(false)
@@ -353,10 +441,11 @@ export class SSHConnection extends EventEmitter {
     this.jump?.stream.destroy()
     this.jump = undefined
   }
-  private async remoteDirectory(path?: string) {
+  private async remoteDirectory(path?: string, signal?: AbortSignal) {
     const sftp = this.sftp
     const client = this.client
     const home = this.state.home
+    const rendererGeneration = this.rendererGeneration
     if (this.state.status !== 'connected' || !sftp || !client || !home)
       throw new Error('Connect to a machine first')
     const input = path === undefined ? '~' : remoteDirectorySchema.parse(path)
@@ -371,15 +460,21 @@ export class SSHConnection extends EventEmitter {
     const current = () => {
       if (this.client !== client || this.sftp !== sftp || this.state.status !== 'connected')
         throw new Error('SSH connection cancelled')
+      if (rendererGeneration !== this.rendererGeneration || signal?.aborted)
+        throw new Error('The Life interface changed. Retry this operation.')
     }
-    const canonical = await new Promise<string>((resolve, reject) =>
-      sftp.realpath(requested, (error, resolved) => (error ? reject(error) : resolve(resolved))),
+    const canonical = await this.remoteRequest<string>(
+      'Resolving the remote directory',
+      (done) => sftp.realpath(requested, done),
+      { rendererOwned: true, signal },
     )
     current()
     if (!posix.isAbsolute(canonical))
       throw new Error('The remote directory must resolve to an absolute POSIX path')
-    const stat = await new Promise<import('ssh2').Stats>((resolve, reject) =>
-      sftp.stat(canonical, (error, value) => (error ? reject(error) : resolve(value))),
+    const stat = await this.remoteRequest<import('ssh2').Stats>(
+      'Checking the remote directory',
+      (done) => sftp.stat(canonical, done),
+      { rendererOwned: true, signal },
     )
     current()
     if (!stat.isDirectory()) throw new Error('Choose an existing remote directory')
@@ -387,8 +482,11 @@ export class SSHConnection extends EventEmitter {
   }
   async listDirectories(path?: string): Promise<RemoteDirectoryList> {
     const { canonical, sftp, current } = await this.remoteDirectory(path)
-    const files = await new Promise<import('ssh2').FileEntryWithStats[]>((resolve, reject) =>
-      sftp.readdir(canonical, (error, entries) => (error ? reject(error) : resolve(entries))),
+    current()
+    const files = await this.remoteRequest<import('ssh2').FileEntryWithStats[]>(
+      'Listing remote directories',
+      (done) => sftp.readdir(canonical, done),
+      { rendererOwned: true },
     )
     current()
     return {
@@ -402,24 +500,52 @@ export class SSHConnection extends EventEmitter {
   }
   async selectWorkspace(path: string): Promise<ConnectionState> {
     if (this.workspaceSelection) throw new Error('A project selection is already in progress')
-    const selection = Symbol('workspace selection')
+    const selection = new AbortController()
     this.workspaceSelection = selection
     try {
-      const { canonical, sftp, current } = await this.remoteDirectory(path)
+      const { canonical, sftp, current } = await this.remoteDirectory(path, selection.signal)
+      current()
       // Ensure the folder can actually be browsed before replacing the current
       // project. Invalid selections leave its terminal and agent sessions intact.
-      await new Promise<void>((resolve, reject) =>
-        sftp.readdir(canonical, (error) => (error ? reject(error) : resolve())),
+      await this.remoteRequest<import('ssh2').FileEntryWithStats[]>(
+        'Opening the selected project',
+        (done) => sftp.readdir(canonical, done),
+        { rendererOwned: true, signal: selection.signal },
       )
       current()
       if (this.state.workspace === canonical) return this.state
       const profile = { ...this.state.profile!, workspace: canonical }
-      await this.store.save(profile)
+      const ownsSelection = () => {
+        try {
+          current()
+          return this.workspaceSelection === selection
+        } catch {
+          return false
+        }
+      }
+      await this.remoteRequest<void>(
+        'Saving the selected project',
+        (done) => {
+          void this.store
+            .saveIfCurrent(profile, ownsSelection, () => {
+              // The final ownership check and publication are synchronous with the
+              // durable profile commit, so a replacement renderer cannot see half a selection.
+              current()
+              this.workspaceGeneration++
+              this.cancelRemoteRequests(new Error('The selected project changed'), 'project')
+              this.closeTerminal()
+              this.emit('workspace-changing')
+              this.update({ ...this.state, profile, workspace: canonical })
+            })
+            .then(
+              (saved) =>
+                done(saved ? null : new Error('The Life interface changed. Retry this operation.')),
+              (error) => done(error),
+            )
+        },
+        { rendererOwned: true, signal: selection.signal, cancel: () => selection.abort() },
+      )
       current()
-      this.workspaceGeneration++
-      this.closeTerminal()
-      this.emit('workspace-changing')
-      this.update({ ...this.state, profile, workspace: canonical })
       return this.state
     } finally {
       if (this.workspaceSelection === selection) this.workspaceSelection = undefined
@@ -429,31 +555,32 @@ export class SSHConnection extends EventEmitter {
     command: string,
     pty?: { cols: number; rows: number },
     signal?: AbortSignal,
+    timeoutMs = 30000,
+    rendererOwned = true,
   ): Promise<ClientChannel> {
     const client = this.client
     if (!client) return Promise.reject(new Error('Connect to a machine first'))
     if (signal?.aborted) return Promise.reject(new Error('Remote command cancelled'))
-    return new Promise((resolve, reject) => {
-      const aborted = () => reject(new Error('Remote command cancelled'))
-      signal?.addEventListener('abort', aborted, { once: true })
-      client.exec(
-        remoteCommand(command),
-        pty ? { pty: { term: 'xterm-256color', ...pty } } : {},
-        (error, channel) => {
-          signal?.removeEventListener('abort', aborted)
-          if (error) {
-            reject(error)
-            return
-          }
-          if (this.client !== client || signal?.aborted) {
-            channel.close()
-            reject(new Error('SSH connection cancelled'))
-            return
-          }
-          resolve(channel)
-        },
-      )
-    })
+    return this.remoteRequest<ClientChannel>(
+      'Opening the remote command',
+      (done) =>
+        client.exec(
+          remoteCommand(command),
+          pty ? { pty: { term: 'xterm-256color', ...pty } } : {},
+          (error, channel) => {
+            if (error) {
+              done(error, channel)
+              return
+            }
+            if (this.client !== client || signal?.aborted) {
+              done(new Error('SSH connection cancelled'), channel)
+              return
+            }
+            done(null, channel)
+          },
+        ),
+      { signal, timeoutMs, rendererOwned, discard: (channel) => channel.close() },
+    )
   }
   async exec(
     command: string,
@@ -462,9 +589,26 @@ export class SSHConnection extends EventEmitter {
       maxOutputBytes?: number
       timeoutMs?: number
       input?: string
+      rendererOwned?: boolean
     } = {},
   ): Promise<string> {
-    const channel = await this.channel(command, undefined, options.signal)
+    const timeoutMs = options.timeoutMs ?? 30000
+    const started = Date.now()
+    const rendererOwned = options.rendererOwned !== false
+    const client = this.client
+    const rendererGeneration = this.rendererGeneration
+    const channel = await this.channel(command, undefined, options.signal, timeoutMs, rendererOwned)
+    if (
+      this.client !== client ||
+      (rendererOwned && rendererGeneration !== this.rendererGeneration)
+    ) {
+      channel.close()
+      throw new Error(
+        this.client !== client
+          ? 'SSH connection cancelled'
+          : 'The Life interface changed. Retry this operation.',
+      )
+    }
     return new Promise((resolve, reject) => {
       let output = ''
       let stderr = ''
@@ -476,18 +620,26 @@ export class SSHConnection extends EventEmitter {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        this.pendingRemoteRequests.delete(cancelled)
         options.signal?.removeEventListener('abort', aborted)
         reject(error)
+      }
+      const cancelled = (error: Error) => {
+        fail(error)
+        channel.close()
       }
       const aborted = () => {
         fail(new Error('Remote command cancelled'))
         channel.close()
       }
-      const timeoutMs = options.timeoutMs ?? 30000
-      const timer = setTimeout(() => {
-        fail(new Error(`Remote command timed out after ${timeoutMs / 1000} seconds`))
-        channel.close()
-      }, timeoutMs)
+      const timer = setTimeout(
+        () => {
+          fail(new Error(`Remote command timed out after ${timeoutMs / 1000} seconds`))
+          channel.close()
+        },
+        Math.max(1, timeoutMs - (Date.now() - started)),
+      )
+      this.pendingRemoteRequests.set(cancelled, { project: false, renderer: rendererOwned })
       options.signal?.addEventListener('abort', aborted, { once: true })
       if (options.signal?.aborted) aborted()
       channel.on('data', (chunk: Buffer) => {
@@ -530,6 +682,7 @@ export class SSHConnection extends EventEmitter {
         }
         settled = true
         clearTimeout(timer)
+        this.pendingRemoteRequests.delete(cancelled)
         options.signal?.removeEventListener('abort', aborted)
         resolve(output + decoder.end())
       })
@@ -540,15 +693,20 @@ export class SSHConnection extends EventEmitter {
     const root = this.state.workspace
     const sftp = this.sftp
     const generation = this.workspaceGeneration
+    const rendererGeneration = this.rendererGeneration
     if (!root || !sftp) throw new Error('Connect to a workspace first')
     const requested = path ? (posix.isAbsolute(path) ? path : posix.join(root, path)) : root
     if (requested.includes('\0')) throw new Error('Invalid path')
-    const canonical = await new Promise<string>((resolve, reject) =>
-      sftp.realpath(requested, (e, p) => (e ? reject(e) : resolve(p))),
+    const canonical = await this.remoteRequest<string>(
+      'Resolving the remote file',
+      (done) => sftp.realpath(requested, done),
+      { project: true },
     )
     const current = () => {
       if (this.sftp !== sftp) throw new Error('SSH connection cancelled')
       if (this.workspaceGeneration !== generation) throw new Error('The selected project changed')
+      if (this.rendererGeneration !== rendererGeneration)
+        throw new Error('The Life interface changed. Retry this operation.')
     }
     current()
     const relative = posix.relative(root, canonical)
@@ -558,8 +716,11 @@ export class SSHConnection extends EventEmitter {
   }
   async list(path?: string): Promise<FileEntry[]> {
     const { canonical, sftp, current } = await this.safePath(path)
-    const entries = await new Promise<import('ssh2').FileEntryWithStats[]>((resolve, reject) =>
-      sftp.readdir(canonical, (e, files) => (e ? reject(e) : resolve(files))),
+    current()
+    const entries = await this.remoteRequest<import('ssh2').FileEntryWithStats[]>(
+      'Listing project files',
+      (done) => sftp.readdir(canonical, done),
+      { project: true },
     )
     current()
     return entries
@@ -574,13 +735,40 @@ export class SSHConnection extends EventEmitter {
   }
   async read(path: string): Promise<string> {
     const { canonical, sftp, current } = await this.safePath(path)
-    const stat = await new Promise<import('ssh2').Stats>((resolve, reject) =>
-      sftp.stat(canonical, (e, s) => (e ? reject(e) : resolve(s))),
+    current()
+    const stat = await this.remoteRequest<import('ssh2').Stats>(
+      'Checking the remote file',
+      (done) => sftp.stat(canonical, done),
+      { project: true },
     )
     current()
     if (stat.size > 1_000_000) throw new Error('File preview supports files up to 1 MB')
-    const buffer = await new Promise<Buffer>((resolve, reject) =>
-      sftp.readFile(canonical, (e, data) => (e ? reject(e) : resolve(data))),
+    let stream: ReturnType<SFTPWrapper['createReadStream']> | undefined
+    const buffer = await this.remoteRequest<Buffer>(
+      'Reading the remote file',
+      (done) => {
+        const chunks: Buffer[] = []
+        let bytes = 0
+        let ended = false
+        stream = sftp.createReadStream(canonical)
+        stream.on('data', (chunk: Buffer) => {
+          bytes += chunk.length
+          if (bytes > 1_000_000) {
+            done(new Error('File preview supports files up to 1 MB'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        stream.once('error', (error: Error) => done(error))
+        stream.once('end', () => {
+          ended = true
+          done(null, Buffer.concat(chunks, bytes))
+        })
+        stream.once('close', () => {
+          if (!ended) done(new Error('Remote file closed before its contents were received'))
+        })
+      },
+      { project: true, cancel: () => stream?.destroy() },
     )
     current()
     if (buffer.length > 1_000_000) throw new Error('File preview supports files up to 1 MB')
@@ -622,11 +810,12 @@ export class SSHConnection extends EventEmitter {
     }
   }
   private async createTerminal(generation: number) {
+    const rendererGeneration = this.rendererGeneration
     const channel = await this.channel(
       `cd ${shellQuote(this.state.workspace || '')} && exec "$SHELL" -l`,
       { cols: 100, rows: 18 },
     )
-    if (this.terminalGeneration !== generation) {
+    if (this.terminalGeneration !== generation || this.rendererGeneration !== rendererGeneration) {
       channel.close()
       return
     }

@@ -28,6 +28,7 @@ import { executeConnectionCommand } from './connection-execution'
 import { parseLifeSourcePatch, parseLifeSourceRead } from '../shared/source-code'
 import { ExtensionSharing } from './extension-sharing'
 import { canonicalPublicGistURL } from '../shared/extension-sharing'
+import { RendererDocumentAdmission, RendererRecoveryBudget } from './renderer-recovery'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
@@ -48,6 +49,22 @@ let sourceStartupTimer: ReturnType<typeof setTimeout> | undefined
 let sourceReloadTimer: ReturnType<typeof setTimeout> | undefined
 let quitting = false
 let recovering = false
+let cancelRendererSessions = () => {}
+const rendererRecoveryBudget = new RendererRecoveryBudget()
+const rendererAdmissions = new WeakMap<BrowserWindow, RendererDocumentAdmission>()
+const extensionRecoveryStartups = new WeakSet<BrowserWindow>()
+const assertRendererAdmission = (channel: string) => {
+  if (!window || !rendererAdmissions.get(window)?.allows(channel))
+    throw new Error('Life is restarting its interface. Try again when the workspace returns.')
+}
+async function cancelRendererWork() {
+  if (window) rendererAdmissions.get(window)?.suspend()
+  // Invalidate selectors and commands synchronously before cancelling provider
+  // sessions. Wait for owned profile persistence to settle before a new UI starts.
+  const requests = ssh?.cancelRendererRequests()
+  cancelRendererSessions()
+  await requests
+}
 const ownsInstance = app.requestSingleInstanceLock()
 if (!ownsInstance) app.quit()
 app.on('second-instance', () => {
@@ -86,6 +103,7 @@ async function recoverExtensions() {
         }
       }
     }
+    await cancelRendererWork()
     ssh?.disconnect()
     clearTimeout(sourceStartupTimer)
     await sourceCode?.disable()
@@ -97,18 +115,33 @@ async function recoverExtensions() {
     )
     // Main-process recovery remains usable even when generated UI is stuck in a CPU loop.
     if (owner && !owner.isDestroyed()) {
-      createWindow()
-      window!.webContents.once('did-finish-load', () =>
-        setTimeout(() => send('extensions:recover', true), 100),
-      )
+      createWindow(owner, true)
       owner.destroy()
     }
   } finally {
     recovering = false
   }
 }
+async function restartInterface(owner: BrowserWindow, sourceFailure?: string) {
+  if (owner !== window || owner.isDestroyed() || recovering || quitting) return
+  recovering = true
+  try {
+    clearTimeout(sourceStartupTimer)
+    // A replacement cannot receive the old renderer's in-flight events. Stop those
+    // sessions while retaining the SSH connection, selected project and host trust.
+    await cancelRendererWork()
+    if (sourceFailure && sourceCode?.get().enabled) await sourceCode.disable(sourceFailure)
+    if (owner !== window || owner.isDestroyed() || quitting) return
+    createWindow(owner)
+    owner.destroy()
+  } finally {
+    recovering = false
+  }
+}
 const send = (channel: string, data: unknown) => {
-  if (window && !window.isDestroyed()) window.webContents.send(channel, data)
+  if (!window || window.isDestroyed()) return
+  const contents = window.webContents
+  if (!contents.isDestroyed() && !contents.isCrashed()) contents.send(channel, data)
 }
 async function init() {
   const store = new Store(app.getPath('userData'))
@@ -124,6 +157,8 @@ async function init() {
   ssh = new SSHConnection(store)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
+  cancelRendererSessions = () =>
+    agents.close('Life restarted its interface. Send a message to continue this thread.')
   const extensionSharing = new ExtensionSharing()
   ssh.on('state', (state) => send('connection:state', state))
   ssh.on('host-key', (request) => send('connection:host-key', request))
@@ -148,6 +183,7 @@ async function init() {
         event.senderFrame !== window.webContents.mainFrame
       )
         throw new Error('Untrusted IPC sender')
+      assertRendererAdmission(name)
       return fn(...args)
     })
   }
@@ -166,10 +202,12 @@ async function init() {
       return null
     }
     if (method === 'terminal.write') {
+      assertRendererAdmission('terminal:write')
       ssh.writeTerminal(z.string().max(100000).parse(args[0]))
       return null
     }
     if (method === 'terminal.resize') {
+      assertRendererAdmission('terminal:resize')
       ssh.resizeTerminal(
         z.number().int().min(1).max(999).parse(args[0]),
         z.number().int().min(1).max(999).parse(args[1]),
@@ -200,6 +238,7 @@ async function init() {
                 : method.replace('.', ':')
     const operation = operations.get(channel)
     if (!operation) throw new Error(`This Life method is unavailable: ${method}`)
+    assertRendererAdmission(channel)
     const value = await operation(...args)
     // Built-in snapshots may include optional undefined fields; worker RPC is strict JSON.
     return JSON.parse(JSON.stringify(value === undefined ? null : value))
@@ -241,7 +280,19 @@ async function init() {
         setTimeout(() => {
           if (owner !== window || owner.isDestroyed() || quitting) return
           if (agents.hasRunningSessions() || localApplies) void reloadSource()
-          else owner.webContents.reload()
+          else {
+            const admission = rendererAdmissions.get(owner)
+            const documentRevision = admission?.documentRevision
+            void cancelRendererWork()
+              .then(() => {
+                if (owner !== window || owner.isDestroyed() || quitting) return
+                // A native reload may already have committed a fresh document
+                // while persistence was settling. Do not discard its new work.
+                if (admission?.documentRevision !== documentRevision) return
+                owner.webContents.reload()
+              })
+              .catch((error) => dialog.showErrorBox('Life reload failed', String(error)))
+          }
         }, 100)
       }
       sourceReloadTimer = setTimeout(reloadWhenIdle, 100)
@@ -250,13 +301,8 @@ async function init() {
   }
   const sourceFailure = async (revision: number, reason: string) => {
     if (!sourceCode.get().enabled || sourceCode.get().active?.revision !== revision) return
-    clearTimeout(sourceStartupTimer)
-    await sourceCode.disable(reason)
     const owner = window
-    if (owner && !owner.isDestroyed()) {
-      createWindow()
-      owner.destroy()
-    }
+    if (owner && !owner.isDestroyed()) await restartInterface(owner, reason)
   }
   handle('source-code:get', () => sourceCode.get())
   handle('source-code:context', (request) =>
@@ -379,6 +425,15 @@ async function init() {
     resolveSSHConfig(z.string().max(255).parse(alias), z.string().max(4096).optional().parse(path)),
   )
   handle('window:state', () => window?.isMaximized() || false)
+  handle('window:initial-recovery', () =>
+    Boolean(window && extensionRecoveryStartups.delete(window)),
+  )
+  handle('window:restart', () => {
+    const owner = window
+    if (!owner || owner.isDestroyed() || quitting) throw new Error('Life window is unavailable')
+    if (recovering) throw new Error('Life is already restarting its interface')
+    return restartInterface(owner)
+  })
   handle('profiles:save', (p) => store.save(profileSchema.parse(p)))
   handle('profiles:remove', (id) => store.remove(z.string().parse(id)))
   handle('connection:connect', (input) => ssh.connect(connectSchema.parse(input)))
@@ -422,12 +477,22 @@ async function init() {
     return result.canceled ? null : result.filePaths[0]
   })
   ipcMain.on('terminal:write', (e, data: unknown) => {
-    if (e.sender === window?.webContents && typeof data === 'string' && data.length <= 100000)
+    if (
+      window &&
+      e.sender === window.webContents &&
+      e.senderFrame === window.webContents.mainFrame &&
+      rendererAdmissions.get(window)?.allows('terminal:write') &&
+      typeof data === 'string' &&
+      data.length <= 100000
+    )
       ssh.writeTerminal(data)
   })
   ipcMain.on('terminal:resize', (e, cols: unknown, rows: unknown) => {
     if (
       e.sender === window?.webContents &&
+      e.senderFrame === window?.webContents.mainFrame &&
+      window &&
+      rendererAdmissions.get(window)?.allows('terminal:resize') &&
       typeof cols === 'number' &&
       typeof rows === 'number' &&
       Number.isInteger(cols) &&
@@ -505,15 +570,26 @@ async function init() {
   createWindow()
   updates.start()
 }
-function createWindow() {
+function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
+  const previousAlive = previous && !previous.isDestroyed() ? previous : undefined
+  const previousBounds =
+    previousAlive && (previousAlive.isMaximized() || previousAlive.isFullScreen())
+      ? previousAlive.getNormalBounds()
+      : previousAlive?.getBounds()
+  const wasMaximized = previousAlive?.isMaximized() || false
+  const wasFullscreen = previousAlive?.isFullScreen() || false
+  const wasMinimized = previousAlive?.isMinimized() || false
   window = new BrowserWindow({
     width: 1440,
     height: 960,
+    ...previousBounds,
     minWidth: 760,
     minHeight: 580,
     show: false,
     backgroundColor: customization.get().config.theme === 'dark' ? '#161616' : '#ffffff',
-    title: 'Life',
+    title: previousAlive?.getTitle() || 'Life',
+    alwaysOnTop: previousAlive?.isAlwaysOnTop() || false,
+    opacity: previousAlive?.getOpacity() ?? 1,
     icon: app.isPackaged
       ? join(process.resourcesPath, 'icon.png')
       : join(app.getAppPath(), 'build/icon.png'),
@@ -529,6 +605,67 @@ function createWindow() {
     },
   })
   const owner = window
+  if (extensionRecovery) extensionRecoveryStartups.add(owner)
+  const admission = new RendererDocumentAdmission()
+  rendererAdmissions.set(owner, admission)
+  let recoveryPrompt:
+    { controller: AbortController; cause: 'unresponsive' | 'crash' | 'load' } | undefined
+  const reportRecoveryFailure = (error: unknown) => {
+    if (!quitting) dialog.showErrorBox('Life recovery failed', String(error))
+  }
+  const promptRecovery = (cause: 'unresponsive' | 'crash' | 'load', detail: string) => {
+    if (owner !== window || owner.isDestroyed() || recovering || quitting || recoveryPrompt) return
+    const canRecoverExtensions =
+      sourceCode?.get().enabled || extensions?.list().some((extension) => extension.enabled)
+    const actions = [
+      ...(cause === 'unresponsive' ? ['Wait'] : []),
+      'Restart interface',
+      ...(canRecoverExtensions ? ['Recover extensions'] : []),
+      'Close Life',
+    ]
+    const pending = { controller: new AbortController(), cause }
+    recoveryPrompt = pending
+    // This dialog is native and runs in the main process, so a stopped renderer
+    // cannot leave recovery controls inaccessible behind a black window.
+    if (!owner.isVisible()) owner.show()
+    void dialog
+      .showMessageBox(owner, {
+        type: 'warning',
+        title: cause === 'unresponsive' ? 'Life is not responding' : 'Life interface stopped',
+        message:
+          cause === 'unresponsive'
+            ? 'Life’s interface is taking too long to respond.'
+            : 'Life could not keep its interface running.',
+        detail:
+          `${detail}\n\nYour saved projects, conversations and installed extensions are preserved. ` +
+          'Restarting the interface stops current agent work and keeps your machine connected.' +
+          (canRecoverExtensions
+            ? '\nRecover extensions disables customizations and disconnects the machine.'
+            : ''),
+        buttons: actions,
+        defaultId: 0,
+        cancelId: cause === 'unresponsive' ? 0 : actions.length - 1,
+        noLink: true,
+        signal: pending.controller.signal,
+      })
+      .then(async ({ response }) => {
+        if (
+          pending.controller.signal.aborted ||
+          owner !== window ||
+          owner.isDestroyed() ||
+          quitting
+        )
+          return
+        const action = actions[response]
+        if (action === 'Restart interface') await restartInterface(owner)
+        else if (action === 'Recover extensions') await recoverExtensions()
+        else if (action === 'Close Life') app.quit()
+      })
+      .catch(reportRecoveryFailure)
+      .finally(() => {
+        if (recoveryPrompt === pending) recoveryPrompt = undefined
+      })
+  }
   const startSourceWatchdog = () => {
     clearTimeout(sourceStartupTimer)
     const state = sourceCode?.get()
@@ -542,34 +679,56 @@ function createWindow() {
         sourceCode.get().active?.revision !== revision
       )
         return
-      void sourceCode
-        .disable(
-          'The customized interface did not finish starting. Life restored its built-in interface.',
-        )
-        .then(() => {
-          if (owner !== window || owner.isDestroyed()) return
-          createWindow()
-          owner.destroy()
-        })
+      void restartInterface(
+        owner,
+        'The customized interface did not finish starting. Life restored its built-in interface.',
+      ).catch(reportRecoveryFailure)
     }, 25000)
     sourceStartupTimer.unref()
   }
-  owner.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
-    if (mainFrame) startSourceWatchdog()
+  owner.webContents.on('did-start-navigation', (_event, url, inPlace, mainFrame) => {
+    if (!mainFrame || inPlace || owner !== window || quitting) return
+    // Native/manual reloads also discard the old UI's request ownership. Foreign
+    // navigations are blocked below and must not cancel useful work.
+    const currentURL = owner.webContents.getURL()
+    if (currentURL && url !== currentURL) return
+    if (currentURL) void cancelRendererWork().catch(reportRecoveryFailure)
+    startSourceWatchdog()
   })
-  owner.webContents.on('render-process-gone', () => {
-    if (owner !== window || recovering || quitting || !sourceCode?.get().enabled) return
-    void sourceCode
-      .disable(
+  owner.webContents.on('did-frame-navigate', (_event, _url, _code, _status, mainFrame) => {
+    if (mainFrame && owner === window && !owner.isDestroyed() && !quitting && !recovering)
+      admission.commitMainDocument()
+  })
+  owner.webContents.on('render-process-gone', (_event, details) => {
+    if (owner !== window || owner.isDestroyed() || recovering || quitting) return
+    recoveryPrompt?.controller.abort()
+    recoveryPrompt = undefined
+    const failure = `The renderer stopped (${details.reason}, exit code ${details.exitCode}).`
+    console.error(`[Life] ${failure}`)
+    if (rendererRecoveryBudget.allowAutomaticRecovery())
+      void restartInterface(
+        owner,
         'The customized interface stopped unexpectedly. Life restored its built-in interface.',
-      )
-      .then(() => {
-        if (owner !== window || owner.isDestroyed()) return
-        createWindow()
-        owner.destroy()
-      })
+      ).catch(reportRecoveryFailure)
+    else
+      promptRecovery('crash', `${failure}\nAutomatic restart was paused after repeated failures.`)
   })
-  window.once('ready-to-show', () => owner.show())
+  owner.on('unresponsive', () => {
+    promptRecovery('unresponsive', 'Wait for the current operation, or restart the interface.')
+  })
+  owner.on('responsive', () => {
+    if (recoveryPrompt?.cause === 'unresponsive') recoveryPrompt.controller.abort()
+  })
+  owner.webContents.on('did-fail-load', (_event, code, description, _url, mainFrame) => {
+    if (mainFrame && code !== -3)
+      promptRecovery('load', `The interface could not load (${description}, error ${code}).`)
+  })
+  window.once('ready-to-show', () => {
+    if (wasMaximized) owner.maximize()
+    if (wasFullscreen) owner.setFullScreen(true)
+    owner.show()
+    if (wasMinimized) owner.minimize()
+  })
   window.on('maximize', () => send('window:state', true))
   window.on('unmaximize', () => send('window:state', false))
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -595,9 +754,15 @@ function createWindow() {
       )
     }
   })
-  if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else void window.loadFile(join(__dirname, '../renderer/index.html'))
+  const loaded = process.env.ELECTRON_RENDERER_URL
+    ? window.loadURL(process.env.ELECTRON_RENDERER_URL)
+    : window.loadFile(join(__dirname, '../renderer/index.html'))
+  void loaded.catch((error) => {
+    if (!owner.isDestroyed())
+      promptRecovery('load', `The interface could not load: ${String(error)}`)
+  })
   window.on('closed', () => {
+    recoveryPrompt?.controller.abort()
     if (window === owner) {
       ssh?.disconnect()
       window = null
@@ -620,7 +785,9 @@ app.on('activate', () => {
 })
 app.on('before-quit', (event) => {
   if (quitting) return
+  if (window) rendererAdmissions.get(window)?.suspend()
   ssh?.disconnect()
+  const rendererRequests = ssh?.cancelRendererRequests()
   customization?.close()
   updates?.dispose()
   clearTimeout(sourceStartupTimer)
@@ -628,6 +795,8 @@ app.on('before-quit', (event) => {
   if (extensions) {
     event.preventDefault()
     quitting = true
-    void Promise.allSettled([extensions.close(), sourceCode?.close()]).finally(() => app.quit())
+    void Promise.allSettled([rendererRequests, extensions.close(), sourceCode?.close()]).finally(
+      () => app.quit(),
+    )
   }
 })

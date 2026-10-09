@@ -1,5 +1,4 @@
-import codexIcon from '../assets/svgl/codex.svg'
-import claudeIcon from '../assets/svgl/claude.svg'
+import { providerArtwork } from '../provider-artwork'
 
 /** Life's branching L represents research paths that share a common starting point. */
 export function LifeMark({ size = 24 }: { size?: number }) {
@@ -40,30 +39,33 @@ export function ProviderIcon({
 }: {
   provider: 'codex' | 'claude'
   size?: number
+  brand?: boolean
 }) {
-  const source = provider === 'claude' ? claudeIcon : codexIcon
+  const artwork = providerArtwork[provider === 'claude' ? 'claude' : 'openai']
 
   return (
-    <span
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
       className="provider-icon"
       data-provider={provider}
+      width={size}
+      height={size}
+      viewBox={artwork.viewBox}
+      preserveAspectRatio="xMidYMid meet"
+      fill="currentColor"
       aria-hidden="true"
+      focusable="false"
       style={{
         display: 'inline-block',
         width: size,
         height: size,
+        minWidth: size,
+        minHeight: size,
         flexShrink: 0,
-        backgroundColor: 'currentColor',
-        maskImage: `url("${source}")`,
-        maskRepeat: 'no-repeat',
-        maskPosition: 'center',
-        maskSize: 'contain',
-        WebkitMaskImage: `url("${source}")`,
-        WebkitMaskRepeat: 'no-repeat',
-        WebkitMaskPosition: 'center',
-        WebkitMaskSize: 'contain',
         verticalAlign: 'middle',
       }}
-    />
+    >
+      <path d={artwork.path} fill="currentColor" fillRule="evenodd" clipRule="evenodd" />
+    </svg>
   )
 }

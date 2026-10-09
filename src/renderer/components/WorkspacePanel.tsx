@@ -26,7 +26,7 @@ import { api, errorText } from '../api'
 import { parseGitStatus, parseUnifiedDiff, type DiffFile } from '../unified-diff'
 import './workspace-panel.css'
 
-type WorkspaceTab = 'diff' | 'files' | 'git'
+export type WorkspaceTab = 'diff' | 'files' | 'git'
 const codeTokens =
   /(\/\/.*|\/\*.*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:const|let|var|function|return|if|else|for|while|class|import|export|from|new|async|await|throw|try|catch|type|interface|extends|implements|public|private|readonly|def|pass|None|True|False|fn|pub|use|struct|impl|match|in|of)\b)|(\b(?:true|false|null|undefined|\d+(?:\.\d+)?)\b)|(\b[A-Z][\w]*\b)/g
 
@@ -74,6 +74,8 @@ export function WorkspacePanel({
   refreshKey,
   onAttach,
   onTerminal,
+  activeTab,
+  onTabChange,
 }: {
   connection: ConnectionState
   onConnect: () => void
@@ -81,8 +83,15 @@ export function WorkspacePanel({
   refreshKey: number
   onAttach: (path: string) => void
   onTerminal: () => void
+  activeTab?: WorkspaceTab
+  onTabChange?: (tab: WorkspaceTab) => void
 }) {
-  const [tab, setTab] = useState<WorkspaceTab>('diff')
+  const [localTab, setLocalTab] = useState<WorkspaceTab>('diff')
+  const tab = activeTab ?? localTab
+  function setTab(next: WorkspaceTab) {
+    setLocalTab(next)
+    onTabChange?.(next)
+  }
   const [files, setFiles] = useState<FileEntry[]>([])
   const [path, setPath] = useState<string>()
   const [file, setFile] = useState<{ path: string; text: string }>()

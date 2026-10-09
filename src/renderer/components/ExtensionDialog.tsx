@@ -70,6 +70,37 @@ function download(bundle: LifePortableExtension) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+type ExtensionBackup = {
+  format: 'life-extension-backup'
+  formatVersion: 1
+  exportedAt: string
+  runtime: {
+    snapshot: LifeExtensionsSnapshot
+    extensions: LifePortableExtension[]
+  }
+  source: {
+    snapshot: LifeSourceSnapshot | undefined
+    extensions: Array<{
+      id: string
+      enabled: boolean
+      incorporated?: boolean
+      error?: string
+      bundle: LifePortableExtension
+    }>
+  }
+}
+
+function downloadBackup(backup: ExtensionBackup) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }),
+  )
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `life-extension-backup-${new Date().toISOString().slice(0, 10)}.json`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export function ExtensionDialog({
   open,
   onOpenChange,
@@ -273,6 +304,31 @@ export function ExtensionDialog({
   }
 
   const sourceExtensions = sourceSnapshot?.extensions || []
+
+  async function exportAllExtensions() {
+    if (!api) throw new Error('Open Life on your computer to export extensions.')
+    const source = await Promise.all(
+      sourceExtensions.map(async (extension) => ({
+        id: extension.id,
+        enabled: extension.enabled,
+        ...(extension.incorporated ? { incorporated: true } : {}),
+        ...(extension.error ? { error: extension.error } : {}),
+        bundle: await sourceBundle(extension.id),
+      })),
+    )
+    const runtime = snapshot.extensions.map(buildRuntimePortableExtension)
+    downloadBackup({
+      format: 'life-extension-backup',
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      runtime: { snapshot, extensions: runtime },
+      source: { snapshot: sourceSnapshot, extensions: source },
+    })
+    setFeedback(
+      `Exported ${runtime.length + source.length} extensions with their manifests, source files, dependencies, timestamps, enabled states, and saved snapshot details.`,
+    )
+  }
+
   const sourcePaused =
     sourceSnapshot !== undefined &&
     !sourceSnapshot.enabled &&
@@ -365,6 +421,16 @@ export function ExtensionDialog({
                 change applies those choices again.
               </div>
             ) : null}
+            <div className="extension-card-actions">
+              <button
+                className="button secondary"
+                disabled={busy || !api}
+                onClick={() => void run(exportAllExtensions)}
+                title="Download every installed runtime and source extension, including full source payloads and saved state"
+              >
+                <Download size={13} /> Export all extensions
+              </button>
+            </div>
             {!count ? (
               <div className="extensions-empty">
                 <Puzzle size={24} />
@@ -394,7 +460,12 @@ export function ExtensionDialog({
                           type="checkbox"
                           aria-label={`Enable ${extension.name}`}
                           checked={extension.enabled}
-                          disabled={busy || !api}
+                          disabled={busy || !api || extension.incorporated}
+                          title={
+                            extension.incorporated
+                              ? 'These changes are built into Life.'
+                              : undefined
+                          }
                           onChange={(event) => {
                             const enabled = event.target.checked
                             void run(() =>
@@ -405,11 +476,23 @@ export function ExtensionDialog({
                           }}
                         />
                         <span>
-                          {extension.enabled ? (sourcePaused ? 'Paused' : 'Enabled') : 'Disabled'}
+                          {extension.incorporated
+                            ? 'Built into Life'
+                            : extension.enabled
+                              ? sourcePaused
+                                ? 'Paused'
+                                : 'Enabled'
+                              : 'Disabled'}
                         </span>
                       </label>
                     </div>
                     {extension.description ? <p>{extension.description}</p> : null}
+                    {extension.incorporated ? (
+                      <p>
+                        These changes are included in Life. This saved extension remains available
+                        to export or share; create a new extension to change the built-in interface.
+                      </p>
+                    ) : null}
                     <details className="extension-change-summary">
                       <summary>Changed files and dependencies</summary>
                       <ul>
@@ -433,7 +516,7 @@ export function ExtensionDialog({
                     <div className="extension-card-actions">
                       <button
                         className="button secondary"
-                        disabled={busy || !api}
+                        disabled={busy || !api || extension.incorporated}
                         onClick={() =>
                           void run(async () => {
                             setSource(serializePortableExtension(await sourceBundle(extension.id)))
@@ -441,6 +524,11 @@ export function ExtensionDialog({
                             setImportPreview(undefined)
                             setTab('source')
                           })
+                        }
+                        title={
+                          extension.incorporated
+                            ? 'Create a new extension to change the built-in interface.'
+                            : undefined
                         }
                       >
                         <Braces size={12} /> Edit code
@@ -482,7 +570,11 @@ export function ExtensionDialog({
                     </div>
                     {deleting === `source:${extension.id}` ? (
                       <div className="extension-delete-confirm">
-                        <span>Remove {extension.name} and compile the remaining extensions?</span>
+                        <span>
+                          {extension.incorporated
+                            ? `Remove the saved ${extension.name} archive? Its built-in features will remain.`
+                            : `Remove ${extension.name} and compile the remaining extensions?`}
+                        </span>
                         <button className="button secondary" onClick={() => setDeleting(undefined)}>
                           Keep
                         </button>

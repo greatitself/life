@@ -6,6 +6,7 @@ import {
   ArrowUp,
   ArrowUpRight,
   BrainCircuit,
+  Cable,
   Check,
   ChevronDown,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   Code2,
   Command,
   Computer,
+  Cloud,
   Ellipsis,
   Folder,
   Gauge,
@@ -48,20 +50,25 @@ import type { LifeSourceContext } from '../shared/source-code'
 import { api, desktop, errorText } from './api'
 import {
   applyEvent,
+  finishThreadTurn,
   bindLegacyThreadWorkspace,
   normalizeModelChoices,
   readThreads,
   type Thread,
 } from './state'
 import { fallbackModelCatalog, withProviderDefault } from './model-catalog'
-import { RelayMark, ProviderIcon } from './components/Icons'
+import { ProviderIcon } from './components/Icons'
+import { ThreadBadge } from './components/ThreadBadge'
 import { Modal } from './components/Modal'
 import { ConnectionDialog } from './components/ConnectionDialog'
 import { ProjectDialog } from './components/ProjectDialog'
-import { MessageView, ApprovalCard } from './components/MessageView'
-import { WorkspacePanel } from './components/WorkspacePanel'
-import { RemoteTerminal } from './components/RemoteTerminal'
-import { TitleBar } from './components/TitleBar'
+import { ApprovalCard } from './components/MessageView'
+import { ThreadTimeline } from './components/ThreadTimeline'
+import { summarizeSourceChanges } from './thread-activity'
+import { WorkspaceSurfaces } from './components/WorkspaceSurfaces'
+import { ResizeHandle, usePanelSizes } from './components/SidebarResize'
+import { ThreadMessageNavigator } from './components/ThreadMessageNavigator'
+import { LifeBrand, TitleBar, TitleBarContent } from './components/TitleBar'
 import { ResearchView } from './components/ResearchView'
 import { CustomizationDialog } from './components/CustomizationDialog'
 import { CustomPanels } from './components/CustomPanels'
@@ -73,7 +80,7 @@ import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
 import { useSourceCode } from './useSourceCode'
 import { SourceCodeDialog } from './components/SourceCodeDialog'
-import { SidebarThread } from './components/SidebarThread'
+import { SidebarProjects } from './components/SidebarProjects'
 import { readProjects } from './research'
 import { LIFE_VERSION } from '../shared/version'
 import { PortForwardDialog } from './components/PortForwardDialog'
@@ -93,6 +100,32 @@ import {
   pendingSourceApplyKey,
 } from './source-session'
 import './enhancements.css'
+import {
+  attachmentMetadata,
+  attachmentPrompt,
+  deleteAttachmentFiles,
+  saveAttachmentFiles,
+  selectDraftAttachments,
+  type DraftAttachment,
+} from './attachments'
+import { AttachmentList, AttachmentPicker } from './components/ThreadAttachments'
+import { QueuedMessages } from './components/QueuedMessages'
+import {
+  pauseQueuedMessages,
+  queueConnectionMatches,
+  threadAttachmentIds,
+  useThreadQueue,
+  type QueuedSubmission,
+} from './thread-queue'
+import './thread-refinements.css'
+import { ReferenceComposerControls, ReferenceComposerDetails } from './components/ReferenceComposer'
+import { useThreadMetadata } from './thread-metadata'
+import { cancelAttachmentUpload, ensureAttachmentUploads, useDraftUploads } from './draft-upload'
+import './components/sidebar-footer-layout.css'
+import './components/life-chrome-polish.css'
+import './components/collapsed-brand-footer.css'
+import './components/header-action-spacing.css'
+import { ThreadContextController } from './thread-context'
 
 interface LifeTurn {
   turn: number
@@ -143,6 +176,10 @@ const starterPrompts = [
 export function App() {
   const preferences = useLifeConfig()
   const { config } = preferences
+  const researchTitle =
+    config.labels.researchTitle === 'Research map' ? 'Map' : config.labels.researchTitle
+  const workspaceTitle =
+    config.labels.workspaceTitle === 'Agent workspace' ? 'Agents' : config.labels.workspaceTitle
   const [view, setView] = useState<'research' | 'workspace' | 'extension'>(config.startView)
   const [customizeOpen, setCustomizeOpen] = useState(false)
   const extensions = useExtensions()
@@ -174,6 +211,10 @@ export function App() {
     return () => styles.forEach((style) => style.remove())
   }, [extensions])
   const [maximized, setMaximized] = useState(false)
+  const [titleBarContent, setTitleBarContent] = useState<HTMLDivElement | null>(null)
+  const [headerLeadingActions, setHeaderLeadingActions] = useState<HTMLDivElement | null>(null)
+  const [sidebarFooter, setSidebarFooter] = useState<HTMLDivElement | null>(null)
+  const [surfaceHeader, setSurfaceHeader] = useState<HTMLDivElement | null>(null)
   const [updatesOpen, setUpdatesOpen] = useState(false)
   const [portsOpen, setPortsOpen] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({
@@ -189,11 +230,30 @@ export function App() {
         ? 'win32'
         : 'linux')
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([])
+  const profilesCurrent = useRef(profiles)
+  profilesCurrent.current = profiles
+  const [profilesLoaded, setProfilesLoaded] = useState(false)
   const [connection, setConnection] = useState<ConnectionState>({ status: 'disconnected' })
   const [threads, setThreads] = useState<Thread[]>(readThreads)
   const threadsCurrent = useRef(threads)
   threadsCurrent.current = threads
-  const [activeId, setActiveId] = useState<string>()
+  const [activeId, setActiveId] = useState<string | undefined>(() => {
+    try {
+      return localStorage.getItem('life.active-thread.v1') || undefined
+    } catch {
+      return undefined
+    }
+  })
+  const activeIdCurrent = useRef(activeId)
+  activeIdCurrent.current = activeId
+  const threadContext = useRef(new ThreadContextController())
+  const threadContextOperation = useRef(0)
+  const restoringThreadId = useRef<string | undefined>(undefined)
+  const [openingThread, setOpeningThread] = useState<string>()
+  const initialRecoveryRequest = useRef<Promise<boolean> | undefined>(undefined)
+  const emergencyReview = useRef(false)
+  const recoveryReviewed = useRef(false)
+  const [startupReady, setStartupReady] = useState(!api?.window.initialRecovery)
   const [provider, setProvider] = useState<Provider>(config.defaultProvider)
   const [model, setModel] = useState(config.defaultModel)
   const [reasoningEffort, setReasoningEffort] = useState('')
@@ -202,6 +262,11 @@ export function App() {
   const [models, setModels] = useState<ModelOption[]>([{ id: '', name: 'Agent default' }])
   const modelCatalogs = useRef(new Map<string, ModelOption[]>())
   const [draft, setDraft] = useState('')
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([])
+  const [attachmentProgress, setAttachmentProgress] = useState<{ id: string; percent: number }>()
+  const attachmentTransfer = useRef<{ id: string; controller: AbortController } | undefined>(
+    undefined,
+  )
   const [connectOpen, setConnectOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
   const [suggestedProject, setSuggestedProject] = useState<string>()
@@ -209,20 +274,52 @@ export function App() {
   const [helpOpen, setHelpOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [sidebarFiltersOpen, setSidebarFiltersOpen] = useState(false)
   const [hostKey, setHostKey] = useState<HostKeyRequest>()
   const [workspaceOpen, setWorkspaceOpen] = useState(
     () => config.workspacePanel && window.innerWidth > 1080,
   )
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 600)
   const [terminalOpen, setTerminalOpen] = useState(false)
+  const panels = usePanelSizes(config.sidebarWidth, config.workspacePanelWidth, sidebarOpen, 0)
+  useEffect(() => {
+    if (terminalOpen) {
+      setWorkspaceOpen(true)
+      setView('workspace')
+    }
+  }, [terminalOpen])
   const [refreshKey, setRefreshKey] = useState(0)
   const [toast, setToast] = useState('')
+  useThreadMetadata(connection, refreshKey, threads.length, setThreads)
+  useEffect(() => {
+    const sleeping = threads.filter((thread) => typeof thread.snoozedUntil === 'number')
+    if (!sleeping.length) return
+    const wakeAt = Math.min(...sleeping.map((thread) => thread.snoozedUntil!))
+    const timer = window.setTimeout(
+      () => {
+        const now = Date.now()
+        setThreads((previous) =>
+          previous.map((thread) =>
+            thread.snoozedUntil && thread.snoozedUntil <= now
+              ? { ...thread, snoozedUntil: undefined }
+              : thread,
+          ),
+        )
+      },
+      Math.min(2147483647, Math.max(0, wakeAt - Date.now())),
+    )
+    return () => window.clearTimeout(timer)
+  }, [threads])
   const [threadMenu, setThreadMenu] = useState(false)
   const [stickToBottom, setStickToBottom] = useState(true)
   const conversation = useRef<HTMLDivElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<{ id?: string } | undefined>(undefined)
   const lifeTurns = useRef(new Map<string, LifeTurn>())
+  const sourceReloading = useRef(false)
+  const runningChoices = useRef(
+    new Map<string, Pick<StartInput, 'model' | 'reasoningEffort' | 'serviceTier'>>(),
+  )
   const lifeContext = useRef({ preferences, config, extensions, connection })
   lifeContext.current = { preferences, config, extensions, connection }
   const restoredSourceApply = useRef(false)
@@ -237,24 +334,200 @@ export function App() {
   const currentMode = active?.mode || mode
   const connected = connection.status === 'connected'
   const projectReady = connected && Boolean(connection.workspace)
+  const draftUploads = useDraftUploads(
+    attachments,
+    connection,
+    projectReady &&
+      (!active || active.profileId === 'life-local' || queueConnectionMatches(active, connection)),
+  )
   const busy = active?.busy || false
   const applyingLife = active ? lifeTurns.current.get(active.id)?.finishing === true : false
   const projectIntent = /^\s*(?:\/project|@project)(?:\s|$)/i.test(draft)
   const lifeIntent = !projectIntent && (detectLifeIntent(draft) || active?.lifeScope === true)
+  const queue = useThreadQueue({
+    threads,
+    connection,
+    onThreads: setThreads,
+    onError: setToast,
+    send,
+    isBlocked: (threadId) =>
+      Boolean(
+        !startupReady ||
+        emergencyReview.current ||
+        submitting.current ||
+        attachmentTransfer.current ||
+        sourceReloading.current ||
+        threadContext.current.busy ||
+        lifeTurns.current.get(threadId)?.finishing,
+      ),
+    stop: async (thread) => {
+      if (!api) throw new Error('Sending requires the desktop application.')
+      const state = await api.connection.state()
+      if (!queueConnectionMatches(thread, state))
+        throw new Error('Select this thread’s machine and project to send its queued message.')
+      if (lifeTurns.current.get(thread.id)?.finishing)
+        throw new Error('Life is saving this change. The follow-up will remain queued.')
+      lifeTurns.current.delete(thread.id)
+      await api.agent.stop(thread.id)
+      setThreads((previous) =>
+        previous.map((item) =>
+          item.id === thread.id && item.turn === thread.turn
+            ? { ...item, busy: false, pending: [] }
+            : item,
+        ),
+      )
+    },
+  })
+  const runChoices = active ? runningChoices.current.get(active.id) : undefined
+  const choicesChanged =
+    busy &&
+    Boolean(runChoices) &&
+    (currentModel !== (runChoices?.model || '') ||
+      currentReasoningEffort !== (runChoices?.reasoningEffort || '') ||
+      currentServiceTier !== (runChoices?.serviceTier || ''))
+  const waitingMessage = active?.queue?.[0]
+  const queueing =
+    busy ||
+    Boolean(
+      active &&
+      (queue.sendingThreadId ||
+        (waitingMessage && !waitingMessage.paused && !waitingMessage.error)),
+    )
+  const queueControlsReady =
+    Boolean(active && queueConnectionMatches(active, connection)) &&
+    !applyingLife &&
+    !restoringThreadId.current &&
+    !threadContext.current.busy &&
+    !submitting.current &&
+    !attachmentTransfer.current &&
+    !sourceReloading.current &&
+    !queue.preparing &&
+    !queue.actionId
   const refreshProfiles = useCallback(() => {
     void api?.profiles
       .list()
-      .then(setProfiles)
+      .then((saved) => {
+        profilesCurrent.current = saved
+        setProfiles(saved)
+        setProfilesLoaded(true)
+      })
       .catch((e) => setToast(errorText(e)))
   }, [])
 
+  async function restoreThreadContext(thread: Thread): Promise<boolean> {
+    if (!startupReady || emergencyReview.current) return false
+    if (!api || thread.profileId === 'life-local') return Boolean(api)
+    if (activeIdCurrent.current !== thread.id) return false
+    const operation = ++threadContextOperation.current
+    restoringThreadId.current = thread.id
+    setOpeningThread(thread.id)
+    try {
+      const result = await threadContext.current.restore(
+        thread,
+        profilesCurrent.current,
+        api.connection,
+      )
+      if (activeIdCurrent.current !== thread.id || operation !== threadContextOperation.current)
+        return false
+      if (result.kind === 'ready') {
+        lifeContext.current.connection = result.connection
+        setConnection(result.connection)
+        setProjectOpen(false)
+        return true
+      }
+      if (result.kind === 'credentials') {
+        setRequestedProfileId(result.profileId)
+        setConnectOpen(true)
+      } else if (result.kind === 'project') {
+        setSuggestedProject(result.path)
+        setProjectOpen(true)
+        if (result.error) setToast(errorText(result.error))
+      } else if (result.kind === 'unavailable') setToast(errorText(result.error))
+      return false
+    } catch (error) {
+      if (activeIdCurrent.current === thread.id) setToast(errorText(error))
+      return false
+    } finally {
+      if (operation === threadContextOperation.current) {
+        restoringThreadId.current = undefined
+        setOpeningThread(undefined)
+      }
+      queue.wake()
+    }
+  }
+
+  function cancelThreadContext() {
+    threadContext.current.cancel()
+    threadContextOperation.current++
+    restoringThreadId.current = undefined
+    setOpeningThread(undefined)
+  }
+
+  function reviewRecoveredExtensions() {
+    if (recoveryReviewed.current) return
+    recoveryReviewed.current = true
+    // Emergency recovery intentionally disconnects SSH. Late startup/context
+    // results must not reconnect it or obscure the single recovery review.
+    emergencyReview.current = true
+    cancelThreadContext()
+    activeIdCurrent.current = undefined
+    setActiveId(undefined)
+    setRequestedProfileId(undefined)
+    setSuggestedProject(undefined)
+    setConnectOpen(false)
+    setProjectOpen(false)
+    setHostKey(undefined)
+    setCustomizeOpen(false)
+    setSourceCodeOpen(false)
+    setUpdatesOpen(false)
+    setPortsOpen(false)
+    setHelpOpen(false)
+    setSearchOpen(false)
+    setSidebarFiltersOpen(false)
+    setThreadMenu(false)
+    setExtensionRecovery(true)
+    setView('research')
+    setExtensionsOpen(true)
+  }
+
+  useEffect(() => {
+    if (!api?.window.initialRecovery) return
+    let disposed = false
+    // StrictMode mounts effects twice; consume the native intent only once.
+    initialRecoveryRequest.current ||= api.window.initialRecovery()
+    void initialRecoveryRequest.current
+      .then((recovery) => {
+        if (disposed) return
+        if (recovery) reviewRecoveredExtensions()
+        setStartupReady(true)
+        queue.wake()
+      })
+      .catch((error) => {
+        if (!disposed) setToast(errorText(error))
+      })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      if (activeId) localStorage.setItem('life.active-thread.v1', activeId)
+      else localStorage.removeItem('life.active-thread.v1')
+    } catch {
+      /* The conversation remains usable when browser storage is full. */
+    }
+  }, [activeId])
+
+  useEffect(() => {
+    if (!startupReady || !profilesLoaded || !activeId || !api || emergencyReview.current) return
+    const thread = threadsCurrent.current.find((item) => item.id === activeId)
+    if (thread && thread.profileId !== 'life-local') void restoreThreadContext(thread)
+  }, [activeId, profilesLoaded, startupReady])
+
   useEffect(() => {
     if (!api) return
-    return api.extensions.onRecovery(() => {
-      setExtensionRecovery(true)
-      setView('research')
-      setExtensionsOpen(true)
-    })
+    return api.extensions.onRecovery(reviewRecoveredExtensions)
   }, [])
   useEffect(() => {
     if (view === 'extension' && !selectedView) setView('research')
@@ -303,9 +576,11 @@ export function App() {
           }
         }
         setThreads((previous) =>
-          previous.map((thread) =>
-            interrupted.has(thread.id) ? { ...thread, busy: false, pending: [] } : thread,
-          ),
+          previous.map((thread) => ({
+            ...thread,
+            ...(interrupted.has(thread.id) ? { busy: false, pending: [] } : {}),
+            queue: pauseQueuedMessages(thread.queue),
+          })),
         )
       }
     }
@@ -313,6 +588,8 @@ export function App() {
     const offConnection = api.onConnection(updateConnection)
     const offHost = api.onHostKey(setHostKey)
     const offAgent = api.onAgent((event) => {
+      if (event.type === 'complete' || event.type === 'error')
+        runningChoices.current.delete(event.sessionId)
       const lifeTurn = lifeTurns.current.get(event.sessionId)
       // The completed provider turn has handed over to a local atomic write.
       // Late provider events cannot cancel or replace that result.
@@ -340,7 +617,17 @@ export function App() {
         previous.map((t) => {
           if (t.id !== event.sessionId) return t
           const next = applyEvent(t, event)
-          return applyLife ? { ...next, busy: true } : next
+          return applyLife
+            ? {
+                ...next,
+                busy: true,
+                messages: next.messages.map((message) =>
+                  message.role === 'user' && message.turn === t.turn
+                    ? { ...message, finishedAt: undefined, finishStatus: undefined }
+                    : message,
+                ),
+              }
+            : next
         }),
       )
       if (applyLife) void finishLifeTurn(event.sessionId, lifeTurn)
@@ -365,7 +652,8 @@ export function App() {
       setThreads((previous) =>
         previous.map((thread) => {
           if (thread.id !== id || thread.turn !== lifeTurn.turn) return thread
-          const messages = thread.messages
+          const finished = finishThreadTurn(thread, failure ? 'failed' : 'completed')
+          const messages = finished.messages
             .filter((item) => item.turn !== lifeTurn.turn || item.role !== 'assistant')
             .map((item) =>
               item.role === 'tool' && item.status === 'running'
@@ -386,7 +674,13 @@ export function App() {
               text: failure,
               turn: lifeTurn.turn,
             })
-          return { ...thread, messages, busy: false, pending: [] }
+          return {
+            ...thread,
+            messages,
+            busy: false,
+            pending: [],
+            queue: failure ? pauseQueuedMessages(thread.queue) : thread.queue,
+          }
         }),
       )
     if (synchronous) flushSync(update)
@@ -449,6 +743,11 @@ export function App() {
       ),
     )
     try {
+      runningChoices.current.set(id, {
+        model: lifeTurn.start.model || '',
+        reasoningEffort: lifeTurn.start.reasoningEffort || '',
+        serviceTier: lifeTurn.start.serviceTier || '',
+      })
       await api.agent.start({ ...lifeTurn.start, prompt, mode: 'plan' })
     } catch (error) {
       if (lifeTurns.current.get(id) === lifeTurn)
@@ -564,6 +863,21 @@ export function App() {
         if (state.error || !state.enabled || !state.active)
           throw new Error(state.error || 'Life could not activate the compiled source.')
         changedPaths = response.patch.files.map((file) => file.path)
+        const fileChanges = summarizeSourceChanges(response.patch, lifeTurn.source)
+        setThreads((previous) =>
+          previous.map((thread) =>
+            thread.id === id && thread.turn === lifeTurn.turn
+              ? {
+                  ...thread,
+                  messages: thread.messages.map((item) =>
+                    item.role === 'user' && item.turn === lifeTurn.turn
+                      ? { ...item, fileChanges }
+                      : item,
+                  ),
+                }
+              : thread,
+          ),
+        )
         message = [
           message,
           `Applied source extension: ${response.patch.summary}. Disable, export, or share it in Manage extensions. The compiled interface will reload; your conversation is preserved.`,
@@ -585,6 +899,7 @@ export function App() {
     }
     if (!current()) return
     if (reload && lifeTurn.start) {
+      sourceReloading.current = true
       completeLifeTurn(id, lifeTurn, message, undefined, true)
       try {
         persistThreadHistory()
@@ -608,6 +923,8 @@ export function App() {
         )
         await api!.sourceCode.reload()
       } catch (error) {
+        sourceReloading.current = false
+        queue.wake()
         setToast(`Life saved the compiled source but could not reload: ${errorText(error)}`)
       }
       return
@@ -616,6 +933,7 @@ export function App() {
   }
   useEffect(() => {
     const unload = () => {
+      sourceReloading.current = true
       try {
         persistThreadHistory()
       } catch {
@@ -760,17 +1078,23 @@ export function App() {
   ])
   useEffect(() => {
     if (connected && !connection.workspace) {
-      setSuggestedProject(undefined)
-      setProjectOpen(true)
+      const thread = threadsCurrent.current.find((item) => item.id === activeIdCurrent.current)
+      if (thread?.workspace && thread.profileId === connection.profile?.id) {
+        if (startupReady && !emergencyReview.current && !restoringThreadId.current)
+          void restoreThreadContext(thread)
+      } else if (startupReady && !emergencyReview.current && !restoringThreadId.current) {
+        setSuggestedProject(undefined)
+        setProjectOpen(true)
+      }
     } else if (!connected) {
       setProjectOpen(false)
     }
     setTerminalOpen(false)
-  }, [connected, connection.workspace])
+  }, [connected, connection.profile?.id, connection.workspace, startupReady])
   useEffect(() => {
     if (stickToBottom && conversation.current)
       conversation.current.scrollTop = conversation.current.scrollHeight
-  }, [active?.messages, active?.pending, stickToBottom])
+  }, [active?.messages, active?.pending, active?.queue, stickToBottom])
   useEffect(() => {
     if (!toast) return
     const timer = setTimeout(() => setToast(''), 6500)
@@ -784,10 +1108,14 @@ export function App() {
   }, [draft])
 
   const newThread = useCallback(() => {
-    submitting.current = undefined
+    emergencyReview.current = false
+    cancelThreadContext()
+    if (!attachmentTransfer.current) submitting.current = undefined
     setView('workspace')
+    activeIdCurrent.current = undefined
     setActiveId(undefined)
     setDraft('')
+    setAttachments([])
     setThreadMenu(false)
     setStickToBottom(true)
     textarea.current?.focus()
@@ -802,6 +1130,7 @@ export function App() {
         projectOpen ||
         helpOpen ||
         searchOpen ||
+        sidebarFiltersOpen ||
         customizeOpen ||
         portsOpen ||
         updatesOpen ||
@@ -847,15 +1176,43 @@ export function App() {
     connected,
     helpOpen,
     searchOpen,
+    sidebarFiltersOpen,
     customizeOpen,
     portsOpen,
     updatesOpen,
     extensionsOpen,
     sourceCodeOpen,
   ])
-  async function send() {
-    if (!draft.trim() || busy || submitting.current) return
-    const prompt = draft.trim()
+  function attachFiles(files: File[]) {
+    if (!files.length) return
+    if (attachmentTransfer.current || queue.preparing) {
+      setToast(
+        'Wait for the current upload or attachment preparation to finish before attaching more files.',
+      )
+      return
+    }
+    const selected = selectDraftAttachments(attachments, files)
+    setAttachments(selected.attachments)
+    if (selected.errors.length) setToast(selected.errors.join(' '))
+  }
+
+  async function send(queued?: QueuedSubmission): Promise<boolean | undefined> {
+    if (!startupReady) return
+    const active = threadsCurrent.current.find(
+      (thread) => thread.id === (queued?.threadId || activeIdCurrent.current),
+    )
+    const queuedMessage = queued
+      ? active?.queue?.find((item) => item.id === queued.messageId)
+      : undefined
+    if (queued && (!active || !queuedMessage || active.busy)) return
+    if (!queued && !draft.trim() && !attachments.length) return
+    const selectedAttachments = queued ? queued.files : [...attachments]
+    const prompt = queued
+      ? queuedMessage!.text
+      : draft.trim() || 'Please review the attached files.'
+    let connection = lifeContext.current.connection
+    let connected = connection.status === 'connected'
+    let projectReady = connected && Boolean(connection.workspace)
     const projectRequest = /^\s*(?:\/project|@project)(?:\s|$)/i.test(prompt)
     const isLife = !projectRequest && (detectLifeIntent(prompt) || active?.lifeScope === true)
     const userRequest = isLife
@@ -869,8 +1226,52 @@ export function App() {
       )
       return
     }
-    const localPatch = isLife ? planLocalCustomization(userRequest, config) : null
+    if (
+      !queued &&
+      active &&
+      (active.busy ||
+        queue.sendingThreadId ||
+        (active.queue?.[0] && !active.queue[0].paused && !active.queue[0].error))
+    ) {
+      const queuedId = await queue.enqueue(active, prompt, selectedAttachments)
+      if (queuedId) {
+        if (activeIdCurrent.current === active.id)
+          setDraft((current) => (current === draft ? '' : current))
+        const savedIds = new Set(selectedAttachments.map((item) => item.id))
+        setAttachments((current) => current.filter((item) => !savedIds.has(item.id)))
+        setStickToBottom(true)
+      }
+      return
+    }
+    if (submitting.current || sourceReloading.current || (!queued && queue.sendingThreadId)) {
+      if (!queued) setToast('A message is being prepared. Try again shortly.')
+      return
+    }
+    const localPatch =
+      isLife && !selectedAttachments.length ? planLocalCustomization(userRequest, config) : null
     const offlineLocal = Boolean(localPatch) && (!projectReady || !api)
+    if (
+      !offlineLocal &&
+      active &&
+      active.profileId !== 'life-local' &&
+      !queueConnectionMatches(active, connection)
+    ) {
+      // Queue pumping never changes a workspace behind another thread. Direct
+      // sends restore their already saved context before consuming the draft.
+      if (queued) return
+      const preparation = { id: active.id }
+      submitting.current = preparation
+      let ready = false
+      try {
+        ready = await restoreThreadContext(active)
+      } finally {
+        if (submitting.current === preparation) submitting.current = undefined
+      }
+      if (!ready || activeIdCurrent.current !== active.id) return
+      connection = lifeContext.current.connection
+      connected = connection.status === 'connected'
+      projectReady = connected && Boolean(connection.workspace)
+    }
     if ((!connected || !api) && !offlineLocal) {
       setConnectOpen(true)
       return
@@ -884,35 +1285,19 @@ export function App() {
       !offlineLocal &&
       active &&
       active.profileId !== 'life-local' &&
-      active.profileId !== connection.profile?.id
-    ) {
-      setToast(
-        'Connect to this thread’s machine to continue, or start a new thread on the current machine.',
-      )
+      !queueConnectionMatches(active, connection)
+    )
       return
-    }
-    if (
-      !offlineLocal &&
-      active &&
-      active.profileId !== 'life-local' &&
-      ((active.workspace && active.workspace !== connection.workspace) ||
-        (active.remoteId && !active.workspace))
-    ) {
-      setToast(
-        active.workspace
-          ? 'Select this thread’s project to continue, or start a new thread in the current project.'
-          : 'This older thread’s project could not be resolved. Start a new thread in the selected project.',
-      )
-      if (active.workspace) {
-        setSuggestedProject(active.workspace)
-        setProjectOpen(true)
-      }
-      return
-    }
+    const userMessageId = crypto.randomUUID()
+    const transfer = selectedAttachments.length
+      ? { id: '', controller: new AbortController() }
+      : undefined
     const submission = { id: active?.id }
     submitting.current = submission
-    setDraft('')
-    setStickToBottom(true)
+    if (!queued) {
+      setDraft('')
+      setStickToBottom(true)
+    }
     let thread = active
     if (!thread) {
       thread = {
@@ -931,10 +1316,16 @@ export function App() {
         turn: 0,
         pending: [],
       }
+      activeIdCurrent.current = thread.id
       setActiveId(thread.id)
     }
     const id = thread.id
     submission.id = id
+    if (transfer) {
+      transfer.id = id
+      attachmentTransfer.current = transfer
+      setAttachmentProgress({ id, percent: 0 })
+    }
     const turn = thread.turn + 1
     const next: Thread = {
       ...thread,
@@ -943,12 +1334,50 @@ export function App() {
       turn,
       busy: true,
       lifeScope: isLife,
+      settled: false,
+      snoozedUntil: undefined,
       updatedAt: Date.now(),
-      messages: [...thread.messages, { id: crypto.randomUUID(), role: 'user', text: prompt, turn }],
+      messages: [
+        ...thread.messages,
+        { id: userMessageId, role: 'user', text: prompt, turn, createdAt: Date.now() },
+      ],
     }
-    setThreads((previous) => [next, ...previous.filter((t) => t.id !== id)])
+    setThreads((previous) => {
+      const current = previous.find((item) => item.id === id)
+      return [
+        {
+          ...next,
+          model: current?.model ?? next.model,
+          reasoningEffort: current?.reasoningEffort ?? next.reasoningEffort,
+          serviceTier: current?.serviceTier ?? next.serviceTier,
+          queue: queued
+            ? (current?.queue || []).filter((item) => item.id !== queued.messageId)
+            : current?.queue,
+        },
+        ...previous.filter((item) => item.id !== id),
+      ]
+    })
     let lifeSubmission: LifeTurn | undefined
     try {
+      if (transfer) {
+        if (transfer.controller.signal.aborted)
+          throw new DOMException('Attachment upload cancelled.', 'AbortError')
+        await saveAttachmentFiles(selectedAttachments)
+        setThreads((previous) =>
+          previous.map((item) =>
+            item.id === id && item.turn === turn
+              ? {
+                  ...item,
+                  messages: item.messages.map((message) =>
+                    message.id === userMessageId
+                      ? { ...message, attachments: selectedAttachments.map(attachmentMetadata) }
+                      : message,
+                  ),
+                }
+              : item,
+          ),
+        )
+      }
       // A connected thread sends even simple Life changes to its existing harness so
       // follow-up questions share the actual provider conversation and remote identity.
       if (offlineLocal && localPatch) {
@@ -970,7 +1399,7 @@ export function App() {
                   ...item,
                   busy: false,
                   messages: [
-                    ...item.messages,
+                    ...finishThreadTurn(item, 'completed').messages,
                     {
                       id: `${turn}:life-local`,
                       role: 'assistant',
@@ -982,7 +1411,7 @@ export function App() {
               : item,
           ),
         )
-        return
+        return true
       }
       const input: StartInput = {
         sessionId: id,
@@ -995,12 +1424,34 @@ export function App() {
         serviceTier: thread.serviceTier ?? '',
         mode: isLife ? 'plan' : thread.mode,
       }
+      if (transfer) {
+        const uploaded = await ensureAttachmentUploads(
+          selectedAttachments,
+          connection,
+          transfer.controller.signal,
+          (percent) =>
+            setAttachmentProgress((current) => (current?.id === id ? { id, percent } : current)),
+        )
+        input.prompt = attachmentPrompt(input.prompt, uploaded)
+        setThreads((previous) =>
+          previous.map((item) =>
+            item.id === id && item.turn === turn
+              ? {
+                  ...item,
+                  messages: item.messages.map((message) =>
+                    message.id === userMessageId ? { ...message, attachments: uploaded } : message,
+                  ),
+                }
+              : item,
+          ),
+        )
+      }
       if (isLife) {
         const lifeTurn: LifeTurn = {
           turn,
           parts: new Map(),
           finishing: false,
-          request: userRequest,
+          request: input.prompt,
           profileId: connection.profile!.id,
           start: input,
           reads: 0,
@@ -1012,15 +1463,54 @@ export function App() {
         if (lifeTurns.current.get(id) !== lifeTurn) return
         lifeTurn.source = source
         input.prompt = buildLifeThreadPrompt(
-          userRequest,
+          input.prompt,
           config,
           extensions.extensions,
           api!.extensions.capabilities,
           { source },
         )
       }
+      if (transfer?.controller.signal.aborted)
+        throw new DOMException('Attachment upload cancelled.', 'AbortError')
+      if (attachmentTransfer.current === transfer) attachmentTransfer.current = undefined
+      if (sourceReloading.current)
+        throw new Error('Life is reloading. The queued message will be paused.')
+      const actualConnection = await api!.connection.state()
+      if (
+        actualConnection.status !== 'connected' ||
+        actualConnection.profile?.id !== connection.profile?.id ||
+        actualConnection.workspace !== input.workspace
+      )
+        throw new Error('The connection or project changed before the message could be sent.')
+      const latestChoices = threadsCurrent.current.find((item) => item.id === id)
+      input.model = latestChoices?.model ?? input.model
+      input.reasoningEffort = latestChoices?.reasoningEffort ?? input.reasoningEffort
+      input.serviceTier = latestChoices?.serviceTier ?? input.serviceTier
+      runningChoices.current.set(id, {
+        model: input.model || '',
+        reasoningEffort: input.reasoningEffort || '',
+        serviceTier: input.serviceTier || '',
+      })
       await api!.agent.start(input)
+      if (selectedAttachments.length) {
+        const sentIds = new Set(selectedAttachments.map((item) => item.id))
+        setAttachments((current) => current.filter((item) => !sentIds.has(item.id)))
+      }
+      return true
     } catch (e) {
+      if (!queued && selectedAttachments.length && activeIdCurrent.current === id)
+        setDraft((current) => current || prompt)
+      if (transfer?.controller.signal.aborted) {
+        setThreads((previous) =>
+          previous.map((item) =>
+            item.id === id && item.turn === turn
+              ? applyEvent(item, { sessionId: id, type: 'complete', status: 'interrupted' })
+              : item,
+          ),
+        )
+        lifeTurns.current.delete(id)
+        return
+      }
       if (lifeSubmission && lifeTurns.current.get(id) !== lifeSubmission) return
       const lifeTurn = lifeTurns.current.get(id)
       if (lifeTurn?.turn === turn) lifeTurns.current.delete(id)
@@ -1032,11 +1522,30 @@ export function App() {
         ),
       )
     } finally {
+      if (attachmentTransfer.current === transfer) attachmentTransfer.current = undefined
+      if (transfer) setAttachmentProgress((current) => (current?.id === id ? undefined : current))
       if (submitting.current === submission) submitting.current = undefined
+      queue.wake()
     }
+  }
+  async function applyRunSettings() {
+    const thread = threadsCurrent.current.find((item) => item.id === activeIdCurrent.current)
+    if (!thread?.busy || !queueControlsReady) return
+    const messageId = await queue.enqueue(
+      thread,
+      'Continue my most recent request using the selected model, reasoning effort, and speed settings. Continue from the work already completed.',
+      [],
+    )
+    if (messageId) await queue.sendNow(thread.id, messageId)
   }
   async function stop() {
     if (!active || !api) return
+    if (lifeTurns.current.get(active.id)?.finishing) return
+    queue.pause(active.id)
+    if (attachmentTransfer.current?.id === active.id) {
+      attachmentTransfer.current.controller.abort()
+      return
+    }
     if (lifeTurns.current.get(active.id)?.finishing) return
     lifeTurns.current.delete(active.id)
     try {
@@ -1051,6 +1560,8 @@ export function App() {
       if (submitting.current?.id === active.id) submitting.current = undefined
     } catch (e) {
       setToast(errorText(e))
+    } finally {
+      queue.wake()
     }
   }
   const updateSettings = (value: {
@@ -1098,13 +1609,19 @@ export function App() {
     }
   }
   function selectThread(thread: Thread) {
+    emergencyReview.current = false
     setView('workspace')
+    activeIdCurrent.current = thread.id
     setActiveId(thread.id)
     setDraft('')
+    setAttachments([])
     setSearchOpen(false)
     setQuery('')
     setStickToBottom(true)
     setThreadMenu(false)
+    setProjectOpen(false)
+    if (thread.profileId === 'life-local') cancelThreadContext()
+    else if (profilesLoaded) void restoreThreadContext(thread)
   }
   async function invokeExtensionUI(method: string, args: unknown): Promise<unknown> {
     const payload = Array.isArray(args) ? args[0] : args
@@ -1133,23 +1650,43 @@ export function App() {
     />
   )
   const titleProfile = active ? profiles.find((p) => p.id === active.profileId) : connection.profile
+  const composerMetadata =
+    active?.profileId === connection.profile?.id && active?.workspace === connection.workspace
+      ? active
+      : threads.find(
+          (thread) =>
+            projectReady &&
+            thread.profileId === connection.profile?.id &&
+            thread.workspace === connection.workspace &&
+            thread.gitBranch,
+        )
 
   return (
     <div
-      className={`app-shell life-desktop-layout ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+      className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout life-bottom-brand-layout life-header-actions-layout ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+      data-platform={platform}
       data-panel-size={config.workspacePanelWidth === 320 ? 'adaptive' : 'custom'}
       data-sidebar-size={config.sidebarWidth === 260 ? 'adaptive' : 'custom'}
+      style={panels.style}
     >
       <TitleBar
         theme={config.theme}
+        researchTitle={researchTitle}
+        workspaceTitle={workspaceTitle}
         platform={platform}
         maximized={maximized}
+        sidebarOpen={sidebarOpen}
+        onSidebarToggle={replacement ? undefined : () => setSidebarOpen((open) => !open)}
+        view={view}
+        onViewChange={replacement ? undefined : setView}
+        contentRef={setTitleBarContent}
+        surfaceContentRef={setSurfaceHeader}
+        leadingActionsRef={setHeaderLeadingActions}
         onThemeToggle={() => {
           void preferences
             .apply({ theme: config.theme === 'dark' ? 'light' : 'dark' })
             .catch((error) => setToast(errorText(error)))
         }}
-        version={LIFE_VERSION}
       />
       {!sourceUI.enabled && sourceUI.error ? (
         <div className="extension-recovery-bar" role="status">
@@ -1176,278 +1713,178 @@ export function App() {
         </div>
       ) : (
         <div className="app-body">
-          <aside className="sidebar" aria-label="Projects and threads">
-            <div className="brand">
-              <button
-                className="icon-button"
-                title="Toggle sidebar (Ctrl+B)"
-                aria-label="Hide sidebar"
-                onClick={() => setSidebarOpen(false)}
-              >
-                <PanelLeft size={17} />
-              </button>
-              <span className="brand-mark">
-                <RelayMark size={22} />
-              </span>
-              <strong>Life</strong>
-              <nav className="view-switch" aria-label="Workspace views">
-                <button
-                  aria-label="Map"
-                  title="Research map"
-                  aria-pressed={view === 'research'}
-                  onClick={() => setView('research')}
-                >
-                  <Network size={15} />
-                </button>
-                <button
-                  aria-label="Workspace"
-                  title="Agent workspace"
-                  aria-pressed={view === 'workspace'}
-                  onClick={() => setView('workspace')}
-                >
-                  <MessageSquare size={15} />
-                </button>
-              </nav>
-            </div>
-            {enabledExtensions
-              .filter((extension) => extension.renderer.placement === 'view')
-              .map((extension) => (
-                <button
-                  className={`extension-sidebar-view ${view === 'extension' && selectedExtension === extension.id ? 'selected' : ''}`}
-                  key={extension.id}
-                  onClick={() => {
-                    setSelectedExtension(extension.id)
-                    setView('extension')
-                  }}
-                >
-                  <Code2 size={14} />
-                  <span>{extension.name}</span>
-                </button>
-              ))}
-            <div className="sidebar-search-row">
-              <button className="sidebar-search" onClick={() => setSearchOpen(true)}>
-                <Search size={16} />
-                <span>Search threads</span>
-                <kbd>{shortcutModifier} K</kbd>
-              </button>
-              <button
-                className="new-thread-button"
-                aria-label="New thread"
-                title={`New thread (${shortcutModifier}+N)`}
-                onClick={newThread}
-              >
-                <Plus size={17} /> <span>New thread</span> <kbd>{shortcutModifier} N</kbd>
-              </button>
-            </div>
-            <div className="sidebar-section-title">
-              <span>
-                <Folder size={16} /> All projects
-              </span>
-              <button
-                className="icon-button"
-                aria-label="Add workspace"
-                onClick={() => setConnectOpen(true)}
-              >
-                <Plus size={15} />
-              </button>
-            </div>
-            <div className="project-list">
-              {!profiles.length ? (
-                <button className="empty-project" onClick={() => setConnectOpen(true)}>
-                  <span className="empty-project-icon">
-                    <Folder size={17} />
-                    <Plus size={9} />
-                  </span>
-                  <span>
-                    Add your first workspace<small>Connect a remote project</small>
-                  </span>
-                  <ChevronRight size={14} />
-                </button>
-              ) : null}
-              {[...threads]
-                .sort((a, b) => b.updatedAt - a.updatedAt)
-                .map((thread) => (
-                  <SidebarThread
-                    key={thread.id}
-                    thread={thread}
-                    projectName={
-                      thread.workspace?.split('/').filter(Boolean).pop() ||
-                      profiles.find((profile) => profile.id === thread.profileId)?.name ||
-                      'Previous project'
-                    }
-                    active={activeId === thread.id}
-                    onSelect={() => selectThread(thread)}
-                  />
-                ))}
-              {profiles
-                .filter((profile) => !threads.some((thread) => thread.profileId === profile.id))
-                .map((profile) => (
+          <aside className="sidebar" id="life-sidebar" aria-label="Projects and threads">
+            {sidebarOpen ? <ResizeHandle {...panels.left} /> : null}
+            <SidebarProjects
+              threads={threads}
+              profiles={profiles}
+              connection={connection}
+              activeId={activeId}
+              onSelect={selectThread}
+              onArrange={(thread, patch) =>
+                setThreads((previous) =>
+                  previous.map((item) => (item.id === thread.id ? { ...item, ...patch } : item)),
+                )
+              }
+              onNewThread={newThread}
+              shortcutModifier={shortcutModifier}
+              filtersOpen={sidebarFiltersOpen}
+              onFiltersOpenChange={setSidebarFiltersOpen}
+              footerTarget={sidebarFooter}
+              onAddProject={() => {
+                cancelThreadContext()
+                setRequestedProfileId(undefined)
+                if (connected) {
+                  setSuggestedProject(undefined)
+                  setProjectOpen(true)
+                } else setConnectOpen(true)
+              }}
+              onOpenProfile={(profileId) => {
+                if (connection.profile?.id !== profileId || !connected) {
+                  setRequestedProfileId(profileId)
+                  setConnectOpen(true)
+                } else newThread()
+              }}
+            >
+              {enabledExtensions
+                .filter((extension) => extension.renderer.placement === 'view')
+                .map((extension) => (
                   <button
-                    className="project-heading"
-                    key={profile.id}
+                    className={`extension-sidebar-view ${view === 'extension' && selectedExtension === extension.id ? 'selected' : ''}`}
+                    key={extension.id}
                     onClick={() => {
-                      if (connection.profile?.id !== profile.id || !connected) {
-                        setRequestedProfileId(profile.id)
-                        setConnectOpen(true)
-                      } else newThread()
+                      setSelectedExtension(extension.id)
+                      setView('extension')
                     }}
                   >
-                    <Folder size={16} />
-                    <span>{profile.name}</span>
-                    {connection.profile?.id === profile.id && connected ? (
-                      <span className="status-dot online" />
-                    ) : (
-                      <Server size={12} className="muted" />
-                    )}
+                    <Code2 size={14} />
+                    <span>{extension.name}</span>
                   </button>
                 ))}
-            </div>
+            </SidebarProjects>
             <div className="sidebar-bottom">
-              <button
-                className={`machine-card ${connected ? 'connected' : ''}`}
-                title={
-                  connected
-                    ? `${connection.profile?.username}@${connection.profile?.host}`
-                    : 'Connect over SSH'
-                }
-                onClick={() => setConnectOpen(true)}
-              >
-                <span className={`status-dot ${connected ? 'online' : ''}`} />
-                <span>
-                  <strong>{connected ? connection.profile?.name : 'Connect a machine'}</strong>
-                  <small>
-                    {connected
-                      ? `${connection.profile?.username}@${connection.profile?.host}`
-                      : 'Work from anywhere'}
-                  </small>
-                </span>
-                {connection.status === 'connecting' ? (
-                  <LoaderCircle size={14} className="spinning" />
-                ) : (
-                  <ChevronRight size={14} />
-                )}
-              </button>
+              <div className="sidebar-arrangement-target" ref={setSidebarFooter} />
               <div className="sidebar-tool-row" aria-label="Life tools">
+                {!sidebarOpen ? <LifeBrand className="sidebar-footer-brand" /> : null}
+                <div className="sidebar-tool-actions">
+                  <button
+                    className="icon-button"
+                    aria-label="Settings"
+                    title="Settings"
+                    onClick={() => setCustomizeOpen(true)}
+                  >
+                    <Settings2 size={16} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Connections"
+                    title="SSH connections"
+                    onClick={() => setConnectOpen(true)}
+                  >
+                    <Server size={16} />
+                  </button>
+                  <button
+                    className="icon-button extension-sidebar-entry"
+                    aria-label="Live extensions"
+                    title={`Live extensions (${extensions.extensions.length + (sourceUI.extensions?.length || 0)})`}
+                    onClick={() => setExtensionsOpen(true)}
+                  >
+                    <Code2 size={16} />
+                    {extensions.extensions.length + (sourceUI.extensions?.length || 0) ? (
+                      <i className="tool-notification-dot" />
+                    ) : null}
+                  </button>
+                  <button
+                    className="icon-button extension-sidebar-entry"
+                    aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
+                    title={`Port forwarding: ${config.autoPortForward ? 'automatic' : 'off'}`}
+                    onClick={() => setPortsOpen(true)}
+                  >
+                    <Cable size={16} />
+                  </button>
+                  <button
+                    className="icon-button extension-sidebar-entry"
+                    aria-label={`Source code ${sourceUI.enabled ? 'Edited' : 'Built-in'}`}
+                    title="Source code"
+                    onClick={() => setSourceCodeOpen(true)}
+                  >
+                    <Folder size={16} />
+                  </button>
+                  <button
+                    className="icon-button update-life-button"
+                    aria-label="Updates"
+                    title={
+                      updateState.status === 'available' || updateState.status === 'downloaded'
+                        ? `Life ${updateState.version} available`
+                        : `Life ${LIFE_VERSION} updates`
+                    }
+                    onClick={() => setUpdatesOpen(true)}
+                  >
+                    <ArrowDown size={16} />
+                    {updateState.status === 'available' || updateState.status === 'downloaded' ? (
+                      <i className="tool-notification-dot" />
+                    ) : null}
+                  </button>
+                  <button
+                    className="icon-button"
+                    aria-label="Help and keyboard shortcuts"
+                    title="Help and keyboard shortcuts"
+                    onClick={() => setHelpOpen(true)}
+                  >
+                    <CircleHelp size={16} />
+                  </button>
+                </div>
                 <button
-                  className="icon-button"
-                  aria-label="Settings"
-                  title="Settings"
-                  onClick={() => setCustomizeOpen(true)}
+                  type="button"
+                  className="icon-button sidebar-collapse-control"
+                  aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+                  aria-expanded={sidebarOpen}
+                  aria-controls="life-sidebar"
+                  title={`${sidebarOpen ? 'Collapse' : 'Expand'} sidebar (${shortcutModifier}+B)`}
+                  onClick={() => setSidebarOpen((open) => !open)}
                 >
-                  <Settings2 size={16} />
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label="Connections"
-                  title="SSH connections"
-                  onClick={() => setConnectOpen(true)}
-                >
-                  <Server size={16} />
-                </button>
-                <button
-                  className="icon-button extension-sidebar-entry"
-                  aria-label="Live extensions"
-                  title={`Live extensions (${extensions.extensions.length + (sourceUI.extensions?.length || 0)})`}
-                  onClick={() => setExtensionsOpen(true)}
-                >
-                  <Code2 size={16} />
-                  {extensions.extensions.length + (sourceUI.extensions?.length || 0) ? (
-                    <i className="tool-notification-dot" />
-                  ) : null}
-                </button>
-                <button
-                  className="icon-button extension-sidebar-entry"
-                  aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
-                  title={`Port forwarding: ${config.autoPortForward ? 'automatic' : 'off'}`}
-                  onClick={() => setPortsOpen(true)}
-                >
-                  <Network size={16} />
-                </button>
-                <button
-                  className="icon-button extension-sidebar-entry"
-                  aria-label={`Source code ${sourceUI.enabled ? 'Edited' : 'Built-in'}`}
-                  title="Source code"
-                  onClick={() => setSourceCodeOpen(true)}
-                >
-                  <Folder size={16} />
-                </button>
-                <button
-                  className="icon-button update-life-button"
-                  aria-label="Updates"
-                  title={
-                    updateState.status === 'available' || updateState.status === 'downloaded'
-                      ? `Life ${updateState.version} available`
-                      : `Life ${LIFE_VERSION} updates`
-                  }
-                  onClick={() => setUpdatesOpen(true)}
-                >
-                  <ArrowDown size={16} />
-                  {updateState.status === 'available' || updateState.status === 'downloaded' ? (
-                    <i className="tool-notification-dot" />
-                  ) : null}
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label="Help and keyboard shortcuts"
-                  title="Help and keyboard shortcuts"
-                  onClick={() => setHelpOpen(true)}
-                >
-                  <CircleHelp size={16} />
+                  <PanelLeft size={16} />
                 </button>
               </div>
             </div>
           </aside>
           {view === 'extension' && selectedView ? (
             <main className="extension-view-main" id="main-content">
-              <header className="workspace-header">
-                <div className="breadcrumbs">
-                  {!sidebarOpen ? (
-                    <button
-                      className="icon-button"
-                      aria-label="Show sidebar"
-                      onClick={() => setSidebarOpen(true)}
-                    >
-                      <PanelLeft size={17} />
-                    </button>
-                  ) : null}
-                  <Code2 size={15} />
-                  <strong>{selectedView.name}</strong>
-                </div>
-                <button className="button secondary" onClick={() => setExtensionsOpen(true)}>
-                  Manage extensions
-                </button>
-              </header>
+              <TitleBarContent target={titleBarContent}>
+                <header className="workspace-header">
+                  <div className="breadcrumbs">
+                    <Code2 size={15} />
+                    <strong>{selectedView.name}</strong>
+                  </div>
+                  <button className="button secondary" onClick={() => setExtensionsOpen(true)}>
+                    Manage extensions
+                  </button>
+                </header>
+              </TitleBarContent>
               {extensionHost(selectedView)}
             </main>
           ) : view === 'research' ? (
             <main className="research-main" id="main-content">
-              <header className="workspace-header">
-                <div className="breadcrumbs">
-                  {!sidebarOpen ? (
+              <TitleBarContent target={titleBarContent}>
+                <header className="workspace-header">
+                  <div className="breadcrumbs">
+                    <Network size={16} />
+                    <strong>{researchTitle}</strong>
+                  </div>
+                  <div className="header-actions">
+                    <button className="button secondary" onClick={() => setConnectOpen(true)}>
+                      <Server size={14} /> Connect
+                    </button>
                     <button
                       className="icon-button"
-                      aria-label="Show sidebar"
-                      onClick={() => setSidebarOpen(true)}
+                      aria-label="Settings"
+                      onClick={() => setCustomizeOpen(true)}
                     >
-                      <PanelLeft size={17} />
+                      <Settings2 size={17} />
                     </button>
-                  ) : null}
-                  <Network size={16} />
-                  <strong>{config.labels.researchTitle}</strong>
-                </div>
-                <div className="header-actions">
-                  <button className="button secondary" onClick={() => setConnectOpen(true)}>
-                    <Server size={14} /> Connect
-                  </button>
-                  <button
-                    className="icon-button"
-                    aria-label="Settings"
-                    onClick={() => setCustomizeOpen(true)}
-                  >
-                    <Settings2 size={17} />
-                  </button>
-                </div>
-              </header>
+                  </div>
+                </header>
+              </TitleBarContent>
               <div className="research-view-scroll">
                 <ResearchView
                   profiles={profiles}
@@ -1474,156 +1911,140 @@ export function App() {
             </main>
           ) : (
             <main className="main-workspace" id="main-content">
-              <header className="workspace-header">
-                <div className="breadcrumbs">
-                  {!sidebarOpen ? (
-                    <button
-                      className="icon-button"
-                      aria-label="Show sidebar"
-                      onClick={() => setSidebarOpen(true)}
-                    >
-                      <PanelLeft size={17} />
-                    </button>
-                  ) : null}
-                  {active ? (
-                    <ProviderIcon provider={active.provider} size={16} />
-                  ) : (
-                    <Folder size={15} />
-                  )}
-                  <span title={active?.workspace || connection.workspace}>
-                    {(active?.workspace || connection.workspace)
-                      ?.split('/')
-                      .filter(Boolean)
-                      .pop() ||
-                      titleProfile?.name ||
-                      config.labels.workspaceTitle}
-                  </span>
-                  <span className="breadcrumb-separator" aria-hidden="true">
-                    /
-                  </span>
-                  <strong>{active?.title || 'New thread'}</strong>
-                </div>
-                <div className="header-actions">
-                  {connected ? (
-                    <button
-                      className="project-picker-button"
-                      aria-label="Select project"
-                      title={connection.workspace || 'Choose a remote project'}
-                      onClick={() => {
-                        setSuggestedProject(undefined)
-                        setProjectOpen(true)
-                      }}
-                    >
-                      <Folder size={14} />
-                      <span>
-                        {connection.workspace?.split('/').filter(Boolean).pop() ||
-                          (connection.workspace === '/' ? '/' : 'Select project')}
+              <TitleBarContent target={titleBarContent}>
+                <header className="workspace-header">
+                  <div className="breadcrumbs">
+                    {active ? (
+                      <span className="header-project-badge" aria-hidden="true">
+                        <ThreadBadge thread={active} />
                       </span>
-                      <ChevronDown size={12} />
-                    </button>
-                  ) : null}
-                  <span className={`connection-pill ${connected ? 'connected' : ''}`}>
-                    <span className={`status-dot ${connected ? 'online' : ''}`} />
-                    {connection.status === 'connecting'
-                      ? 'Connecting'
-                      : connected
-                        ? 'SSH connected'
-                        : 'Offline'}
-                  </span>
-                  <button
-                    className={`icon-button ${terminalOpen ? 'selected' : ''}`}
-                    aria-label="Toggle remote terminal"
-                    aria-pressed={terminalOpen}
-                    onClick={() => {
-                      if (projectReady) setTerminalOpen((v) => !v)
-                      else if (connected) setProjectOpen(true)
-                      else setConnectOpen(true)
-                    }}
-                  >
-                    <Terminal size={17} />
-                  </button>
-                  <button
-                    className={`icon-button ${workspaceOpen ? 'selected' : ''}`}
-                    aria-label="Toggle workspace panel"
-                    aria-pressed={workspaceOpen}
-                    onClick={() => setWorkspaceOpen((v) => !v)}
-                  >
-                    <PanelRight size={17} />
-                  </button>
-                  {active ? (
-                    <div className="thread-menu-container">
-                      <button
-                        className="icon-button"
-                        aria-label="Thread actions"
-                        aria-expanded={threadMenu}
-                        onClick={() => setThreadMenu((v) => !v)}
-                      >
-                        <Ellipsis size={18} />
-                      </button>
-                      {threadMenu ? (
-                        <div className="thread-menu">
-                          <button
-                            onClick={() => {
-                              const text = active.messages
-                                .filter((m) => m.role !== 'tool')
-                                .map(
-                                  (m) =>
-                                    `## ${m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : providerName(active.provider)}\n\n${m.text}`,
+                    ) : (
+                      <Folder size={15} />
+                    )}
+                    <span title={active?.workspace || connection.workspace}>
+                      {(active?.workspace || connection.workspace)
+                        ?.split('/')
+                        .filter(Boolean)
+                        .pop() ||
+                        titleProfile?.name ||
+                        workspaceTitle}
+                    </span>
+                    <span className="breadcrumb-separator" aria-hidden="true">
+                      /
+                    </span>
+                    <strong>{active?.title || 'New thread'}</strong>
+                  </div>
+                  <div className="header-actions thread-header-actions">
+                    <span className={`connection-pill ${connected ? 'connected' : ''}`}>
+                      <span className={`status-dot ${connected ? 'online' : ''}`} />
+                      {openingThread
+                        ? 'Opening thread'
+                        : connection.status === 'connecting'
+                          ? 'Connecting'
+                          : connected
+                            ? 'SSH connected'
+                            : 'Offline'}
+                    </span>
+                    {!workspaceOpen ? (
+                      <TitleBarContent target={headerLeadingActions}>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label="Expand workspace sidebar"
+                          title="Expand workspace sidebar"
+                          aria-expanded={false}
+                          onClick={() => setWorkspaceOpen(true)}
+                        >
+                          <PanelRight size={16} />
+                        </button>
+                      </TitleBarContent>
+                    ) : null}
+                    {active ? (
+                      <div className="thread-menu-container">
+                        <button
+                          className="icon-button"
+                          aria-label="Thread actions"
+                          aria-expanded={threadMenu}
+                          onClick={() => setThreadMenu((v) => !v)}
+                        >
+                          <Ellipsis size={18} />
+                        </button>
+                        {threadMenu ? (
+                          <div className="thread-menu">
+                            <button
+                              onClick={() => {
+                                const text = active.messages
+                                  .filter((m) => m.role !== 'tool')
+                                  .map(
+                                    (m) =>
+                                      `## ${m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : providerName(active.provider)}\n\n${m.text}`,
+                                  )
+                                  .join('\n\n')
+                                const url = URL.createObjectURL(
+                                  new Blob([text], { type: 'text/markdown' }),
                                 )
-                                .join('\n\n')
-                              const url = URL.createObjectURL(
-                                new Blob([text], { type: 'text/markdown' }),
-                              )
-                              const link = document.createElement('a')
-                              link.href = url
-                              link.download = 'life-thread.md'
-                              link.click()
-                              URL.revokeObjectURL(url)
-                              setThreadMenu(false)
-                            }}
-                          >
-                            Export thread
-                          </button>
-                          <button
-                            disabled={busy}
-                            onClick={() => {
-                              setThreads((previous) =>
-                                previous.map((thread) =>
-                                  thread.id === active.id
-                                    ? { ...thread, lifeScope: !active.lifeScope }
-                                    : thread,
-                                ),
-                              )
-                              setThreadMenu(false)
-                            }}
-                          >
-                            {active.lifeScope
-                              ? 'Return to project messages'
-                              : 'Message Life in this thread'}
-                          </button>
-                          <button
-                            onClick={() => {
-                              setCustomizeOpen(true)
-                              setThreadMenu(false)
-                            }}
-                          >
-                            Settings and undo
-                          </button>
-                          <button
-                            disabled={busy}
-                            onClick={() => {
-                              setThreads((t) => t.filter((item) => item.id !== active.id))
-                              newThread()
-                            }}
-                          >
-                            Delete thread
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              </header>
+                                const link = document.createElement('a')
+                                link.href = url
+                                link.download = 'life-thread.md'
+                                link.click()
+                                URL.revokeObjectURL(url)
+                                setThreadMenu(false)
+                              }}
+                            >
+                              Export thread
+                            </button>
+                            <button
+                              disabled={busy}
+                              onClick={() => {
+                                setThreads((previous) =>
+                                  previous.map((thread) =>
+                                    thread.id === active.id
+                                      ? { ...thread, lifeScope: !active.lifeScope }
+                                      : thread,
+                                  ),
+                                )
+                                setThreadMenu(false)
+                              }}
+                            >
+                              {active.lifeScope
+                                ? 'Return to project messages'
+                                : 'Message Life in this thread'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setCustomizeOpen(true)
+                                setThreadMenu(false)
+                              }}
+                            >
+                              Settings and undo
+                            </button>
+                            <button
+                              disabled={busy}
+                              onClick={() => {
+                                const retained = new Set(
+                                  threads
+                                    .filter((item) => item.id !== active.id)
+                                    .flatMap(threadAttachmentIds),
+                                )
+                                const removed = threadAttachmentIds(active).filter(
+                                  (id) => !retained.has(id),
+                                )
+                                void deleteAttachmentFiles(removed).catch((error) =>
+                                  setToast(errorText(error)),
+                                )
+                                setThreads((t) => t.filter((item) => item.id !== active.id))
+                                newThread()
+                              }}
+                            >
+                              Delete thread
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </header>
+              </TitleBarContent>
               {!desktop ? (
                 <div className="browser-preview">
                   <Computer size={13} />
@@ -1641,6 +2062,14 @@ export function App() {
                 </div>
               ) : null}
               <div className="chat-area">
+                {active ? (
+                  <ThreadMessageNavigator
+                    key={active.id}
+                    messages={active.messages}
+                    conversation={conversation}
+                    onJump={() => setStickToBottom(false)}
+                  />
+                ) : null}
                 <div
                   className={`conversation ${!active ? 'empty-conversation' : ''}`}
                   ref={conversation}
@@ -1702,13 +2131,7 @@ export function App() {
                     </div>
                   ) : (
                     <div className="messages">
-                      {active.messages.map((message) => (
-                        <MessageView
-                          key={message.id}
-                          message={message}
-                          provider={active.provider}
-                        />
-                      ))}
+                      <ThreadTimeline thread={active} />
                       {active.pending.map((event) => (
                         <ApprovalCard
                           key={event.requestId}
@@ -1725,7 +2148,9 @@ export function App() {
                           </span>
                           {applyingLife
                             ? 'Applying Life change'
-                            : `${providerName(currentProvider)} is working`}
+                            : attachmentProgress?.id === active.id
+                              ? `Uploading attachments (${attachmentProgress.percent}%)`
+                              : `${providerName(currentProvider)} is working`}
                           <span>
                             {applyingLife
                               ? 'Saving and checking the result'
@@ -1735,6 +2160,14 @@ export function App() {
                           </span>
                         </div>
                       ) : null}
+                      <QueuedMessages
+                        messages={active.queue || []}
+                        working={busy}
+                        canSendNow={queueControlsReady}
+                        actionId={queue.actionId}
+                        onSendNow={(id) => void queue.sendNow(active.id, id)}
+                        onRemove={(id) => queue.remove(active.id, id)}
+                      />
                     </div>
                   )}
                 </div>
@@ -1756,13 +2189,13 @@ export function App() {
                     {extensionPanels.map(extensionHost)}
                   </section>
                 ) : null}
-                <div className="composer-container">
+                <div className="composer-container life-reference-composer">
                   {config.commands.length ? (
                     <div className="prompt-commands" aria-label="Custom prompt commands">
                       {config.commands.map((command) => (
                         <button
                           key={command.id}
-                          disabled={busy}
+                          disabled={queue.preparing || Boolean(attachmentProgress)}
                           onClick={() => {
                             setDraft(command.prompt)
                             if (!active) {
@@ -1782,18 +2215,84 @@ export function App() {
                       ))}
                     </div>
                   ) : null}
-                  <div className={`composer ${busy ? 'busy' : ''}`}>
+                  {choicesChanged ? (
+                    <div className="run-settings-note" role="status">
+                      <span>New settings ready for the next message</span>
+                      <button
+                        type="button"
+                        disabled={!queueControlsReady}
+                        title="Interrupt the current response and continue with the selected settings"
+                        onClick={() => void applyRunSettings()}
+                      >
+                        Apply now
+                      </button>
+                    </div>
+                  ) : null}
+                  <div
+                    className={`composer ${busy ? 'busy' : ''}`}
+                    onDragOver={(event) => {
+                      if (event.dataTransfer.types.includes('Files')) {
+                        event.preventDefault()
+                        event.dataTransfer.dropEffect =
+                          attachmentProgress || queue.preparing ? 'none' : 'copy'
+                      }
+                    }}
+                    onDrop={(event) => {
+                      if (event.dataTransfer.files.length) {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        attachFiles(Array.from(event.dataTransfer.files))
+                      }
+                    }}
+                    onPaste={(event) => {
+                      const files = Array.from(event.clipboardData.files)
+                      if (files.length) {
+                        event.preventDefault()
+                        attachFiles(files)
+                      }
+                    }}
+                  >
+                    <AttachmentList
+                      attachments={attachments}
+                      uploadStates={draftUploads.states}
+                      onRetry={draftUploads.retry}
+                      disabled={queue.preparing || Boolean(attachmentProgress)}
+                      onRemove={(id) => {
+                        cancelAttachmentUpload(id)
+                        setAttachments((current) => current.filter((item) => item.id !== id))
+                        if (
+                          !threadsCurrent.current.some((thread) =>
+                            threadAttachmentIds(thread).includes(id),
+                          )
+                        )
+                          void deleteAttachmentFiles([id]).catch((error) =>
+                            setToast(errorText(error)),
+                          )
+                      }}
+                    />
+                    {attachmentProgress && attachmentProgress.id === activeId ? (
+                      <div className="attachment-upload-status" role="status">
+                        <span>Uploading files… {attachmentProgress.percent}%</span>
+                        <progress
+                          value={attachmentProgress.percent}
+                          max={100}
+                          aria-label="Attachment upload progress"
+                        />
+                      </div>
+                    ) : null}
                     <textarea
                       ref={textarea}
                       aria-label="Message your coding agent"
                       placeholder={
-                        lifeIntent
-                          ? 'Describe a Life change, or /project to return to your code…'
-                          : projectReady
-                            ? 'Ask for changes, explore ideas, or send a follow-up…'
-                            : connected
-                              ? 'Choose a project, or /life switch to light for local settings…'
-                              : 'Connect a machine, or /life switch to light for local settings…'
+                        queueing
+                          ? 'Add a follow-up to queue while the agent works…'
+                          : lifeIntent
+                            ? 'Describe a Life change, or /project to return to your code…'
+                            : projectReady
+                              ? 'Ask for changes, explore ideas, or send a follow-up…'
+                              : connected
+                                ? 'Choose a project, or /life switch to light for local settings…'
+                                : 'Connect a machine, or /life switch to light for local settings…'
                       }
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
@@ -1806,193 +2305,87 @@ export function App() {
                       rows={2}
                     />
                     <div className="composer-toolbar">
-                      <div className="composer-options">
-                        <label className="composer-select provider-select" title="Coding agent">
-                          <ProviderIcon provider={currentProvider} size={15} />
-                          <select
-                            aria-label="Coding agent"
-                            value={currentProvider}
-                            disabled={Boolean(active)}
-                            onChange={(e) => {
-                              setProvider(e.target.value as Provider)
-                              setModel('')
-                              setReasoningEffort('')
-                              setServiceTier('')
-                            }}
-                          >
-                            <option value="codex">Codex</option>
-                            <option value="claude">Claude Code</option>
-                          </select>
-                          <ChevronDown size={11} />
-                        </label>
-                        <span className="toolbar-divider" />
-                        <label className="composer-select model-select">
-                          <select
-                            aria-label="Agent model"
-                            value={currentModel}
-                            disabled={busy}
-                            onChange={(e) => updateSettings({ model: e.target.value })}
-                          >
-                            {models.map((m) => (
-                              <option value={m.id} key={m.id}>
-                                {m.name}
-                              </option>
-                            ))}
-                            {currentModel && !models.some((m) => m.id === currentModel) ? (
-                              <option value={currentModel}>{currentModel}</option>
-                            ) : null}
-                          </select>
-                          <ChevronDown size={11} />
-                        </label>
-                        {effortOptions.length || currentReasoningEffort ? (
-                          <label
-                            className="composer-select reasoning-select"
-                            title={
-                              effortOptions.find(
-                                (option) => option.reasoningEffort === currentReasoningEffort,
-                              )?.description || 'How much reasoning the model uses for this thread'
+                      <ReferenceComposerControls
+                        models={models}
+                        provider={currentProvider}
+                        model={currentModel}
+                        reasoningEffort={currentReasoningEffort}
+                        serviceTier={currentServiceTier}
+                        mode={currentMode}
+                        modeDisabled={busy}
+                        providerDisabled={Boolean(active)}
+                        onChange={updateSettings}
+                        onProviderChange={(nextProvider, nextModel) => {
+                          setProvider(nextProvider)
+                          setModel(nextModel)
+                          setReasoningEffort('')
+                          setServiceTier('')
+                        }}
+                      />
+                      <div className="composer-send-actions">
+                        <AttachmentPicker
+                          disabled={queue.preparing || Boolean(attachmentProgress)}
+                          onFiles={attachFiles}
+                        />
+                        {busy ? (
+                          <button
+                            type="button"
+                            className="send-button stop-button"
+                            aria-label={
+                              applyingLife
+                                ? 'Applying Life change'
+                                : attachmentProgress?.id === activeId
+                                  ? 'Cancel attachment upload'
+                                  : 'Stop agent and pause queued messages'
                             }
+                            disabled={applyingLife || Boolean(queue.actionId)}
+                            onClick={() => void stop()}
                           >
-                            <BrainCircuit size={13} />
-                            <select
-                              aria-label="Reasoning effort"
-                              value={currentReasoningEffort}
-                              disabled={busy}
-                              onChange={(event) =>
-                                updateSettings({ reasoningEffort: event.target.value })
-                              }
-                            >
-                              <option value="">
-                                Reasoning: default
-                                {currentModelOption?.defaultReasoningEffort
-                                  ? ` (${effortName(currentModelOption.defaultReasoningEffort)})`
-                                  : ''}
-                              </option>
-                              {effortOptions.map((option) => (
-                                <option
-                                  key={option.reasoningEffort}
-                                  value={option.reasoningEffort}
-                                  title={option.description}
-                                >
-                                  {effortName(option.reasoningEffort)}
-                                </option>
-                              ))}
-                              {currentReasoningEffort &&
-                              !effortOptions.some(
-                                (option) => option.reasoningEffort === currentReasoningEffort,
-                              ) ? (
-                                <option value={currentReasoningEffort}>
-                                  {effortName(currentReasoningEffort)} (unavailable)
-                                </option>
-                              ) : null}
-                            </select>
-                            <ChevronDown size={11} />
-                          </label>
+                            {applyingLife ? (
+                              <LoaderCircle size={15} className="spinning" />
+                            ) : (
+                              <Square size={13} fill="currentColor" />
+                            )}
+                          </button>
                         ) : null}
-                        {tierOptions.length || currentServiceTier ? (
-                          <label
-                            className="composer-select tier-select"
-                            title={
-                              tierOptions.find((option) => option.id === currentServiceTier)
-                                ?.description ||
-                              'Provider service tier and response speed for this thread'
-                            }
-                          >
-                            <Gauge size={13} />
-                            <select
-                              aria-label="Service tier"
-                              value={currentServiceTier}
-                              disabled={busy}
-                              onChange={(event) =>
-                                updateSettings({ serviceTier: event.target.value })
-                              }
-                            >
-                              <option value="">Speed: default</option>
-                              {tierOptions.map((option) => (
-                                <option
-                                  key={option.id}
-                                  value={option.id}
-                                  title={option.description}
-                                >
-                                  {option.name}
-                                </option>
-                              ))}
-                              {currentServiceTier &&
-                              !tierOptions.some((option) => option.id === currentServiceTier) ? (
-                                <option value={currentServiceTier}>
-                                  {currentServiceTier} (unavailable)
-                                </option>
-                              ) : null}
-                            </select>
-                            <ChevronDown size={11} />
-                          </label>
-                        ) : null}
-                        <label
-                          className="composer-select mode-select"
-                          title={
-                            currentMode === 'review'
-                              ? 'Ask before actions that need approval'
-                              : currentMode === 'edit'
-                                ? 'Allow workspace edits; review other actions'
-                                : 'Plan without changing files'
-                          }
-                        >
-                          <ShieldCheck size={13} />
-                          <select
-                            aria-label="Agent permission mode"
-                            value={currentMode}
-                            disabled={busy}
-                            onChange={(e) =>
-                              updateSettings({ mode: e.target.value as PermissionMode })
-                            }
-                          >
-                            <option value="review">Review actions</option>
-                            <option value="edit">Allow edits</option>
-                            <option value="plan">Plan only</option>
-                          </select>
-                          <ChevronDown size={11} />
-                        </label>
-                      </div>
-                      {busy ? (
                         <button
-                          className="send-button stop-button"
-                          aria-label={applyingLife ? 'Applying Life change' : 'Stop agent'}
-                          disabled={applyingLife}
-                          onClick={() => void stop()}
-                        >
-                          {applyingLife ? (
-                            <LoaderCircle size={15} className="spinning" />
-                          ) : (
-                            <Square size={13} fill="currentColor" />
-                          )}
-                        </button>
-                      ) : (
-                        <button
-                          className={`send-button ${!projectReady ? 'connect-send' : ''}`}
+                          type="button"
+                          className={`send-button ${!queueing && !projectReady ? 'connect-send' : ''}`}
                           aria-label={
-                            projectReady || lifeIntent
-                              ? 'Send message'
-                              : connected
-                                ? 'Select project to send'
-                                : 'Connect to send'
+                            queueing
+                              ? 'Queue follow-up message'
+                              : projectReady || lifeIntent
+                                ? 'Send message'
+                                : connected
+                                  ? 'Select project to send'
+                                  : 'Connect to send'
                           }
-                          disabled={(projectReady || lifeIntent) && !draft.trim()}
+                          title={
+                            queueing
+                              ? 'Queue this message using the selected settings for its next turn'
+                              : projectReady || lifeIntent
+                                ? 'Send message'
+                                : connected
+                                  ? 'Select project to send'
+                                  : 'Connect to send'
+                          }
+                          disabled={
+                            queue.preparing ||
+                            Boolean(attachmentProgress) ||
+                            ((queueing || projectReady || lifeIntent) &&
+                              !draft.trim() &&
+                              !attachments.length)
+                          }
                           onClick={() => {
-                            if (!connected && !lifeIntent) setConnectOpen(true)
+                            if (queueing) void send()
+                            else if (!connected && !lifeIntent) setConnectOpen(true)
                             else if (!projectReady && !lifeIntent) setProjectOpen(true)
                             else void send()
                           }}
                         >
-                          {!projectReady && !lifeIntent ? (
-                            <>
-                              <span>{connected ? 'Select project' : 'Connect'}</span>
-                              <ArrowUpRight size={15} />
-                            </>
-                          ) : (
-                            <ArrowUp size={18} />
-                          )}
+                          <ArrowUp size={20} />
                         </button>
-                      )}
+                      </div>
                     </div>
                   </div>
                   <div className="composer-caption composer-worktree-strip">
@@ -2060,30 +2453,35 @@ export function App() {
                     >
                       {connected ? (
                         <>
-                          <Server size={12} /> {connection.profile?.host}
+                          <Cloud size={14} />
+                          <span>{connection.profile?.host}</span>
                         </>
                       ) : (
                         '/life changes Life'
                       )}
                     </span>
-                    <span className="composer-keyboard-hint">
-                      <kbd>↵</kbd> Send <span className="caption-dot">·</span> <kbd>⇧ ↵</kbd> New
-                      line
-                    </span>
+                    <ReferenceComposerDetails
+                      thread={composerMetadata}
+                      connection={connection}
+                      onWorkspace={() => setWorkspaceOpen(true)}
+                      onNotify={setToast}
+                    />
                   </div>
                 </div>
               </div>
-              {terminalOpen ? (
-                <RemoteTerminal
-                  theme={config.theme}
-                  connected={projectReady}
-                  onClose={() => setTerminalOpen(false)}
-                />
-              ) : null}
             </main>
           )}
           {workspaceOpen && view === 'workspace' ? (
-            <WorkspacePanel
+            <WorkspaceSurfaces
+              key={`${connection.profile?.id || ''}:${connection.workspace || ''}`}
+              headerTarget={surfaceHeader}
+              theme={config.theme}
+              terminalOpen={terminalOpen}
+              onTerminalChange={setTerminalOpen}
+              threads={threads}
+              activeThread={active}
+              onSelectThread={selectThread}
+              resize={panels.right}
               connection={connection}
               onConnect={() => (connected ? setProjectOpen(true) : setConnectOpen(true))}
               onClose={() => setWorkspaceOpen(false)}
@@ -2106,7 +2504,13 @@ export function App() {
       )}
       <ExtensionDialog
         open={extensionsOpen}
-        onOpenChange={setExtensionsOpen}
+        onOpenChange={(open) => {
+          setExtensionsOpen(open)
+          if (!open) {
+            emergencyReview.current = false
+            queue.wake()
+          }
+        }}
         connection={connection}
         defaultProvider={config.defaultProvider}
         onInstalled={(extension) => {
@@ -2171,10 +2575,14 @@ export function App() {
         onOpenChange={setProjectOpen}
         connection={connection}
         suggestedPath={suggestedProject}
+        beforeSelect={() => threadContext.current.settled()}
         hasActiveTurns={threads.some(
           (thread) => thread.busy && thread.profileId === connection.profile?.id,
         )}
         onSelected={(state) => {
+          emergencyReview.current = false
+          cancelThreadContext()
+          lifeContext.current.connection = state
           setConnection(state)
           setTerminalOpen(false)
           setView('workspace')
@@ -2183,6 +2591,7 @@ export function App() {
             active &&
             (active.profileId !== state.profile?.id || active.workspace !== state.workspace)
           ) {
+            activeIdCurrent.current = undefined
             setActiveId(undefined)
             setThreadMenu(false)
             setStickToBottom(true)

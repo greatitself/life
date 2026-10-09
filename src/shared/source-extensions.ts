@@ -80,6 +80,8 @@ export interface SourceExtensionSummary {
   description: string
   version: string
   enabled: boolean
+  /** Original portable bundle retained for export after its changes became built-in. */
+  incorporated?: true
   files: string[]
   dependencies: Record<string, string>
   createdAt: string

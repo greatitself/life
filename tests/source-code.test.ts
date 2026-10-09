@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { MessageChannel } from 'node:worker_threads'
 import { SourceCodeStore } from '../src/main/source-code'
+import { providerArtwork } from '../src/renderer/provider-artwork'
 
 const directories: string[] = []
 const stores: SourceCodeStore[] = []
@@ -189,14 +190,24 @@ describe('installed Life source customization', () => {
     expect(snapshot.active?.css).toBeTruthy()
     const jsAsset = store.assetPath(snapshot.active!.js)
     expect(jsAsset).toBeTruthy()
-    expect(await readFile(jsAsset!, 'utf8')).toContain('__life_full_renderer_compile_test')
+    const compiledRenderer = await readFile(jsAsset!, 'utf8')
+    expect(compiledRenderer).toContain('__life_full_renderer_compile_test')
+    // Provider artwork is now inline SVG. Verify its real paths and SVG branding
+    // survive the complete customized renderer build without separate image files.
+    for (const artwork of [providerArtwork.openai, providerArtwork.claude]) {
+      expect(compiledRenderer).toContain(artwork.path)
+      expect(compiledRenderer).toContain(artwork.viewBox)
+    }
+    expect(compiledRenderer).toContain('provider-icon')
+    expect(compiledRenderer).toContain('data-provider')
+    expect(compiledRenderer).toContain('life-mark')
+    expect(compiledRenderer).toContain('M7 5v22h19M7 16h10l8-8')
     expect((await stat(store.assetPath(snapshot.active!.css!)!)).size).toBeGreaterThan(1000)
     const files = (await readdir(dirname(jsAsset!), { recursive: true })).map((file) =>
       file.split('\\').join('/'),
     )
     const icons = files.filter((file) => /\.svg$/.test(file))
     const fonts = files.filter((file) => /\.woff2?$/.test(file))
-    expect(icons.length).toBeGreaterThanOrEqual(2)
     expect(fonts.length).toBeGreaterThan(0)
     for (const file of [...icons, ...fonts]) {
       const asset = store.assetPath(new URL(file, snapshot.active!.js).toString())

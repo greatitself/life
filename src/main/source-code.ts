@@ -18,6 +18,10 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { applyPatch, createTwoFilesPatch, diffChars } from 'diff'
 import {
+  isIncorporatedSourceExtension,
+  type IncorporatedSourceExtension,
+} from './incorporated-source-extensions'
+import {
   parseSourceExtensionBundle,
   sourceExtensionBundleSchema,
   type SourceExtensionBundle,
@@ -44,6 +48,8 @@ export interface SourceCodeStoreOptions {
   onUpdate?: (state: LifeSourceSnapshot) => void
   compilerTimeoutMs?: number
   installTimeoutMs?: number
+  /** Native, trusted migration identities; omitted in production to use the shipped manifest. */
+  incorporatedExtensions?: readonly IncorporatedSourceExtension[]
 }
 
 const stateSchema = z
@@ -66,9 +72,19 @@ const metadataSchema = z
     baseFingerprint: z.string(),
     baseHashes: z.record(z.string(), z.string()).default({}),
     extensions: z
-      .array(z.object({ bundle: sourceExtensionBundleSchema, enabled: z.boolean() }).strict())
+      .array(
+        z
+          .object({
+            bundle: sourceExtensionBundleSchema,
+            enabled: z.boolean(),
+            incorporated: z.literal(true).optional(),
+          })
+          .strict(),
+      )
       .max(200)
       .optional(),
+    /** Migration records use the installed UI and do not have an executable custom bundle. */
+    baselineOnly: z.literal(true).optional(),
   })
   .strict()
 type Metadata = z.infer<typeof metadataSchema>
@@ -278,15 +294,35 @@ export class SourceCodeStore {
             'utf8',
           )
         }
-        await stat(join(this.generation(this.state.current), 'dist', 'entry.js'))
         if (this.metadata.baseFingerprint !== this.baselineFingerprint) {
-          this.state = {
-            ...this.state,
-            revision: this.state.revision + 1,
-            enabled: false,
-            error:
-              'Life was updated after this customization was built. Your source edits are preserved. Ask /life to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.',
+          const incorporated = await this.retireIncorporatedLayers(
+            this.state.current,
+            this.metadata,
+            [...this.state.history, this.state.current].slice(-5),
+          )
+          if (!incorporated) {
+            const error =
+              this.metadata.baselineOnly &&
+              this.metadata.extensions?.some((layer) => this.isIncorporated(layer))
+                ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Ask /life to adapt those extensions to the current Life version.'
+                : 'Life was updated after this customization was built. Your source edits are preserved. Ask /life to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.'
+            if (this.state.enabled || this.state.error !== error) {
+              this.state = {
+                ...this.state,
+                revision: this.state.revision + 1,
+                enabled: false,
+                error,
+              }
+              await this.writeState(this.state)
+            }
           }
+        }
+        if (!this.metadata.baselineOnly)
+          await stat(join(this.generation(this.state.current!), 'dist', 'entry.js'))
+        else if (this.state.enabled) {
+          // A baseline-only archive has no executable custom entry, even if a saved
+          // state was corrupted or came from a downgrade with a matching fingerprint.
+          this.state = { ...this.state, revision: this.state.revision + 1, enabled: false }
           await this.writeState(this.state)
         }
       } catch (error) {
@@ -480,6 +516,13 @@ export class SourceCodeStore {
       const layers = this.cloneLayers()
       const layer = layers.find((entry) => entry.bundle.id === id)
       if (!layer) throw new Error(`Source extension does not exist: ${id}`)
+      if (this.isIncorporated(layer)) {
+        if (enabled)
+          throw new Error(
+            'These changes are built into Life. Create a new extension to customize them; the original bundle is archived for export and recovery.',
+          )
+        return this.get()
+      }
       if (layer.enabled === enabled && this.state.enabled === layers.some((entry) => entry.enabled))
         return this.get()
       layer.enabled = enabled
@@ -559,6 +602,10 @@ export class SourceCodeStore {
       const layers = this.cloneLayers()
       const layer = layers.find((entry) => entry.bundle.id === bundle.id)
       if (!layer) throw new Error(`Source extension does not exist: ${bundle.id}`)
+      if (this.isIncorporated(layer))
+        throw new Error(
+          'These changes are built into Life. Create a new extension to customize them; the original bundle is archived for export and recovery.',
+        )
       layer.bundle = {
         ...bundle,
         createdAt: layer.bundle.createdAt,
@@ -577,6 +624,13 @@ export class SourceCodeStore {
     return JSON.parse(JSON.stringify(this.metadata?.extensions || [])) as SourceLayer[]
   }
 
+  private isIncorporated(layer: SourceLayer): boolean {
+    return Boolean(
+      layer.incorporated &&
+      isIncorporatedSourceExtension(layer.bundle, this.options.incorporatedExtensions),
+    )
+  }
+
   private extensionSummaries(): SourceExtensionSummary[] {
     const layers = this.metadata?.extensions || []
     const failedIndex =
@@ -589,6 +643,7 @@ export class SourceCodeStore {
       description: layer.bundle.description,
       version: layer.bundle.version,
       enabled: layer.enabled,
+      ...(this.isIncorporated(layer) ? { incorporated: true as const } : {}),
       files: layer.bundle.files.map((file) => file.path),
       dependencies: { ...layer.bundle.dependencies },
       createdAt: layer.bundle.createdAt,
@@ -717,6 +772,11 @@ export class SourceCodeStore {
     const nextLayers = JSON.parse(JSON.stringify(layers)) as SourceLayer[]
     for (const layer of nextLayers) {
       layer.bundle = parseSourceExtensionBundle(layer.bundle)
+      if (this.isIncorporated(layer)) {
+        layer.enabled = false
+        continue
+      }
+      delete layer.incorporated
       if (!layer.enabled) continue
       this.verifyBundle(layer.bundle)
       const adjusted: SourceExtensionFile[] = []
@@ -807,6 +867,98 @@ export class SourceCodeStore {
           ]
         : []
     return { ...metadata, extensions }
+  }
+
+  /**
+   * A shipped UI improvement must not replay its old patches over the new app. Archive
+   * only the exact published bundle identities and leave every original generation intact.
+   * This transaction never installs dependencies, compiles, or executes an old renderer.
+   */
+  private async retireIncorporatedLayers(
+    previous: number,
+    metadata: Metadata,
+    history: SavedState['history'],
+  ): Promise<boolean> {
+    const layers = JSON.parse(JSON.stringify(metadata.extensions || [])) as SourceLayer[]
+    let matched = 0
+    let newlyMatched = 0
+    for (const layer of layers) {
+      if (isIncorporatedSourceExtension(layer.bundle, this.options.incorporatedExtensions)) {
+        if (!this.isIncorporated(layer)) newlyMatched++
+        layer.incorporated = true
+        layer.enabled = false
+        matched++
+      } else delete layer.incorporated
+    }
+    if (!matched) return false
+
+    // Unknown enabled layers still need the user's explicit adaptation. Keep their old
+    // source as readable context, with execution disabled, instead of silently rebasing it.
+    const needsAdaptation = layers.some((layer) => layer.enabled)
+    if (needsAdaptation && !newlyMatched) return false
+    const source = needsAdaptation ? this.generation(previous) : this.options.sourceDir
+    const nextRevision = this.state.revision + 1
+    const staging = join(
+      this.path,
+      'revisions',
+      `.incorporated-${nextRevision}-${randomUUID().slice(0, 12)}`,
+    )
+    const destination = this.generation(nextRevision)
+    const dependencies: Record<string, string> = {}
+    for (const layer of layers)
+      if (layer.enabled) Object.assign(dependencies, layer.bundle.dependencies)
+    const nextMetadata: Metadata = metadataSchema.parse({
+      summary: needsAdaptation
+        ? 'Built-in improvements are archived; additional source extensions are preserved for adaptation.'
+        : 'These improvements are now built into Life. Original extension bundles are archived for export and recovery.',
+      dependencies,
+      baseFingerprint: needsAdaptation ? metadata.baseFingerprint : this.baselineFingerprint,
+      baseHashes: needsAdaptation ? metadata.baseHashes : { ...this.baselineHashes },
+      extensions: layers,
+      baselineOnly: true,
+    })
+    let moved = false
+    try {
+      if (existsSync(destination))
+        throw new Error(`A source generation already exists for revision ${nextRevision}.`)
+      await mkdir(staging, { recursive: true })
+      for (const path of await this.listSource(source)) {
+        if (
+          !path.startsWith('src/renderer/') &&
+          !path.startsWith('src/shared/') &&
+          path !== 'package.json'
+        )
+          continue
+        const target = join(staging, path)
+        await mkdir(dirname(target), { recursive: true })
+        await copyFile(join(source, path), target)
+      }
+      await writeFile(join(staging, 'metadata.json'), JSON.stringify(nextMetadata), 'utf8')
+      await writeFile(
+        join(staging, 'incorporation-recovery.json'),
+        JSON.stringify({ format: 1, originalState: this.state, originalGeneration: previous }),
+        'utf8',
+      )
+      await rename(staging, destination)
+      moved = true
+      const next: SavedState = {
+        ...this.state,
+        revision: nextRevision,
+        current: nextRevision,
+        history,
+        enabled: false,
+        error: needsAdaptation
+          ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Ask /life to adapt those extensions to the current Life version.'
+          : undefined,
+      }
+      await this.writeState(next)
+      this.state = next
+      this.metadata = nextMetadata
+      return true
+    } catch (error) {
+      await rm(moved ? destination : staging, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
   }
 
   private async commitLayers(
@@ -916,12 +1068,25 @@ export class SourceCodeStore {
         )
       }
       const baseChanged = Boolean(metadata && metadata.baseFingerprint !== this.baselineFingerprint)
+      if (
+        baseChanged &&
+        metadata &&
+        previous !== null &&
+        (await this.retireIncorporatedLayers(previous, metadata, history))
+      ) {
+        this.recovered = false
+        this.emit()
+        return this.get()
+      }
       const next: SavedState = {
         format: 1,
         revision: this.state.revision + 1,
         current: previous,
         history,
-        enabled: !baseChanged && Boolean(metadata?.extensions?.some((layer) => layer.enabled)),
+        enabled:
+          !baseChanged &&
+          !metadata?.baselineOnly &&
+          Boolean(metadata?.extensions?.some((layer) => layer.enabled)),
         failed: [...this.state.failed],
         ...(baseChanged
           ? {

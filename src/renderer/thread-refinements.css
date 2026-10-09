@@ -1,0 +1,213 @@
+@import './compact-workspace.css';
+
+.app-shell.life-refined-layout .titlebar-brand strong {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.35px;
+}
+.app-shell.life-refined-layout .titlebar-sidebar-row {
+  padding-inline: 16px;
+}
+.app-shell.life-refined-layout .titlebar-sidebar-row svg,
+.app-shell.life-refined-layout .sidebar svg,
+.app-shell.life-refined-layout .sidebar .provider-icon,
+.app-shell.life-refined-layout .sidebar .provider-icon img {
+  width: 16px !important;
+  height: 16px !important;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.app-shell.life-refined-layout .sidebar .provider-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.app-shell.life-refined-layout .sidebar .provider-icon img {
+  object-fit: contain;
+}
+.app-shell.life-refined-layout .titlebar-sidebar-toggle,
+.app-shell.life-refined-layout .titlebar-view-switch .icon-button,
+.app-shell.life-refined-layout .sidebar-navigation-actions .icon-button,
+.app-shell.life-refined-layout .sidebar-tool-row > button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 28px;
+}
+.app-shell.life-refined-layout .sidebar-tool-row {
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 6px 10px;
+}
+.app-shell.life-refined-layout .sidebar-project-thread-heading {
+  padding-inline: 12px;
+  gap: 8px;
+}
+.app-shell.life-refined-layout .sidebar-project-thread-description {
+  margin-inline: 12px;
+}
+.app-shell.life-refined-layout .sidebar-project-thread-list {
+  margin-left: 0;
+  padding-left: 0;
+  border: 0;
+}
+.app-shell.life-refined-layout .sidebar .thread-card {
+  border: 0;
+  box-shadow: none;
+  padding-inline: 12px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-project,
+.app-shell.life-refined-layout .sidebar .thread-card-meta {
+  gap: 8px;
+  min-height: 16px;
+  align-items: center;
+}
+.app-shell.life-refined-layout .sidebar .project-heading {
+  padding-inline: 12px;
+  gap: 8px;
+}
+.app-shell.life-refined-layout .sidebar,
+.app-shell.life-refined-layout .sidebar .project-list {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.app-shell.life-refined-layout .sidebar .project-list {
+  overflow-y: auto;
+  scrollbar-gutter: auto;
+}
+.app-shell.life-refined-layout .sidebar::-webkit-scrollbar,
+.app-shell.life-refined-layout .sidebar *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.app-shell.life-refined-layout .life-unified-titlebar .titlebar-content,
+.app-shell.life-refined-layout .life-unified-titlebar .titlebar-tools,
+.app-shell.life-refined-layout .life-unified-titlebar .native-window-controls,
+.app-shell.life-refined-layout .titlebar-content .workspace-header {
+  border-top: 0;
+  border-bottom: 0;
+}
+.app-shell.life-refined-layout .main-workspace .message.user {
+  border: 0;
+}
+.app-shell.life-refined-layout .main-workspace .composer-container {
+  max-width: 860px;
+}
+.app-shell.life-refined-layout .main-workspace .composer {
+  min-height: 138px;
+  padding: 14px 16px 12px;
+  border-radius: 20px;
+}
+.app-shell.life-refined-layout .main-workspace .composer textarea {
+  min-height: 72px;
+  padding-bottom: 8px;
+  font-size: var(--life-font-size, 14px);
+  line-height: 1.65;
+}
+.app-shell.life-refined-layout .main-workspace .composer-toolbar {
+  margin-top: 4px;
+}
+.app-shell.life-refined-layout .main-workspace .composer-send-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+.app-shell.life-refined-layout .main-workspace .composer-send-actions .stop-button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .main-workspace .composer-send-actions .stop-button:hover {
+  background: var(--surface-raised);
+  color: var(--text-strong);
+}
+.app-shell.life-refined-layout .run-settings-note {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  margin-bottom: 6px;
+  padding-inline: 4px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.app-shell.life-refined-layout .run-settings-note button {
+  color: var(--text);
+  padding: 4px 7px;
+  border-radius: 5px;
+}
+.app-shell.life-refined-layout .run-settings-note button:hover {
+  background: var(--surface);
+}
+.thread-message-queue {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+}
+.thread-queued-message {
+  width: fit-content;
+  min-width: 160px;
+  max-width: min(100%, 620px);
+  margin-left: auto;
+  padding: 12px 14px 9px;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  color: var(--text);
+  font-size: var(--life-font-size, 14px);
+}
+.thread-queued-message > p {
+  margin: 0 0 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+.thread-queued-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.thread-queued-footer {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.thread-queued-footer > span {
+  flex: 1;
+  padding-right: 8px;
+}
+.thread-queued-footer .icon-button {
+  width: 25px;
+  height: 25px;
+}
+.thread-queued-error {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px), (max-height: 700px) {
+  .app-shell.life-refined-layout .main-workspace .composer {
+    min-height: 122px;
+    padding: 12px 13px 10px;
+    border-radius: 18px;
+  }
+  .app-shell.life-refined-layout .main-workspace .composer textarea {
+    min-height: 56px;
+  }
+}

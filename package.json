@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -24,12 +24,16 @@
     "start": "electron .",
     "dist": "npm run build && electron-builder",
     "dist:dir": "npm run build && electron-builder --dir",
-    "test:desktop": "node tests/desktop-smoke.cjs"
+    "test:desktop": "node tests/desktop-smoke.cjs",
+    "test:recovery": "node tests/renderer-recovery-smoke.cjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.2.8",
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.25",
+    "@radix-ui/react-hover-card": "^1.1.24",
+    "@radix-ui/react-select": "^2.3.8",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "diff": "8.0.2",

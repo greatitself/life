@@ -1,6 +1,6 @@
 # Edit Life from its own conversation
 
-Life 0.5 can change its built-in React application from an ordinary Codex or Claude Code thread. Each source change becomes an independently managed extension over the installed application. Ask with `/life`, `@life`, or a request addressing Life itself. Follow-up questions and implementation work stay in that conversation and provider session. Use `/project` or the composer’s scope control to return to your connected project.
+Life 0.6 can change its built-in React application from an ordinary Codex or Claude Code thread. Each source change becomes an independently managed extension over the installed application. Ask with `/life`, `@life`, or a request addressing Life itself. Follow-up questions and implementation work stay in that conversation and provider session. Use `/project` or the composer’s scope control to return to your connected project.
 
 Examples:
 
@@ -8,7 +8,7 @@ Examples:
 - `/life add a research-review page with sortable experiments and saved notes.`
 - `/life change the composer layout and add an advanced provider option.`
 
-The current select controls have not been replaced in advance. Requests for component libraries can add real React source and npm dependencies, which Life builds on your computer.
+The installed composer includes the Radix menus from the incorporated workspace backup. Requests for other component libraries can add real React source and npm dependencies, which Life builds on your computer.
 
 ## How a change reaches the interface
 
@@ -27,6 +27,8 @@ Open **Live extensions** in the sidebar to open **Manage extensions**. Its **Ins
 Changes can depend on earlier layers. For example, a later extension may import a component created by an earlier one. Disabling or removing the earlier change can make the combined source fail to compile. Each extension should declare the npm packages its own feature needs, even when another extension currently supplies them. Overlapping edits can also conflict. When multiple enabled layers name the same npm package, the later layer supplies its version; the resulting code still needs to work with that dependency. An unsuccessful composition or build retains the prior working interface; review the error and ask `/life` to adapt the affected changes. Layers are not promised to work in every combination.
 
 Existing 0.4 source edits and added dependencies migrate into one **Legacy customization** source extension. The original customization files remain available. This preserves the existing work while allowing subsequent changes to become separate layers.
+
+The 27 workspace customizations incorporated into Life 0.6 are part of the installed source. On upgrade, exact matching bundles become exportable **Built into Life** archive records, so their old patches do not override the updated application. Matching requires the complete bundle contents, not just its ID or name. A modified bundle or unrelated extension stays preserved for adaptation. Removing an archive record removes that record; it does not remove the installed feature.
 
 ## Editable source and dependencies
 

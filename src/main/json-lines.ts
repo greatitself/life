@@ -2,21 +2,33 @@ import { StringDecoder } from 'node:string_decoder'
 export class JsonLines {
   private decoder = new StringDecoder('utf8')
   private buffer = ''
+  private discarding = false
   constructor(
     private onMessage: (message: Record<string, unknown>) => void,
     private onInvalid: (line: string) => void = () => {},
+    private maxFrameLength = 8_000_000,
   ) {}
   push(chunk: Buffer | string) {
-    this.buffer += typeof chunk === 'string' ? chunk : this.decoder.write(chunk)
-    if (this.buffer.length > 8_000_000) {
+    const text = typeof chunk === 'string' ? chunk : this.decoder.write(chunk)
+    let offset = 0
+    while (offset < text.length) {
+      const newline = text.indexOf('\n', offset)
+      const end = newline < 0 ? text.length : newline
+      if (!this.discarding) {
+        if (this.buffer.length + end - offset > this.maxFrameLength) {
+          this.buffer = ''
+          this.discarding = true
+          this.onInvalid('Agent output exceeded the message limit')
+        } else this.buffer += text.slice(offset, end)
+      }
+      if (newline < 0) return
+      offset = newline + 1
+      if (this.discarding) {
+        this.discarding = false
+        continue
+      }
+      const line = this.buffer.trim()
       this.buffer = ''
-      this.onInvalid('Agent output exceeded the message limit')
-      return
-    }
-    let index: number
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index).trim()
-      this.buffer = this.buffer.slice(index + 1)
       if (!line) continue
       let value: unknown
       try {

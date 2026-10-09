@@ -4,12 +4,31 @@ import type { AgentEvent, AgentQuestion, ModelOption, Provider, StartInput } fro
 import { agentProviderOptionsSchema, shellQuote } from '../shared/validation'
 import { SSHConnection } from './ssh'
 import { JsonLines } from './json-lines'
+import { CodexRPC as RPC } from './codex-rpc'
 import { LIFE_VERSION } from '../shared/version'
 
 type Wire = Record<string, unknown>
 const object = (value: unknown): Wire => (value && typeof value === 'object' ? (value as Wire) : {})
 const string = (value: unknown) => (typeof value === 'string' ? value : '')
 const array = (value: unknown): Wire[] => (Array.isArray(value) ? value.map(object) : [])
+
+function untilCancelled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cancel = () => reject(new Error('Agent startup cancelled'))
+    if (signal.aborted) cancel()
+    else signal.addEventListener('abort', cancel, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', cancel)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', cancel)
+        reject(error)
+      },
+    )
+  })
+}
 
 export function codexModelOption(model: Wire): ModelOption {
   const result: ModelOption = {
@@ -66,68 +85,6 @@ export function claudeModelOption(model: Wire): ModelOption {
   return result
 }
 
-class RPC {
-  private next = 1
-  private closed = false
-  private pending = new Map<
-    number,
-    { resolve: (v: Wire) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
-  >()
-  constructor(
-    readonly channel: ClientChannel,
-    receive: (message: Wire) => void,
-  ) {
-    const lines = new JsonLines((message) => {
-      if (typeof message.id === 'number' && !message.method && this.pending.has(message.id)) {
-        const pending = this.pending.get(message.id)!
-        this.pending.delete(message.id)
-        clearTimeout(pending.timer)
-        if (message.error)
-          pending.reject(new Error(string(object(message.error).message) || 'Agent request failed'))
-        else pending.resolve(object(message.result))
-      } else receive(message)
-    })
-    channel.on('data', (chunk: Buffer) => lines.push(chunk))
-    channel.on('error', (error: Error) => {
-      this.closed = true
-      this.rejectAll(error)
-    })
-    channel.on('close', () => {
-      this.closed = true
-      this.rejectAll(
-        new Error('Codex disconnected. Check the remote installation and login, then retry.'),
-      )
-    })
-  }
-  send(message: Wire) {
-    if (this.closed || this.channel.destroyed) throw new Error('Codex is disconnected')
-    this.channel.write(JSON.stringify(message) + '\n')
-  }
-  request(method: string, params: Wire = {}, timeout = 60000): Promise<Wire> {
-    const id = this.next++
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new Error(`${method} timed out. Check the remote agent login in the terminal.`))
-      }, timeout)
-      this.pending.set(id, { resolve, reject, timer })
-      try {
-        this.send({ id, method, params })
-      } catch (error) {
-        clearTimeout(timer)
-        this.pending.delete(id)
-        reject(error)
-      }
-    })
-  }
-  private rejectAll(error: Error) {
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer)
-      p.reject(error)
-    }
-    this.pending.clear()
-  }
-}
 interface Session {
   input: StartInput
   remoteId?: string
@@ -139,6 +96,7 @@ interface Session {
   stderr: string
   approvals: Map<string, { wireId: unknown; method: string; params: Wire }>
   startup?: Promise<void>
+  initialization: AbortController
   stopRequested: boolean
   stopping?: Promise<void>
   ignoredTurns: Set<string>
@@ -154,9 +112,11 @@ interface Session {
 export class Agents {
   private codex?: RPC
   private codexStarting?: Promise<RPC>
+  private codexTransports = new Set<RPC>()
   private sessions = new Map<string, Session>()
   private threads = new Map<string, string>()
   private generation = 0
+  private codexGeneration = 0
   private defaultCodexModel?: string
   private codexModels?: ModelOption[]
   private codexDefaultEfforts = new Map<string, string>()
@@ -179,9 +139,14 @@ export class Agents {
     this.emit({ sessionId, ...event })
   }
   private async getCodex(): Promise<RPC> {
-    if (this.codex) return this.codex
+    if (this.codex && !this.codex.closed) return this.codex
     if (this.codexStarting) return this.codexStarting
+    if (this.codex) {
+      this.codex = undefined
+      this.threads.clear()
+    }
     const generation = this.generation
+    const codexGeneration = ++this.codexGeneration
     const starting = (async () => {
       const channel = await this.ssh.channel(
         `cd ${shellQuote(this.ssh.state.workspace!)} && exec codex app-server --listen stdio://`,
@@ -190,30 +155,28 @@ export class Agents {
         channel.close()
         throw new Error('SSH connection cancelled')
       }
-      const rpc = new RPC(channel, (message) => {
-        if (this.generation === generation) this.receiveCodex(message, rpc)
-      })
-      let stderr = ''
-      channel.stderr.on('data', (data: Buffer) => {
-        stderr = (stderr + data.toString()).slice(-8192)
-      })
-      channel.on('close', () => {
-        if (this.codex && this.codex !== rpc) return
-        if (this.codex === rpc) {
-          this.codex = undefined
+      const rpc = new RPC(
+        channel,
+        (message) => {
+          if (this.generation === generation && this.codexGeneration === codexGeneration)
+            this.receiveCodex(message, rpc)
+        },
+        (error) => {
+          this.codexTransports.delete(rpc)
+          if (this.codexGeneration !== codexGeneration || this.generation !== generation) return
+          if (this.codex === rpc) this.codex = undefined
           this.threads.clear()
-        }
-        if (this.generation !== generation) return
-        for (const [id, s] of this.sessions)
-          if (s.input.provider === 'codex' && s.busy && !s.stopRequested) {
-            s.busy = false
-            s.approvals.clear()
-            this.event(id, {
-              type: 'error',
-              text: stderr || 'Codex closed the connection. Reconnect and try again.',
-            })
-          }
-      })
+          // Invalidate all turns immediately, without waiting for the remote SSH
+          // close acknowledgement, which can arrive after a replacement starts.
+          for (const [id, session] of this.sessions)
+            if (session.input.provider === 'codex' && session.busy && !session.stopRequested) {
+              session.busy = false
+              session.approvals.clear()
+              this.event(id, { type: 'error', text: error.message })
+            }
+        },
+      )
+      this.codexTransports.add(rpc)
       try {
         await rpc.request('initialize', {
           clientInfo: { name: 'life_desktop', title: 'Life', version: LIFE_VERSION },
@@ -224,7 +187,7 @@ export class Agents {
         this.codex = rpc
         return rpc
       } catch (error) {
-        channel.close()
+        rpc.close(error instanceof Error ? error : new Error(String(error)))
         throw error
       }
     })()
@@ -458,15 +421,18 @@ export class Agents {
       appliedModel: old?.appliedModel,
       appliedReasoningEffort: old?.appliedReasoningEffort,
       phase: 'initializing',
+      initialization: new AbortController(),
     }
     this.sessions.set(input.sessionId, session)
-    const startup =
-      input.provider === 'codex' ? this.startCodex(session) : this.startClaude(session)
+    const startup = untilCancelled(
+      input.provider === 'codex' ? this.startCodex(session) : this.startClaude(session),
+      session.initialization.signal,
+    )
     session.startup = startup
     try {
       await startup
     } catch (error) {
-      if (!session.stopRequested) {
+      if (!session.stopRequested && this.sessions.get(input.sessionId) === session) {
         session.busy = false
         throw error
       }
@@ -514,14 +480,25 @@ export class Agents {
     if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     if (!session.remoteId || !this.threads.has(session.remoteId)) {
       const resuming = Boolean(session.remoteId)
-      const result = await rpc.request(session.remoteId ? 'thread/resume' : 'thread/start', {
-        ...input.providerOptions?.thread,
-        ...(session.remoteId ? { threadId: session.remoteId } : {}),
-        cwd: session.workspace,
-        approvalPolicy,
-        sandbox,
-        ...(threadModel ? { model: threadModel } : {}),
+      this.event(input.sessionId, {
+        type: 'status',
+        text: resuming ? 'Reopening the saved Codex conversation…' : 'Starting Codex…',
       })
+      const result = await rpc.request(
+        session.remoteId ? 'thread/resume' : 'thread/start',
+        {
+          ...input.providerOptions?.thread,
+          // Life persists its own message history. Hydrating every remote turn can
+          // overflow the protocol frame and block resuming large conversations.
+          ...(session.remoteId ? { threadId: session.remoteId, excludeTurns: true } : {}),
+          cwd: session.workspace,
+          approvalPolicy,
+          sandbox,
+          ...(threadModel ? { model: threadModel } : {}),
+        },
+        60000,
+        session.initialization.signal,
+      )
       if (this.sessions.get(input.sessionId) !== session)
         throw new Error('SSH connection cancelled')
       const responseModel = string(result.model) || threadModel || ''
@@ -545,8 +522,13 @@ export class Agents {
         !this.codexDefaultTiers.has(responseModel)
       )
         this.codexDefaultTiers.set(responseModel, result.serviceTier)
-      session.remoteId = string(object(result.thread).id)
-      if (!session.remoteId) throw new Error('Codex did not return a thread ID')
+      const returnedId = string(object(result.thread).id)
+      if (!returnedId) throw new Error('Codex did not return a thread ID')
+      if (resuming && returnedId !== session.remoteId)
+        throw new Error(
+          'Codex returned a different conversation while resuming. Your saved thread is unchanged.',
+        )
+      session.remoteId = returnedId
       this.threads.set(session.remoteId, input.sessionId)
       this.event(input.sessionId, { type: 'session', remoteId: session.remoteId })
     }
@@ -608,6 +590,10 @@ export class Agents {
     const method = string(message.method)
     const params = object(message.params)
     const remoteId = string(params.threadId || object(params.thread).id)
+    if (method === 'thread/closed') {
+      this.threads.delete(remoteId)
+      return
+    }
     const sessionId = this.threads.get(remoteId)
     if (!sessionId) {
       if (message.id != null && method)
@@ -1040,56 +1026,95 @@ export class Agents {
     }
   }
   private async stopSession(sessionId: string, session: Session) {
+    const generation = this.generation
+    const rpc = this.codex
+    const ownsSession = () =>
+      this.generation === generation && this.sessions.get(sessionId) === session
     // No user prompt has been sent during initialization. Finish immediately;
     // the startup checks the turn identity before issuing any remote work.
     if (session.phase === 'initializing') {
-      session.channel?.signal('TERM')
-      session.channel?.close()
+      session.initialization.abort()
+      for (const pending of session.controls.values()) {
+        clearTimeout(pending.timer)
+        pending.reject(new Error('Agent startup cancelled'))
+      }
+      session.controls.clear()
+      const channel = session.channel
+      session.channel = undefined
+      try {
+        channel?.signal('TERM')
+      } catch {}
+      try {
+        channel?.close()
+      } catch {}
       session.busy = false
       session.approvals.clear()
       this.event(sessionId, { type: 'complete', status: 'interrupted' })
       return
     }
     await session.startup?.catch(() => {})
-    if (this.sessions.get(sessionId) !== session) return
-    for (const id of [...session.approvals.keys()]) await this.respond(sessionId, id, false)
+    if (!ownsSession()) return
+    for (const id of [...session.approvals.keys()]) {
+      if (!ownsSession()) return
+      if (session.approvals.has(id)) {
+        try {
+          await this.respond(sessionId, id, false)
+        } catch (error) {
+          if (!ownsSession()) return
+          throw error
+        }
+      }
+      if (!ownsSession()) return
+    }
     if (
       session.input.provider === 'codex' &&
       session.turnId &&
       !session.ignoredTurns.has(session.turnId)
     ) {
       try {
-        await this.codex?.request(
+        await rpc?.request(
           'turn/interrupt',
           { threadId: session.remoteId, turnId: session.turnId },
           10000,
         )
+        if (!ownsSession()) return
       } catch (error) {
+        if (!ownsSession()) return
         // A failed interrupt must not leave the remote agent silently running.
         if (!session.ignoredTurns.has(session.turnId)) {
-          this.codex?.channel.signal('TERM')
-          this.codex?.channel.close()
+          rpc?.close(error instanceof Error ? error : new Error(String(error)))
+          this.event(sessionId, {
+            type: 'status',
+            text: `Codex interruption failed; its connection was closed. ${(error as Error).message}`,
+          })
         }
-        this.event(sessionId, {
-          type: 'status',
-          text: `Codex interruption failed; its connection was closed. ${(error as Error).message}`,
-        })
       }
+      if (!ownsSession()) return
       session.ignoredTurns.add(session.turnId)
     } else if (session.channel) {
       const channel = session.channel
       try {
         await this.claudeControl(session, { subtype: 'interrupt' }, 10000)
+        if (!ownsSession()) return
       } catch (error) {
+        if (!ownsSession()) return
         this.event(sessionId, {
           type: 'status',
           text: `Claude did not acknowledge the interrupt; its process was terminated. ${(error as Error).message}`,
         })
       } finally {
-        channel.signal('TERM')
-        channel.close()
+        if (ownsSession() && session.channel === channel) {
+          session.channel = undefined
+          try {
+            channel.signal('TERM')
+          } catch {}
+          try {
+            channel.close()
+          } catch {}
+        }
       }
     }
+    if (!ownsSession()) return
     session.busy = false
     session.approvals.clear()
     this.event(sessionId, { type: 'complete', status: 'interrupted' })
@@ -1100,6 +1125,7 @@ export class Agents {
     await this.stop(sessionId)
     if (this.sessions.get(sessionId) !== session) return
     session.stopRequested = true
+    session.initialization.abort()
     session.channel?.signal('TERM')
     session.channel?.close()
     for (const pending of session.controls.values()) {
@@ -1118,8 +1144,9 @@ export class Agents {
   }
   close(reason = 'SSH disconnected. Reconnect to continue this thread.') {
     this.generation++
-    this.codex?.channel.signal('TERM')
-    this.codex?.channel.close()
+    this.codexGeneration++
+    for (const rpc of this.codexTransports) rpc.close(new Error(reason))
+    this.codexTransports.clear()
     this.codex = undefined
     this.codexStarting = undefined
     this.defaultCodexModel = undefined
@@ -1153,6 +1180,7 @@ export class Agents {
         })
       session.busy = false
       session.stopRequested = true
+      session.initialization.abort()
     }
     this.sessions.clear()
   }

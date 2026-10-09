@@ -14,6 +14,7 @@ import remarkGfm from 'remark-gfm'
 import type { Provider, AgentEvent } from '../../shared/types'
 import type { Message } from '../state'
 import { ProviderIcon } from './Icons'
+import { AttachmentList } from './ThreadAttachments'
 export function MessageView({ message, provider }: { message: Message; provider: Provider }) {
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -44,18 +45,21 @@ export function MessageView({ message, provider }: { message: Message; provider:
       </div>
     )
   return (
-    <article className={`message ${message.role}`}>
+    <article
+      className={`message ${message.role}`}
+      data-message-id={message.id}
+      tabIndex={-1}
+      aria-label={message.role === 'user' ? 'Your message' : 'Agent message'}
+    >
       <div className="message-label">
-        {message.role === 'user' ? (
-          <span className="user-avatar">Y</span>
-        ) : (
-          <span className={`agent-avatar ${provider}`}>
-            <ProviderIcon provider={provider} size={16} />
-          </span>
-        )}
-        <strong>
-          {message.role === 'user' ? 'You' : provider === 'codex' ? 'Codex' : 'Claude Code'}
-        </strong>
+        {message.role !== 'user' ? (
+          <>
+            <span className={`agent-avatar ${provider}`}>
+              <ProviderIcon provider={provider} brand size={16} />
+            </span>
+            <strong>{provider === 'codex' ? 'Codex' : 'Claude Code'}</strong>
+          </>
+        ) : null}
         <button
           className="icon-button copy-message"
           aria-label="Copy message"
@@ -86,6 +90,7 @@ export function MessageView({ message, provider }: { message: Message; provider:
           {message.text}
         </ReactMarkdown>
       </div>
+      <AttachmentList attachments={message.attachments || []} />
     </article>
   )
 }

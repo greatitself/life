@@ -12,7 +12,8 @@
 const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
 const { mkdtemp, mkdir, readFile, readdir, rm, writeFile } = require('node:fs/promises')
-const { join, resolve } = require('node:path')
+const { dirname, join, resolve } = require('node:path')
+const { createHash } = require('node:crypto')
 const { tmpdir } = require('node:os')
 const { createServer } = require('node:http')
 const { spawn, spawnSync } = require('node:child_process')
@@ -176,10 +177,14 @@ export function activityLabel(activity: ThreadActivity): string {
     '--disable-dev-shm-usage',
   ]
   const rendererErrors = []
+  const priorRendererEvents = []
+  const nativeLogs = []
+  const attachmentDirectories = new Set()
   let application
   let page
   let phase = 'launch'
   let failed = false
+  const progressTimer = setInterval(() => console.log(`Desktop smoke phase: ${phase}`), 30000)
 
   const launch = async () => {
     application = await electron.launch({
@@ -193,6 +198,15 @@ export function activityLabel(activity: ThreadActivity): string {
       },
       timeout: 30000,
     })
+    for (const [stream, output] of [
+      ['stdout', application.process().stdout],
+      ['stderr', application.process().stderr],
+    ])
+      output?.on('data', (chunk) => {
+        nativeLogs.push({ stream, text: String(chunk).slice(-16000) })
+        while (nativeLogs.reduce((size, entry) => size + entry.text.length, 0) > 64000)
+          nativeLogs.shift()
+      })
     page = await application.firstWindow()
     page.setDefaultTimeout(15000)
     page.on('pageerror', (error) => rendererErrors.push(error.message))
@@ -208,6 +222,53 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.equal(await page.evaluate(() => typeof window.relay), 'object')
     assert.equal(await page.evaluate(() => typeof window.require), 'undefined')
     assert.equal(await application.evaluate(({ app }) => app.getVersion()), metadata.version)
+    const nativeEnvironment = await application.evaluate(() => ({
+      pid: process.pid,
+      display: process.env.DISPLAY,
+      xauthority: process.env.XAUTHORITY,
+    }))
+    await writeFile(
+      join(artifacts, 'desktop-native-launch-proof.json'),
+      JSON.stringify(
+        {
+          version: metadata.version,
+          packaged: Boolean(selectedBinary),
+          testPid: process.pid,
+          testDisplay: process.env.DISPLAY,
+          nativeEnvironment,
+        },
+        null,
+        2,
+      ),
+    )
+    await application.evaluate(({ app, BrowserWindow }) => {
+      const events = []
+      const windows = []
+      globalThis.__lifeRendererProof = { events, windows, expected: false }
+      const observe = (window) => {
+        windows.push({ type: 'created', id: window.id })
+        window.webContents.on('did-finish-load', () => {
+          windows.push({ type: 'loaded', id: window.id })
+        })
+        window.webContents.on('did-fail-load', (_event, code, description) => {
+          windows.push({ type: 'load-failed', id: window.id, code, description })
+        })
+        window.on('closed', () => windows.push({ type: 'closed', id: window.id }))
+        window.webContents.on('render-process-gone', (_event, detail) => {
+          events.push({
+            type: 'render-process-gone',
+            reason: detail.reason,
+            exitCode: detail.exitCode,
+            expected: globalThis.__lifeRendererProof.expected,
+          })
+        })
+        window.on('unresponsive', () => {
+          events.push({ type: 'unresponsive', expected: globalThis.__lifeRendererProof.expected })
+        })
+      }
+      for (const window of BrowserWindow.getAllWindows()) observe(window)
+      app.on('browser-window-created', (_event, window) => observe(window))
+    })
     const isolation = await application.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences(),
     )
@@ -216,15 +277,83 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.equal(isolation.sandbox, true)
   }
   const navigation = () => page.getByRole('navigation', { name: 'Workspace views' })
-  const map = () => navigation().getByRole('button', { name: 'Map', exact: true }).click()
-  const workspace = () =>
-    navigation().getByRole('button', { name: 'Workspace', exact: true }).click()
-  const filesPanel = async () => {
-    await page
-      .locator('.workspace-panel .workspace-view-tabs')
-      .getByRole('button', { name: 'Files', exact: true })
+  const map = async () => {
+    const labels = (await configuration()).config.labels
+    const name = labels.researchTitle === 'Research map' ? 'Map' : labels.researchTitle
+    await navigation().getByRole('button', { name, exact: true }).click()
+  }
+  const workspace = async () => {
+    const labels = (await configuration()).config.labels
+    const name = labels.workspaceTitle === 'Agent workspace' ? 'Agents' : labels.workspaceTitle
+    await navigation().getByRole('button', { name, exact: true }).click()
+  }
+  const surface = async (name) => {
+    const expand = page.getByRole('button', { name: 'Expand workspace sidebar', exact: true })
+    if (await expand.isVisible()) await expand.click()
+    const tab = page.locator('.surface-tabs').getByRole('tab', { name, exact: true })
+    if (await tab.count()) {
+      await tab.click()
+      return
+    }
+    const picker = page.locator('.surface-picker')
+    if (!(await picker.isVisible()))
+      await page.getByRole('button', { name: 'Open a surface', exact: true }).click()
+    await picker.getByRole('button', { name: new RegExp(`^${name}(?:\\s|$)`) }).click()
+    await tab.waitFor()
+  }
+  const filesPanel = () => surface('Files')
+  const selectModel = async (provider, id) => {
+    const names = {
+      codex: { '': 'Codex default', 'fixture-model': 'Fixture Codex' },
+      claude: {
+        '': 'Claude default',
+        default: 'Default',
+        opus: 'Opus',
+        sonnet: 'Sonnet',
+        haiku: 'Haiku',
+      },
+    }
+    await page.getByRole('combobox', { name: /^Model:/ }).click()
+    const option = page
+      .locator('.reference-select-content')
+      .getByRole('option', { name: names[provider][id] || id, exact: true })
+    await option.waitFor()
+    await option.click()
+  }
+  const runMenu = () => page.locator('.reference-run-menu[role="menu"]')
+  const selectRunChoice = async (kind, value) => {
+    await page.getByRole('button', { name: /^Reasoning:/ }).click()
+    const labels = {
+      low: 'Low',
+      high: 'High',
+      max: 'Max',
+      xhigh: 'Extra high',
+      fast: 'Fast',
+      default: 'Standard',
+      '': 'Default',
+    }
+    await runMenu()
+      .getByRole('group')
+      .nth(kind === 'effort' ? 0 : 1)
+      .getByRole('menuitemradio', { name: labels[value] || value, exact: true })
       .click()
   }
+  const selectPermission = async (value) => {
+    const labels = { review: 'Supervised', edit: 'Auto-accept edits', plan: 'Plan only' }
+    await page.getByRole('combobox', { name: /^Agent permission mode:/ }).click()
+    await page
+      .locator('.reference-permission-menu')
+      .getByRole('option', { name: new RegExp(`^${labels[value]}(?:[.\\s]|$)`) })
+      .click()
+  }
+  const runControlSnapshot = () =>
+    page
+      .locator('.reference-run-controls')
+      .evaluate((element) =>
+        Array.from(element.querySelectorAll('[role="combobox"], button[aria-haspopup="menu"]')).map(
+          (control) => ({ tag: control.tagName, label: control.getAttribute('aria-label') }),
+        ),
+      )
   const configuration = () => page.evaluate(() => window.relay.customization.get())
   const openSettings = async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).first().click()
@@ -233,6 +362,26 @@ export function activityLabel(activity: ThreadActivity): string {
     return dialog
   }
   const closeDialog = () => page.keyboard.press('Escape')
+  const saveNativeDownload = async (button, path) => {
+    await rm(path, { force: true })
+    await application.evaluate(({ BrowserWindow }, file) => {
+      globalThis.__lifeBackupDownload = undefined
+      BrowserWindow.getAllWindows()[0].webContents.session.once('will-download', (_event, item) => {
+        globalThis.__lifeBackupDownload = { filename: item.getFilename(), state: 'started' }
+        item.setSavePath(file)
+        item.once('done', (_done, state) => {
+          globalThis.__lifeBackupDownload.state = state
+        })
+      })
+    }, path)
+    await button.click()
+    await waitUntil(
+      async () =>
+        (await application.evaluate(() => globalThis.__lifeBackupDownload))?.state === 'completed',
+      'native extension backup download completes',
+    )
+    return JSON.parse(await readFile(path, 'utf8'))
+  }
   const waitForGraph = async () => {
     await page.locator('.research-graph-svg svg g.node').first().waitFor()
     await page.locator('.research-rendering').waitFor({ state: 'hidden' })
@@ -258,11 +407,7 @@ export function activityLabel(activity: ThreadActivity): string {
     path = input.workspace,
     previousWorkspace,
   } = {}) => {
-    if (reopen)
-      await page
-        .locator('.workspace-header')
-        .getByRole('button', { name: 'Select project', exact: true })
-        .click()
+    if (reopen) await page.getByRole('button', { name: 'Add project', exact: true }).click()
     const picker = page.getByRole('dialog', { name: 'Select a project', exact: true })
     await picker.waitFor()
     assert.equal(
@@ -468,6 +613,9 @@ export function activityLabel(activity: ThreadActivity): string {
         ),
       'offline Life conversation persisted',
     )
+    priorRendererEvents.push(
+      ...(await application.evaluate(() => globalThis.__lifeRendererProof.events)),
+    )
     await application.close()
     application = undefined
     await launch()
@@ -629,7 +777,11 @@ export function activityLabel(activity: ThreadActivity): string {
     await initialPicker.getByRole('button', { name: 'Choose later', exact: true }).click()
     await initialPicker.waitFor({ state: 'hidden' })
     await workspace()
-    await page.locator('.composer-worktree-strip .status-dot.online').waitFor()
+    await page.locator('.composer-machine-status').waitFor()
+    assert.equal(
+      await page.locator('.composer-machine-status').getAttribute('title'),
+      `${input.username}@${input.host}`,
+    )
     const profiles = await page.evaluate(() => window.relay.profiles.list())
     assert.equal(profiles.length, 1)
     assert.equal(profiles[0].password, undefined)
@@ -694,6 +846,17 @@ export function activityLabel(activity: ThreadActivity): string {
         (request) => request.host === '127.0.0.1' && request.port === remoteServicePort,
       ),
     )
+    await application.evaluate(async ({ BrowserWindow, clipboard }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      window.show()
+      window.focus()
+      await clipboard.clear()
+    })
+    await page.bringToFront()
+    await waitUntil(
+      () => page.evaluate(() => document.hasFocus()),
+      'the copy action has native focus',
+    )
     await portsDialog
       .getByRole('button', {
         name: `Copy local address for remote port ${remoteServicePort}`,
@@ -702,6 +865,22 @@ export function activityLabel(activity: ThreadActivity): string {
       .click()
     const expectedClipboard = `127.0.0.1:${forwarded.localPort}`
     await portsDialog.getByText(`Copied ${expectedClipboard}`, { exact: true }).waitFor()
+    await writeFile(
+      join(artifacts, 'desktop-clipboard-proof.json'),
+      JSON.stringify(
+        {
+          expectedClipboard,
+          display: process.env.DISPLAY,
+          native: await application.evaluate(async ({ BrowserWindow, clipboard }) => ({
+            display: process.env.DISPLAY,
+            focused: BrowserWindow.getAllWindows()[0].isFocused(),
+            clipboard: await clipboard.readText(),
+          })),
+        },
+        null,
+        2,
+      ),
+    )
     await waitUntil(
       async () =>
         (await application.evaluate(({ clipboard }) => clipboard.readText())) === expectedClipboard,
@@ -796,10 +975,7 @@ export function activityLabel(activity: ThreadActivity): string {
     )
     await writeFile(join(fixture.workspace, 'untracked-proof.txt'), 'Native SSH untracked file\n')
     await writeFile(join(fixture.workspace, 'src/thread-activity.ts'), activityReviewed)
-    await page
-      .locator('.workspace-panel')
-      .getByRole('button', { name: 'Diff', exact: true })
-      .click()
+    await surface('Diff')
     await page.getByRole('button', { name: 'Refresh remote workspace', exact: true }).click()
     await page
       .locator('.workspace-diff-line.diff-added')
@@ -880,7 +1056,9 @@ export function activityLabel(activity: ThreadActivity): string {
       async () => (await page.locator('.message.assistant').count()) > previousResponses,
       'active Claude streaming before interruption',
     )
-    await page.getByRole('button', { name: 'Stop agent', exact: true }).click()
+    await page
+      .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+      .click()
     await waitForSend()
     await page.evaluate(() => {
       globalThis.__lifeSmokeTerminal = ''
@@ -888,7 +1066,7 @@ export function activityLabel(activity: ThreadActivity): string {
         globalThis.__lifeSmokeTerminal += data
       })
     })
-    await page.getByRole('button', { name: 'Toggle remote terminal', exact: true }).click()
+    await surface('Terminal')
     await waitUntil(
       async () =>
         /bash-[\d.]+[#$] /.test(await page.evaluate(() => globalThis.__lifeSmokeTerminal)),
@@ -904,7 +1082,10 @@ export function activityLabel(activity: ThreadActivity): string {
         ),
       'remote terminal output',
     )
-    await page.getByRole('button', { name: 'Close terminal', exact: true }).click()
+    await page
+      .locator('.terminal-panel')
+      .getByRole('button', { name: 'Close terminal', exact: true })
+      .click()
     await page.evaluate(() => globalThis.__lifeSmokeTerminalUnsubscribe())
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
     await page.getByRole('dialog', { name: 'Find a thread' }).waitFor()
@@ -912,7 +1093,7 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.ok((await page.locator('.search-results button').count()) >= 2)
     await closeDialog()
 
-    phase = 'changing projects preserves the existing conversation scope'
+    phase = 'repeated project creation and automatic original-thread project restoration'
     const readProjectThread = () =>
       page.evaluate(() =>
         JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
@@ -930,43 +1111,90 @@ export function activityLabel(activity: ThreadActivity): string {
     const originalProjectThread = await readProjectThread()
     assert.equal(originalProjectThread.workspace, input.workspace)
     const otherProject = join(input.workspace, 'src')
-    await chooseProject({ reopen: true, path: otherProject, previousWorkspace: input.workspace })
+    await page.getByRole('button', { name: 'Add project', exact: true }).click()
+    await chooseProject({ path: otherProject, previousWorkspace: input.workspace })
+    await page.locator('.empty-conversation').waitFor()
+    assert.equal(await page.locator('.app-shell').count(), 1)
+    assert.deepEqual(rendererErrors, [])
     const otherFiles = await page.evaluate(() => window.relay.files.list())
     assert.deepEqual(
       otherFiles.map((file) => file.name),
       ['index.ts', 'thread-activity.ts'],
     )
+    await send('native-second-project thread')
+    await waitForSend()
+    const readSecondProjectThread = () =>
+      page.evaluate(() =>
+        JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+          (thread) => thread.title === 'native-second-project thread',
+        ),
+      )
+    await waitUntil(
+      async () => Boolean((await readSecondProjectThread())?.remoteId),
+      'second project thread and remote identity persisted',
+    )
+    const secondProjectThread = await readSecondProjectThread()
+    assert.ok(secondProjectThread?.remoteId)
+    assert.equal(secondProjectThread.workspace, otherProject)
+    const sidebarThread = (thread) =>
+      page.locator('.project-list').getByRole('button', {
+        name: new RegExp(
+          `^${thread.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, ${thread.provider === 'claude' ? 'Claude Code' : 'OpenAI · Codex'},`,
+        ),
+      })
+    // Search selection and direct sidebar selection share automatic workspace restoration.
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
     await page.getByRole('dialog', { name: 'Find a thread' }).waitFor()
     await page.getByRole('textbox', { name: 'Search saved threads' }).fill('question')
-    await page.locator('.search-results button').filter({ hasText: 'Claude Code' }).click()
     const originalConversationLog = await fixture.log()
-    await send('project mismatch must not reach the agent')
-    const scopedPicker = page.getByRole('dialog', { name: 'Select a project', exact: true })
-    await scopedPicker.waitFor()
-    assert.equal(
-      await scopedPicker
-        .getByRole('textbox', { name: 'Project directory', exact: true })
-        .inputValue(),
-      input.workspace,
-    )
-    const unchangedProjectThread = await readProjectThread()
-    assert.equal(unchangedProjectThread.workspace, input.workspace)
-    assert.equal(unchangedProjectThread.remoteId, originalProjectThread.remoteId)
-    assert.deepEqual(unchangedProjectThread.messages, originalProjectThread.messages)
-    assert.deepEqual(
-      await fixture.log(),
-      originalConversationLog,
-      'A project mismatch never sends a provider turn',
-    )
-    await chooseProject({ previousWorkspace: otherProject })
-    await send('hello')
-    await waitForSend()
+    await page.locator('.search-results button').filter({ hasText: 'Claude Code' }).click()
     await waitUntil(
       async () =>
-        (await readProjectThread()).messages.length > originalProjectThread.messages.length,
-      'old conversation resumes in its original project',
+        (await page.evaluate(() => window.relay.connection.state())).workspace === input.workspace,
+      'thread search restores its saved project automatically',
     )
+    assert.equal(
+      await page.getByRole('dialog', { name: 'Select a project', exact: true }).count(),
+      0,
+    )
+    const restored = await readProjectThread()
+    assert.equal(restored.remoteId, originalProjectThread.remoteId)
+    assert.equal(restored.workspace, input.workspace)
+    assert.deepEqual(restored.messages, originalProjectThread.messages)
+    assert.equal(
+      (await fixture.log())
+        .slice(originalConversationLog.length)
+        .filter((entry) => entry.message?.method === 'turn/start').length,
+      0,
+      'Selecting a thread restores context without sending a new turn.',
+    )
+    for (let index = 0; index < 6; index++) {
+      await page.getByRole('button', { name: 'Add project', exact: true }).click()
+      await chooseProject({ path: otherProject, previousWorkspace: input.workspace })
+      await page.locator('.empty-conversation').waitFor()
+      assert.equal(await page.locator('.app-shell').count(), 1)
+      await page
+        .locator('.project-list .thread-row')
+        .filter({ hasText: secondProjectThread.title })
+        .click()
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).workspace === otherProject,
+        'second saved thread restores its project',
+      )
+      await sidebarThread(originalProjectThread).click()
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).workspace ===
+          input.workspace,
+        'original sidebar thread restores its original project',
+      )
+      assert.equal((await readProjectThread()).remoteId, originalProjectThread.remoteId)
+      assert.equal(await page.locator('.app-shell').count(), 1)
+      assert.deepEqual(rendererErrors, [])
+    }
+    await send('hello')
+    await waitForSend()
     assert.equal((await readProjectThread()).id, originalProjectThread.id)
     assert.equal((await readProjectThread()).remoteId, originalProjectThread.remoteId)
     assert.equal((await readProjectThread()).workspace, input.workspace)
@@ -976,8 +1204,285 @@ export function activityLabel(activity: ThreadActivity): string {
         .some(
           (entry) =>
             entry.provider === 'claude' &&
+            entry.cwd === input.workspace &&
             entry.argv?.includes(`--resume=${originalProjectThread.remoteId}`),
         ),
+    )
+    await writeFile(
+      join(artifacts, 'desktop-project-restoration-proof.json'),
+      JSON.stringify(
+        {
+          iterations: 6,
+          original: {
+            id: originalProjectThread.id,
+            remoteId: originalProjectThread.remoteId,
+            workspace: input.workspace,
+          },
+          second: {
+            id: secondProjectThread.id,
+            remoteId: secondProjectThread.remoteId,
+            workspace: otherProject,
+          },
+          rendererErrors,
+        },
+        null,
+        2,
+      ),
+    )
+
+    phase =
+      'queued follow-ups, selected settings, interruption, attachment uploads and nested controls'
+    const queueProof = []
+    const textReference = Buffer.from('Native Life reference data\n'.repeat(9000))
+    const imageReference = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#123456"/></svg>',
+    )
+    const promptFrom = (entry) =>
+      entry.message?.method === 'turn/start'
+        ? entry.message.params.input[0].text
+        : entry.message?.type === 'user'
+          ? entry.message.message.content[0].text
+          : undefined
+    for (const provider of ['codex', 'claude']) {
+      await page.getByRole('button', { name: 'New thread', exact: true }).click()
+      await page
+        .getByRole('button', {
+          name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
+        })
+        .click()
+      const startLog = (await fixture.log()).length
+      await send('queue-delay')
+      const queueButton = page.getByRole('button', { name: 'Queue follow-up message', exact: true })
+      await queueButton.waitFor()
+      await composer().fill('native-auto-follow-up')
+      await queueButton.click()
+      const queuedRegion = page.getByRole('region', {
+        name: 'Queued follow-up messages',
+        exact: true,
+      })
+      await queuedRegion.waitFor()
+      await waitUntil(
+        async () =>
+          (await fixture.log())
+            .slice(startLog)
+            .some((entry) => promptFrom(entry) === 'native-auto-follow-up'),
+        'queued follow-up sends automatically after the current turn finishes',
+      )
+      await waitForSend()
+      await queuedRegion.waitFor({ state: 'hidden' })
+      assert.equal(
+        (await fixture.log())
+          .slice(startLog)
+          .filter((entry) => promptFrom(entry) === 'native-auto-follow-up').length,
+        1,
+      )
+      await send('hang')
+      await queueButton.waitFor()
+      await composer().fill('native-removed-follow-up')
+      await queueButton.click()
+      await queuedRegion.getByRole('button', { name: 'Remove queued message', exact: true }).click()
+      await queuedRegion.waitFor({ state: 'hidden' })
+      assert.equal(
+        (await fixture.log())
+          .slice(startLog)
+          .filter((entry) => promptFrom(entry) === 'native-removed-follow-up').length,
+        0,
+      )
+      await selectModel(provider, provider === 'codex' ? 'fixture-model' : 'opus')
+      await selectRunChoice('effort', provider === 'codex' ? 'high' : 'max')
+      await selectRunChoice('speed', 'fast')
+      await page.getByText('New settings ready for the next message', { exact: true }).waitFor()
+      assert.equal(
+        await page.getByRole('combobox', { name: /^Agent permission mode:/ }).isDisabled(),
+        true,
+      )
+      await composer().fill('native-interrupt-follow-up')
+      await queueButton.click()
+      await queuedRegion
+        .getByRole('button', {
+          name: 'Interrupt current response and send this message now',
+          exact: true,
+        })
+        .click()
+      await waitUntil(
+        async () =>
+          (await fixture.log())
+            .slice(startLog)
+            .some((entry) => promptFrom(entry) === 'native-interrupt-follow-up'),
+        'explicit Send now interrupts then resumes with new settings',
+      )
+      await waitForSend()
+      await queuedRegion.waitFor({ state: 'hidden' })
+      const selectedTurn = (await fixture.log())
+        .slice(startLog)
+        .find((entry) => promptFrom(entry) === 'native-interrupt-follow-up')
+      if (provider === 'codex') {
+        assert.equal(selectedTurn.message.params.effort, 'high')
+        assert.equal(selectedTurn.message.params.serviceTier, 'fast')
+      } else {
+        const command = [...(await fixture.log()).slice(startLog)]
+          .reverse()
+          .find((entry) => entry.provider === 'claude' && entry.argv?.includes('--model=opus'))
+        assert.ok(command.argv.includes('--effort=max'))
+        assert.equal(
+          JSON.parse(command.argv[command.argv.indexOf('--settings') + 1]).fastMode,
+          true,
+        )
+      }
+      await send('hang')
+      await queueButton.waitFor()
+      await composer().fill('native-paused-follow-up')
+      await queueButton.click()
+      await page
+        .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+        .click()
+      await waitForSend()
+      await queuedRegion.getByText('Paused', { exact: true }).waitFor()
+      await waitUntil(
+        async () =>
+          page.evaluate(() =>
+            JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').some((thread) =>
+              thread.queue?.some(
+                (message) => message.text === 'native-paused-follow-up' && message.paused,
+              ),
+            ),
+          ),
+        'paused follow-up persisted before renderer reload',
+      )
+      await page.reload()
+      await page.locator('.app-shell').waitFor()
+      await queuedRegion.getByText('Paused', { exact: true }).waitFor()
+      assert.equal(
+        (await fixture.log())
+          .slice(startLog)
+          .filter((entry) => promptFrom(entry) === 'native-paused-follow-up').length,
+        0,
+        'Reload never replays a queued message automatically.',
+      )
+      await queuedRegion
+        .getByRole('button', { name: 'Send this queued message now', exact: true })
+        .click()
+      await waitUntil(
+        async () =>
+          (await fixture.log())
+            .slice(startLog)
+            .some((entry) => promptFrom(entry) === 'native-paused-follow-up'),
+        'paused follow-up only sends after explicit retry',
+      )
+      await waitForSend()
+      await queuedRegion.waitFor({ state: 'hidden' })
+      await page.getByLabel('Choose images or files', { exact: true }).setInputFiles([
+        { name: 'native-notes.txt', mimeType: 'text/plain', buffer: textReference },
+        { name: 'native-reference.svg', mimeType: 'image/svg+xml', buffer: imageReference },
+      ])
+      await waitUntil(
+        async () =>
+          (
+            await page.locator('.draft-attachments .life-attachment-transfer').allTextContents()
+          ).filter((text) => text.includes('Uploaded · ready to send')).length === 2,
+        'image and multi-part text references upload in the background',
+      )
+      await page
+        .locator('.draft-attachments')
+        .getByRole('button', { name: 'Preview native-reference.svg', exact: true })
+        .click()
+      const preview = page.getByRole('dialog', { name: 'native-reference.svg', exact: true })
+      await preview.waitFor()
+      assert.equal(await preview.locator('img').evaluate((image) => image.naturalWidth), 4)
+      await page.keyboard.press('Escape')
+      await send('native-attachment-probe')
+      await waitForSend()
+      await page
+        .locator('.markdown')
+        .getByText('Verified 2 remote attachment files.', { exact: true })
+        .waitFor()
+      const evidence = (await fixture.log())
+        .slice(startLog)
+        .find((entry) => entry.attachmentEvidence)?.attachmentEvidence
+      assert.equal(evidence?.length, 2)
+      for (const [name, bytes] of [
+        ['native-notes.txt', textReference],
+        ['native-reference.svg', imageReference],
+      ]) {
+        const file = evidence.find((item) => item.name === name)
+        assert.equal(file.size, bytes.length)
+        assert.equal(file.sha256, createHash('sha256').update(bytes).digest('hex'))
+        attachmentDirectories.add(dirname(file.path))
+      }
+      await page.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f')
+      const finder = page.getByRole('dialog', { name: 'Find in this thread', exact: true })
+      await finder.waitFor()
+      await finder
+        .getByLabel('Search messages in this thread', { exact: true })
+        .fill('native-auto-follow-up')
+      await finder.getByRole('button').filter({ hasText: 'native-auto-follow-up' }).click()
+      await finder.waitFor({ state: 'hidden' })
+      assert.equal(await page.locator('.message.user:focus').count(), 1)
+      const activeCard = () => page.locator('.project-list .thread-card-shell.active')
+      await activeCard().hover()
+      await activeCard().getByRole('button', { name: 'Snooze thread', exact: true }).click()
+      await page.getByRole('menuitem', { name: '30 minutes', exact: true }).click()
+      const arrangements = page.getByRole('region', {
+        name: 'Settled and snoozed threads',
+        exact: true,
+      })
+      await arrangements.locator('summary').filter({ hasText: 'Snoozed (1)' }).click()
+      await arrangements.locator('.thread-card-shell').hover()
+      await arrangements
+        .getByRole('button', { name: 'Change snooze time or wake thread', exact: true })
+        .click()
+      await page.getByRole('menuitem', { name: 'Wake now', exact: true }).click()
+      await activeCard().hover()
+      await activeCard().getByRole('button', { name: 'Settle', exact: true }).click()
+      const settled = arrangements
+        .locator('details')
+        .filter({ has: page.locator('summary').filter({ hasText: 'Settled (1)' }) })
+        .first()
+      if (!(await settled.evaluate((element) => element.open)))
+        await settled.locator('summary').first().click()
+      await settled.locator('.thread-card-shell').hover()
+      await settled.getByRole('button', { name: 'Restore', exact: true }).click()
+      await activeCard().waitFor()
+      await page.getByRole('button', { name: /^Filters, sorting and arrangement/ }).click()
+      const arrangementDialog = page.getByRole('dialog', {
+        name: 'Filters, sorting and arrangement',
+        exact: true,
+      })
+      await arrangementDialog
+        .getByRole('combobox', { name: /^Agent(?:\s|$)/ })
+        .selectOption(provider)
+      await arrangementDialog
+        .getByRole('combobox', { name: /^Arrange by(?:\s|$)/ })
+        .selectOption('provider')
+      await arrangementDialog
+        .getByRole('combobox', { name: /^Sort by(?:\s|$)/ })
+        .selectOption('title')
+      await arrangementDialog.getByRole('button', { name: 'Done', exact: true }).click()
+      const providerName = provider === 'codex' ? 'OpenAI · Codex' : 'Claude Code'
+      assert.ok(
+        (
+          await page
+            .locator('.project-list .thread-row')
+            .evaluateAll((rows) => rows.map((row) => row.getAttribute('aria-label')))
+        ).every((label) => label.includes(providerName)),
+      )
+      await page.getByRole('button', { name: /^Filters, sorting and arrangement/ }).click()
+      await arrangementDialog.getByRole('button', { name: 'Reset', exact: true }).click()
+      await arrangementDialog.getByRole('button', { name: 'Done', exact: true }).click()
+      assert.equal(
+        await page.locator('[data-radix-popper-content-wrapper] [data-state="open"]').count(),
+        0,
+      )
+      assert.deepEqual(rendererErrors, [])
+      queueProof.push({
+        provider,
+        attachmentEvidence: evidence,
+        prompts: (await fixture.log()).slice(startLog).map(promptFrom).filter(Boolean),
+      })
+    }
+    await writeFile(
+      join(artifacts, 'desktop-queue-attachment-proof.json'),
+      JSON.stringify(queueProof, null, 2),
     )
 
     phase = 'discovered provider reasoning and speed choices reach ordinary Life turns'
@@ -990,18 +1495,13 @@ export function activityLabel(activity: ThreadActivity): string {
         .click()
       const selectedModel = provider === 'codex' ? 'fixture-model' : 'opus'
       const selectedEffort = provider === 'codex' ? 'high' : 'max'
-      const modelSelect = page.getByRole('combobox', { name: 'Agent model', exact: true })
-      await waitUntil(
-        async () => (await modelSelect.locator(`option[value="${selectedModel}"]`).count()) === 1,
-        'remote provider model catalog discovered',
-      )
-      await modelSelect.selectOption(selectedModel)
-      const reasoningSelect = page.getByRole('combobox', { name: 'Reasoning effort', exact: true })
-      const speedSelect = page.getByRole('combobox', { name: 'Service tier', exact: true })
-      await reasoningSelect.selectOption(selectedEffort)
-      await speedSelect.selectOption('fast')
-      for (const control of [modelSelect, reasoningSelect, speedSelect])
-        assert.equal(await control.evaluate((element) => element.tagName), 'SELECT')
+      await selectModel(provider, selectedModel)
+      await selectRunChoice('effort', selectedEffort)
+      await selectRunChoice('speed', 'fast')
+      const selectedControls = await runControlSnapshot()
+      assert.equal(selectedControls.length, 3)
+      assert.ok(selectedControls.every((control) => control.tag === 'BUTTON'))
+      await selectPermission('review')
       const controlsBaseline = (await fixture.log()).length
       await send('/life explain customization')
       await waitForSend()
@@ -1050,14 +1550,28 @@ export function activityLabel(activity: ThreadActivity): string {
       }, 'model, reasoning and tier persist on the same ordinary thread')
       const resetBaseline = (await fixture.log()).length
       if (provider === 'claude') {
-        await modelSelect.selectOption('haiku')
-        assert.equal(await reasoningSelect.count(), 0)
-        assert.equal(await speedSelect.locator('option[value="fast"]').count(), 0)
-        assert.equal(await speedSelect.inputValue(), '')
-        await speedSelect.selectOption('default')
+        await selectModel('claude', 'haiku')
+        await page.getByRole('button', { name: /^Reasoning:/ }).click()
+        assert.equal(
+          await runMenu().getByRole('menuitemradio', { name: 'Max', exact: true }).count(),
+          0,
+        )
+        assert.equal(
+          await runMenu().getByRole('menuitemradio', { name: 'Fast', exact: true }).count(),
+          0,
+        )
+        for (const group of await runMenu().getByRole('group').all())
+          assert.equal(
+            await group
+              .getByRole('menuitemradio', { name: 'Default', exact: true })
+              .getAttribute('aria-checked'),
+            'true',
+          )
+        await page.keyboard.press('Escape')
+        await selectRunChoice('speed', 'default')
       } else {
-        await reasoningSelect.selectOption('')
-        await speedSelect.selectOption('')
+        await selectRunChoice('effort', '')
+        await selectRunChoice('speed', '')
       }
       await send('explain customization')
       await waitForSend()
@@ -1080,7 +1594,8 @@ export function activityLabel(activity: ThreadActivity): string {
       assert.equal(await page.locator('.chat-error').count(), 0)
     }
 
-    phase = 'remote ordinary-thread settings, replies, clarification and preserved native selects'
+    phase =
+      'remote ordinary-thread settings, replies, clarification and preserved customized Radix controls'
     const ordinaryLifeThreads = new Map()
     for (const provider of ['codex', 'claude']) {
       await page.getByRole('button', { name: 'New thread', exact: false }).click()
@@ -1105,8 +1620,9 @@ export function activityLabel(activity: ThreadActivity): string {
         .getByText(/Updated Life settings:/)
         .waitFor()
       assert.equal(await page.locator('.chat-error').count(), 0)
-      const nativeSelectCount = await page.locator('.composer-options select').count()
-      assert.ok(nativeSelectCount >= 3)
+      const savedRunControls = await runControlSnapshot()
+      assert.equal(savedRunControls.length, 3)
+      assert.ok(savedRunControls.every((control) => control.tag === 'BUTTON'))
       const unchanged = await configuration()
       const unchangedExtensions = await extensions()
       for (const [prompt, response] of [
@@ -1131,14 +1647,7 @@ export function activityLabel(activity: ThreadActivity): string {
         assert.deepEqual((await configuration()).config, unchanged.config)
         assert.equal((await configuration()).revision, unchanged.revision)
         assert.equal((await extensions()).revision, unchangedExtensions.revision)
-        assert.equal(await page.locator('.composer-options select').count(), nativeSelectCount)
-        for (const label of ['Coding agent', 'Agent model', 'Agent permission mode'])
-          assert.equal(
-            await page
-              .getByRole('combobox', { name: label, exact: true })
-              .evaluate((element) => element.tagName),
-            'SELECT',
-          )
+        assert.deepEqual(await runControlSnapshot(), savedRunControls)
       }
       const remoteLog = (await fixture.log()).slice(harnessBaseline)
       assert.equal(
@@ -1242,7 +1751,9 @@ export function activityLabel(activity: ThreadActivity): string {
         )
       }
       await startHangingLifeTurn()
-      await page.getByRole('button', { name: 'Stop agent', exact: true }).click()
+      await page
+        .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+        .click()
       await waitForSend()
       assert.deepEqual((await configuration()).config, beforeCancellation.config)
       assert.equal((await configuration()).revision, beforeCancellation.revision)
@@ -1277,21 +1788,46 @@ export function activityLabel(activity: ThreadActivity): string {
       const reconnect = page.getByRole('dialog', { name: 'Connect a machine' })
       await reconnect.waitFor()
       assert.equal(await reconnect.getByPlaceholder('~/projects/my-app').count(), 0)
+      const reconnectProfile = (await page.evaluate(() => window.relay.profiles.list())).find(
+        (profile) => profile.id === ordinaryLifeThreads.get(provider).profileId,
+      )
+      assert.ok(reconnectProfile, 'The saved thread references its persisted machine profile.')
+      await reconnect
+        .locator('.saved-profile')
+        .filter({ hasText: reconnectProfile.name })
+        .getByRole('button')
+        .first()
+        .click()
       await waitUntil(
         async () =>
           (await reconnect.getByPlaceholder('dev.example.com').inputValue()) === input.host,
         'saved machine profile selected',
       )
+      assert.equal(await reconnect.getByLabel('Authentication').inputValue(), 'password')
+      assert.equal(await reconnect.getByPlaceholder('Your SSH password').inputValue(), '')
       await reconnect.getByPlaceholder('Your SSH password').fill(input.password)
       await reconnect.getByRole('button', { name: 'Connect machine', exact: true }).click()
       await reconnect.waitFor({ state: 'hidden' })
-      await chooseProject()
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).workspace ===
+          input.workspace,
+        'saved thread project automatically restored after reconnect',
+      )
+      assert.equal(
+        await page.getByRole('dialog', { name: 'Select a project', exact: true }).count(),
+        0,
+      )
       await waitUntil(
         async () =>
           (await page.evaluate(() => window.relay.connection.state())).status === 'connected',
         'saved machine reconnected',
       )
-      await page.locator('.composer-worktree-strip .status-dot.online').waitFor()
+      await page.locator('.composer-machine-status').waitFor()
+      assert.equal(
+        await page.locator('.composer-machine-status').getAttribute('title'),
+        `${input.username}@${input.host}`,
+      )
       assert.equal(await page.getByRole('dialog', { name: 'Trust this machine?' }).count(), 0)
       await send('explain customization')
       await waitForSend()
@@ -1338,7 +1874,8 @@ export function activityLabel(activity: ThreadActivity): string {
         (await page.locator('.chat-error').allTextContents()).map((text) => text.trim()),
         [connectionLoss],
       )
-      phase = 'remote ordinary-thread settings, replies, clarification and preserved native selects'
+      phase =
+        'remote ordinary-thread settings, replies, clarification and preserved customized Radix controls'
     }
     const extended = (await configuration()).config
     assert.equal(extended.commands[0].name, 'Review research')
@@ -1377,7 +1914,7 @@ export function activityLabel(activity: ThreadActivity): string {
       'live theme file reload',
     )
     await page
-      .locator('.research-main .breadcrumbs')
+      .locator('.titlebar-content .workspace-header .breadcrumbs')
       .getByText('Live lab notes', { exact: true })
       .waitFor()
     assert.equal(
@@ -1416,10 +1953,7 @@ export function activityLabel(activity: ThreadActivity): string {
           BrowserWindow.getAllWindows()[0].setBounds({ width: 1728, height: 1080 }),
         )
         await workspace()
-        await page
-          .locator('.workspace-panel')
-          .getByRole('button', { name: 'Diff', exact: true })
-          .click()
+        await surface('Diff')
         await page
           .locator('.workspace-diff-line.diff-added')
           .filter({ hasText: 'firstResponse' })
@@ -1523,7 +2057,9 @@ export function activityLabel(activity: ThreadActivity): string {
           ),
       'delayed provider initialize request',
     )
-    await page.getByRole('button', { name: 'Stop agent', exact: true }).click()
+    await page
+      .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+      .click()
     await waitForSend()
     fixture.initializationDelay = 0
     await send('hello')
@@ -1677,7 +2213,12 @@ export function activityLabel(activity: ThreadActivity): string {
       const applying = page.getByRole('button', { name: 'Applying Life change', exact: true })
       await applying.waitFor()
       assert.equal(await applying.isDisabled(), true)
-      assert.equal(await page.getByRole('button', { name: 'Stop agent', exact: true }).count(), 0)
+      assert.equal(
+        await page
+          .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+          .count(),
+        0,
+      )
       assert.match(await page.locator('.agent-working').textContent(), /Applying Life change/)
       await waitForSend()
       await page
@@ -1717,10 +2258,14 @@ export function activityLabel(activity: ThreadActivity): string {
     await page.screenshot({ path: join(artifacts, 'life-extension.png') })
 
     phase = 'extension hot reload, worker core capabilities and rollback'
+    const hostBorderBaseline = await page
+      .locator('.workspace-header')
+      .evaluate((header) => getComputedStyle(header).borderBottomWidth)
     const revisedExtension = {
       ...generatedExtension,
       version: '2.0.0',
-      hostCSS: '.workspace-header { border-bottom-width: 3px; }',
+      hostCSS:
+        '.app-shell.life-unified-layout .titlebar-content .workspace-header { border-bottom: 3px solid var(--border); }',
       renderer: {
         ...generatedExtension.renderer,
         html: generatedExtension.renderer.html
@@ -1743,6 +2288,8 @@ export function activityLabel(activity: ThreadActivity): string {
       .getByRole('heading', { name: 'Research counter version two', exact: true })
       .waitFor()
     await extensionFrame().getByText('Count: 0', { exact: true }).waitFor()
+    // The HTML arrives before its bridge executes the script and registers click handlers.
+    await extensionFrame().getByText('SSH: connected', { exact: true }).waitFor()
     await waitUntil(
       async () =>
         (await page
@@ -1788,10 +2335,203 @@ export function activityLabel(activity: ThreadActivity): string {
       async () =>
         (await page
           .locator('.workspace-header')
-          .evaluate((header) => getComputedStyle(header).borderBottomWidth)) === '1px',
+          .evaluate((header) => getComputedStyle(header).borderBottomWidth)) === hostBorderBaseline,
       'rollback removes extension host CSS',
     )
     assert.equal(await page.locator('style[data-life-extension]').count(), 0)
+
+    phase = 'gentle native Retry restarts a busy interface without orphaning its agent'
+    await workspace()
+    await page.getByRole('button', { name: 'New thread', exact: false }).click()
+    await page.getByRole('button', { name: 'Codex By OpenAI', exact: true }).click()
+    const retryLogStart = (await fixture.log()).length
+    await send('hang')
+    await page
+      .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+      .waitFor()
+    await waitUntil(
+      async () =>
+        page.evaluate(() =>
+          JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').some(
+            (thread) =>
+              thread.id === localStorage.getItem('life.active-thread.v1') && thread.remoteId,
+          ),
+        ),
+      'busy conversation identity is persisted before native Retry',
+    )
+    const beforeRetry = {
+      connection: await page.evaluate(() => window.relay.connection.state()),
+      extensions: (await extensions()).extensions,
+      thread: await page.evaluate(() => {
+        const active = localStorage.getItem('life.active-thread.v1')
+        return JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+          (thread) => thread.id === active,
+        )
+      }),
+    }
+    assert.ok(beforeRetry.thread?.remoteId)
+    const retryWindow = application.waitForEvent('window', { timeout: 15000 })
+    const retryInvocation = page
+      .evaluate(() => window.relay.window.restart())
+      .catch((error) => {
+        assert.match(error.message, /closed|destroyed|execution context/i)
+      })
+    page = await retryWindow
+    await retryInvocation
+    page.setDefaultTimeout(15000)
+    page.on('pageerror', (error) => rendererErrors.push(error.message))
+    await page.locator('.app-shell').waitFor()
+    await workspace()
+    const afterRetryConnection = await page.evaluate(() => window.relay.connection.state())
+    assert.equal(afterRetryConnection.status, 'connected')
+    assert.equal(afterRetryConnection.profile.id, beforeRetry.connection.profile.id)
+    assert.equal(afterRetryConnection.workspace, beforeRetry.connection.workspace)
+    assert.deepEqual((await extensions()).extensions, beforeRetry.extensions)
+    await waitForSend()
+    await send('native-after-retry')
+    await waitForSend()
+    await waitUntil(
+      async () =>
+        page.evaluate(
+          (id) =>
+            JSON.parse(localStorage.getItem('relay.threads.v1') || '[]')
+              .find((thread) => thread.id === id)
+              ?.messages.some(
+                (message) => message.role === 'user' && message.text === 'native-after-retry',
+              ),
+          beforeRetry.thread.id,
+        ),
+      'the same saved conversation accepts a message after native Retry',
+    )
+    const afterRetryThread = await page.evaluate(
+      (id) =>
+        JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
+          (thread) => thread.id === id,
+        ),
+      beforeRetry.thread.id,
+    )
+    assert.equal(afterRetryThread.remoteId, beforeRetry.thread.remoteId)
+    assert.equal(afterRetryThread.workspace, beforeRetry.thread.workspace)
+    assert.ok(
+      (await fixture.log())
+        .slice(retryLogStart)
+        .some((entry) => promptFrom(entry) === 'native-after-retry'),
+    )
+    assert.equal(
+      await page
+        .locator('.chat-error')
+        .filter({ hasText: /already running/i })
+        .count(),
+      0,
+    )
+    await writeFile(
+      join(artifacts, 'desktop-native-retry-proof.json'),
+      JSON.stringify(
+        {
+          threadId: afterRetryThread.id,
+          remoteId: afterRetryThread.remoteId,
+          workspace: afterRetryConnection.workspace,
+          enabledExtensions: beforeRetry.extensions
+            .filter((extension) => extension.enabled)
+            .map((extension) => extension.id),
+        },
+        null,
+        2,
+      ),
+    )
+
+    phase = 'stock renderer replacement preserves SSH, project, history and enabled extensions'
+    const beforeRendererCrash = {
+      connection: await page.evaluate(() => window.relay.connection.state()),
+      extensions: await extensions(),
+      config: await configuration(),
+      history: await page.evaluate(() =>
+        JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+      ),
+      bounds: await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].getBounds(),
+      ),
+    }
+    const replacementWindow = application.waitForEvent('window', { timeout: 15000 })
+    const rendererTermination = await application.evaluate(({ BrowserWindow }) => {
+      globalThis.__lifeRendererProof.expected = true
+      const owner = BrowserWindow.getAllWindows()[0]
+      const pid = owner.webContents.mainFrame.osProcessId
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid)
+        throw new Error('Refusing to terminate an invalid main-frame renderer PID')
+      const proof = {
+        oldWindowId: owner.id,
+        rendererPid: pid,
+        mainPid: process.pid,
+        method: process.platform === 'linux' ? 'SIGKILL' : 'forcefullyCrashRenderer',
+      }
+      if (process.platform === 'linux') process.kill(pid, 'SIGKILL')
+      else owner.webContents.forcefullyCrashRenderer()
+      return proof
+    })
+    page = await replacementWindow
+    page.setDefaultTimeout(15000)
+    page.on('pageerror', (error) => rendererErrors.push(error.message))
+    await page.locator('.app-shell').waitFor()
+    await application.evaluate(() => {
+      globalThis.__lifeRendererProof.expected = false
+    })
+    const recoveredWindowId = await application.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].id,
+    )
+    assert.notEqual(recoveredWindowId, rendererTermination.oldWindowId)
+    assert.ok(
+      (await application.evaluate(() => globalThis.__lifeRendererProof.events)).some(
+        (event) =>
+          event.type === 'render-process-gone' &&
+          event.expected &&
+          ['killed', 'crashed'].includes(event.reason),
+      ),
+      'Terminating the actual renderer emitted a real native renderer-gone event.',
+    )
+    const recoveredConnection = await page.evaluate(() => window.relay.connection.state())
+    assert.equal(recoveredConnection.status, 'connected')
+    assert.equal(recoveredConnection.profile.id, beforeRendererCrash.connection.profile.id)
+    assert.equal(recoveredConnection.workspace, beforeRendererCrash.connection.workspace)
+    assert.deepEqual((await extensions()).extensions, beforeRendererCrash.extensions.extensions)
+    assert.deepEqual((await configuration()).config, beforeRendererCrash.config.config)
+    assert.deepEqual(
+      await application.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0].getBounds(),
+      ),
+      beforeRendererCrash.bounds,
+    )
+    const recoveredHistory = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+    )
+    for (const thread of beforeRendererCrash.history)
+      assert.equal(
+        recoveredHistory.find((item) => item.id === thread.id)?.remoteId,
+        thread.remoteId,
+      )
+    await page.getByRole('button', { name: 'Research tools', exact: true }).click()
+    await extensionFrame().getByRole('heading', { name: 'Research counter', exact: true }).waitFor()
+    await extensionFrame().getByText('SSH: connected', { exact: true }).waitFor()
+    await extensionFrame().getByRole('button', { name: 'Increment', exact: true }).click()
+    await extensionFrame().getByText('Count: 1', { exact: true }).waitFor()
+    await writeFile(
+      join(artifacts, 'desktop-stock-renderer-recovery-proof.json'),
+      JSON.stringify(
+        {
+          connected: recoveredConnection.status,
+          workspace: recoveredConnection.workspace,
+          historyThreads: recoveredHistory.length,
+          enabledExtensions: (await extensions()).extensions
+            .filter((extension) => extension.enabled)
+            .map((extension) => extension.id),
+          rendererEvents: await application.evaluate(() => globalThis.__lifeRendererProof.events),
+          rendererTermination,
+          replacementWindowId: recoveredWindowId,
+        },
+        null,
+        2,
+      ),
+    )
 
     phase = 'whole workspace replacement and extension management'
     const replacement = {
@@ -1844,6 +2584,16 @@ export function activityLabel(activity: ThreadActivity): string {
       async () => (await extensions()).extensions[0]?.enabled === true,
       'extension enabled',
     )
+    const runtimeBackupPath = join(artifacts, 'desktop-runtime-extension-backup.json')
+    const exportedRuntimeBackup = await saveNativeDownload(
+      manager.getByRole('button', { name: 'Export all extensions', exact: true }),
+      runtimeBackupPath,
+    )
+    assert.equal(exportedRuntimeBackup.format, 'life-extension-backup')
+    assert.equal(exportedRuntimeBackup.formatVersion, 1)
+    assert.equal(exportedRuntimeBackup.runtime.extensions.length, 1)
+    assert.equal(exportedRuntimeBackup.runtime.snapshot.extensions[0].enabled, true)
+    assert.ok(exportedRuntimeBackup.source.snapshot)
     await manager.getByRole('button', { name: 'Delete Research tools', exact: true }).click()
     await manager.getByRole('button', { name: 'Remove', exact: true }).click()
     await waitUntil(async () => (await extensions()).extensions.length === 0, 'extension removed')
@@ -1865,6 +2615,49 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.ok(sourceIndex.paths.includes('src/renderer/App.tsx'))
     assert.ok(sourceIndex.paths.includes('src/main/index.ts'))
     assert.ok(sourceIndex.paths.includes('src/preload/index.ts'))
+    const incorporatedFiles = [
+      'src/renderer/components/ReferenceComposer.tsx',
+      'src/renderer/components/RunSelectors.tsx',
+      'src/renderer/components/SidebarProjects.tsx',
+      'src/renderer/components/SidebarProjectThreads.tsx',
+      'src/renderer/components/SidebarResize.tsx',
+      'src/renderer/components/QueuedMessages.tsx',
+      'src/renderer/components/ThreadAttachments.tsx',
+      'src/renderer/components/ThreadMessageNavigator.tsx',
+      'src/renderer/components/ThreadTimeline.tsx',
+      'src/renderer/components/ThreadActivityRows.tsx',
+      'src/renderer/components/ThreadRunStatus.tsx',
+      'src/renderer/components/WorkspaceSurfaces.tsx',
+      'src/renderer/components/BrowserSurface.tsx',
+      'src/renderer/components/PullRequestSurface.tsx',
+      'src/renderer/attachments.ts',
+      'src/renderer/draft-upload.ts',
+      'src/renderer/thread-queue.ts',
+      'src/renderer/thread-activity.ts',
+      'src/renderer/thread-metadata.ts',
+      'src/renderer/sidebar-ordering.ts',
+    ]
+    for (const path of incorporatedFiles)
+      assert.ok(sourceIndex.paths.includes(path), `Built-in source includes ${path}`)
+    for (const dependency of [
+      '@radix-ui/react-select',
+      '@radix-ui/react-dropdown-menu',
+      '@radix-ui/react-hover-card',
+    ])
+      assert.ok(sourceIndex.dependencies[dependency], `Built-in dependency includes ${dependency}`)
+    await writeFile(
+      join(artifacts, 'desktop-permanent-customization-proof.json'),
+      JSON.stringify(
+        {
+          version: metadata.version,
+          sourceBaseline,
+          incorporatedFiles,
+          dependencies: sourceIndex.dependencies,
+        },
+        null,
+        2,
+      ),
+    )
     const readSourceThread = (prompt) =>
       page.evaluate(
         (requestedPrompt) =>
@@ -1931,11 +2724,9 @@ export function activityLabel(activity: ThreadActivity): string {
     await workspace()
     await page.getByRole('button', { name: 'New thread', exact: false }).click()
     await page.getByRole('button', { name: 'Codex By OpenAI' }).click()
-    await page
-      .getByRole('combobox', { name: 'Agent model', exact: true })
-      .selectOption('fixture-model')
-    await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('high')
-    await page.getByRole('combobox', { name: 'Service tier', exact: true }).selectOption('fast')
+    await selectModel('codex', 'fixture-model')
+    await selectRunChoice('effort', 'high')
+    await selectRunChoice('speed', 'fast')
     const sourceLogStart = (await fixture.log()).length
     const firstSourceReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
     await send(sourcePrompt)
@@ -2088,9 +2879,9 @@ export function activityLabel(activity: ThreadActivity): string {
     phase = 'Claude reads and changes the generated source without opening a new conversation'
     await page.getByRole('button', { name: 'New thread', exact: false }).click()
     await page.getByRole('button', { name: 'Claude Code By Anthropic' }).click()
-    await page.getByRole('combobox', { name: 'Agent model', exact: true }).selectOption('opus')
-    await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('max')
-    await page.getByRole('combobox', { name: 'Service tier', exact: true }).selectOption('fast')
+    await selectModel('claude', 'opus')
+    await selectRunChoice('effort', 'max')
+    await selectRunChoice('speed', 'fast')
     const reviewLogStart = (await fixture.log()).length
     const reviewedReload = page.waitForEvent('domcontentloaded', { timeout: 90000 })
     await send(reviewSourcePrompt)
@@ -2111,6 +2902,9 @@ export function activityLabel(activity: ThreadActivity): string {
     }
 
     phase = 'compiled source bootstrap and conversation history survive a real app restart'
+    priorRendererEvents.push(
+      ...(await application.evaluate(() => globalThis.__lifeRendererProof.events)),
+    )
     await application.close()
     application = undefined
     await launch()
@@ -2118,14 +2912,11 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.equal(restartedSource.enabled, true)
     assert.equal(restartedSource.active.revision, reviewedSource.active.revision)
     assert.equal(restartedSource.recovered, false)
-    await workspace()
-    await board()
-      .getByRole('heading', { name: 'Hypothesis backlog reviewed', exact: true })
-      .waitFor()
     assert.equal((await readSourceThread(sourcePrompt)).remoteId, originalSourceThread.remoteId)
     assert.equal((await readSourceThread(reviewSourcePrompt)).remoteId, reviewThread.remoteId)
-    await page.getByRole('button', { name: 'Connections', exact: true }).click()
     const sourceReconnect = page.getByRole('dialog', { name: 'Connect a machine' })
+    if (!(await sourceReconnect.isVisible()))
+      await page.getByRole('button', { name: 'Connections', exact: true }).click()
     await sourceReconnect.waitFor()
     await sourceReconnect
       .locator('.saved-profiles button')
@@ -2134,11 +2925,23 @@ export function activityLabel(activity: ThreadActivity): string {
     await sourceReconnect.getByPlaceholder('Your SSH password').fill(input.password)
     await sourceReconnect.getByRole('button', { name: 'Connect machine', exact: true }).click()
     await sourceReconnect.waitFor({ state: 'hidden' })
-    await chooseProject()
+    await waitUntil(
+      async () =>
+        (await page.evaluate(() => window.relay.connection.state())).workspace === input.workspace,
+      'restarted saved thread restores its own project after credentials',
+    )
+    assert.equal(
+      await page.getByRole('dialog', { name: 'Select a project', exact: true }).count(),
+      0,
+    )
     assert.equal(
       (await page.evaluate(() => window.relay.connection.state())).workspace,
       input.workspace,
     )
+    await workspace()
+    await board()
+      .getByRole('heading', { name: 'Hypothesis backlog reviewed', exact: true })
+      .waitFor()
 
     phase = 'source management restores the prior compiled application'
     manager = await openSourceCode()
@@ -2410,6 +3213,21 @@ export function activityLabel(activity: ThreadActivity): string {
     phase = 'source extension export and explicit public sharing preview'
     manager = await openExtensions()
     await screenshot('life-extensions.png')
+    const exportedSourceBackup = await saveNativeDownload(
+      manager.getByRole('button', { name: 'Export all extensions', exact: true }),
+      join(artifacts, 'desktop-source-extension-backup.json'),
+    )
+    assert.equal(exportedSourceBackup.format, 'life-extension-backup')
+    assert.equal(
+      exportedSourceBackup.source.extensions.length,
+      (await sourceCode()).extensions.length,
+    )
+    assert.equal(exportedSourceBackup.source.snapshot.revision, (await sourceCode()).revision)
+    assert.ok(exportedSourceBackup.source.extensions.every((item) => item.bundle.kind === 'source'))
+    assert.equal(
+      exportedSourceBackup.runtime.extensions.length,
+      (await extensions()).extensions.length,
+    )
     const portablePath = join(artifacts, 'desktop-source-extension.life-extension.json')
     await rm(portablePath, { force: true })
     await application.evaluate(({ BrowserWindow }, file) => {
@@ -2637,6 +3455,78 @@ export function activityLabel(activity: ThreadActivity): string {
           sharing: await application.evaluate(() => globalThis.__lifeSharing.calls),
           source: await sourceCode(),
           realPublication: false,
+        },
+        null,
+        2,
+      ),
+    )
+
+    phase = 'late customized React error recovers natively without a blank application'
+    const beforeLateError = await sourceCode()
+    const lateErrorState = await page.evaluate(
+      (revision) =>
+        window.relay.sourceCode.apply({
+          summary: 'Exercise a late renderer failure after a healthy source startup',
+          baseRevision: revision,
+          files: [
+            {
+              path: 'src/renderer/components/FixtureLateRenderer.tsx',
+              content:
+                "import { useState } from 'react'\nexport function FixtureLateRenderer() { const [failed, setFailed] = useState(false); if (failed) throw new Error('Life late renderer fixture'); return <button onClick={() => setFailed(true)}>Trigger late renderer error</button> }\n",
+            },
+            {
+              path: 'src/renderer/App.tsx',
+              edits: [
+                {
+                  find: "import './enhancements.css'",
+                  replace:
+                    "import { FixtureLateRenderer } from './components/FixtureLateRenderer'\nimport './enhancements.css'",
+                },
+                {
+                  find: '<FixtureHypothesisBacklog />',
+                  replace: '<FixtureHypothesisBacklog />\n                <FixtureLateRenderer />',
+                },
+              ],
+            },
+          ],
+        }),
+      beforeLateError.revision,
+    )
+    assert.equal(lateErrorState.error, undefined)
+    const lateStartup = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await page.evaluate(() => window.relay.sourceCode.reload())
+    await lateStartup
+    await page.getByRole('button', { name: 'Trigger late renderer error', exact: true }).waitFor()
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 400))
+    const lateFallback = application.waitForEvent('window', { timeout: 15000 })
+    await page.getByRole('button', { name: 'Trigger late renderer error', exact: true }).click()
+    page = await lateFallback
+    page.setDefaultTimeout(15000)
+    page.on('pageerror', (error) => rendererErrors.push(error.message))
+    await page.locator('.app-shell').waitFor()
+    const lateFailure = await sourceCode()
+    assert.equal(lateFailure.enabled, false)
+    assert.match(lateFailure.error, /Life late renderer fixture/)
+    assert.equal((await page.evaluate(() => window.relay.connection.state())).status, 'connected')
+    const restoredLate = await page.evaluate(() => window.relay.sourceCode.rollback())
+    assert.equal(restoredLate.active.revision, beforeLateError.active.revision)
+    const lateRollback = page.waitForEvent('domcontentloaded', { timeout: 90000 })
+    await page.evaluate(() => window.relay.sourceCode.reload())
+    await lateRollback
+    await waitForSourceUI('Hypothesis backlog repaired')
+    assert.equal(
+      await page.getByRole('button', { name: 'Trigger late renderer error', exact: true }).count(),
+      0,
+    )
+    await writeFile(
+      join(artifacts, 'desktop-late-renderer-recovery-proof.json'),
+      JSON.stringify(
+        {
+          failedRevision: lateFailure.revision,
+          error: lateFailure.error,
+          restoredRevision: restoredLate.active.revision,
+          preservedWorkspace: (await page.evaluate(() => window.relay.connection.state()))
+            .workspace,
         },
         null,
         2,
@@ -2871,11 +3761,15 @@ export function activityLabel(activity: ThreadActivity): string {
     )
     assert.deepEqual(secondaryExit, { code: 0, signal: null }, secondaryDiagnostics())
     assert.equal((await extensions()).extensions[0]?.enabled, true)
+    await extensionFrame().getByText('SSH: connected', { exact: true }).waitFor()
     await extensionFrame().getByRole('button', { name: 'Increment', exact: true }).click()
     await extensionFrame().getByText('Count: 1', { exact: true }).waitFor()
 
     phase = 'main-process recovery from a hanging generated iframe'
     const extensionDirectory = (await extensions()).path
+    const emergencyHistory = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+    )
     const hangingExtension = {
       ...replacement,
       version: '5.0.0',
@@ -2897,6 +3791,7 @@ export function activityLabel(activity: ThreadActivity): string {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 400))
     const recoveredWindow = application.waitForEvent('window', { timeout: 15000 })
     await application.evaluate(({ BrowserWindow }) => {
+      globalThis.__lifeRendererProof.expected = true
       BrowserWindow.getAllWindows()[0].webContents.emit(
         'before-input-event',
         { preventDefault() {} },
@@ -2907,7 +3802,25 @@ export function activityLabel(activity: ThreadActivity): string {
     page.setDefaultTimeout(15000)
     page.on('pageerror', (error) => rendererErrors.push(error.message))
     await page.getByRole('dialog', { name: 'Manage extensions', exact: true }).waitFor()
+    assert.equal(await page.getByRole('dialog').count(), 1)
+    const emergencyIntentRemaining = await page.evaluate(() =>
+      window.relay.window.initialRecovery(),
+    )
+    assert.equal(
+      emergencyIntentRemaining,
+      false,
+      'The replacement app consumes the emergency startup intent once.',
+    )
+    assert.equal(
+      await page.getByRole('dialog', { name: 'Connect a machine', exact: true }).count(),
+      0,
+      'Emergency recovery keeps credential restoration from covering the recovery manager.',
+    )
+    await application.evaluate(() => {
+      globalThis.__lifeRendererProof.expected = false
+    })
     await closeDialog()
+    assert.equal(await page.getByRole('dialog').count(), 0)
     await map()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
@@ -2925,6 +3838,15 @@ export function activityLabel(activity: ThreadActivity): string {
       'disconnected',
     )
     assert.deepEqual((await extensions()).errors, {})
+    const emergencyRecoveredHistory = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+    )
+    for (const thread of emergencyHistory)
+      assert.equal(
+        emergencyRecoveredHistory.find((saved) => saved.id === thread.id)?.remoteId,
+        thread.remoteId,
+        'Emergency recovery preserves every saved conversation identity.',
+      )
     const recoveredSource = await sourceCode()
     assert.equal(recoveredSource.enabled, false)
     assert.equal(recoveredSource.active, undefined)
@@ -2937,11 +3859,53 @@ export function activityLabel(activity: ThreadActivity): string {
       featurePath,
     )
     assert.ok(preservedSource.files[0].content.includes('FixtureHypothesisBacklog'))
+    await writeFile(
+      join(artifacts, 'desktop-emergency-recovery-proof.json'),
+      JSON.stringify(
+        {
+          version: metadata.version,
+          emergencyIntentRemaining,
+          connection: await page.evaluate(() => window.relay.connection.state()),
+          visibleDialogsAfterReview: await page.getByRole('dialog').count(),
+          activeThreadId: await page.evaluate(() => localStorage.getItem('life.active-thread.v1')),
+          conversationIdentities: emergencyRecoveredHistory.map(({ id, remoteId }) => ({
+            id,
+            remoteId,
+          })),
+          source: recoveredSource,
+          runtime: await extensions(),
+        },
+        null,
+        2,
+      ) + '\n',
+    )
     await closeDialog()
     await page
       .getByRole('heading', { name: 'See the work. Find the next question.', exact: true })
       .waitFor()
 
+    const resumeMessages = (await fixture.log()).filter(
+      (entry) => entry.message?.method === 'thread/resume',
+    )
+    assert.ok(resumeMessages.length > 0)
+    assert.ok(
+      resumeMessages.every((entry) => entry.message.params.excludeTurns === true),
+      'Every actual Codex resume requests metadata without historical turns.',
+    )
+    assert.ok(
+      (await fixture.log())
+        .filter((entry) => entry.resumeEvidence)
+        .every((entry) => entry.resumeEvidence.returnedTurns === 0),
+    )
+    const rendererEvents = [
+      ...priorRendererEvents,
+      ...(await application.evaluate(() => globalThis.__lifeRendererProof.events)),
+    ]
+    assert.deepEqual(
+      rendererEvents.filter((event) => !event.expected),
+      [],
+      'No unexpected renderer exits or unresponsive windows across the native flows',
+    )
     assert.deepEqual(rendererErrors, [], 'No renderer errors across the native flows')
     await writeFile(
       join(artifacts, 'desktop-smoke-result.json'),
@@ -2956,6 +3920,8 @@ export function activityLabel(activity: ThreadActivity): string {
           projectCount: projects.length,
           providerLogEntries: (await fixture.log()).length,
           rendererErrors,
+          rendererEvents,
+          codexResumeCount: resumeMessages.length,
           screenshots: [
             'life.png',
             'life-light.png',
@@ -2978,17 +3944,24 @@ export function activityLabel(activity: ThreadActivity): string {
             'machine connection before project selection with coding and files blocked until chosen',
             'post-connect SFTP directory browsing and project choice after reconnect',
             'real SSH unified Git diff with file ranges, line numbers, wrapping and collapse controls',
-            'switching projects preserves thread scope and requires returning to its original directory',
+            'repeated Add project selections stay rendered and selecting a saved thread restores its own workspace automatically',
             'real SSH HTTP forwarding with local collision mapping and browser URL',
             'automatic port forwarding default, persisted toggle and socket cleanup',
             'Codex and Claude streaming, approvals and questions',
             'interruption and saved chat navigation',
+            'queued follow-ups auto-send once, support interruption with selected settings and pause safely across reload',
+            'background image and multi-part text attachment uploads preserve exact bytes on the real SSH host',
+            'custom Radix menus, message finder, snooze/settle arrangement and filters remain interactive',
+            'native Retry cancels an active turn and retains the same SSH project, extension flags and conversation',
+            'stock renderer replacement preserves SSH, project, local history and enabled extensions',
+            'late customized React failures recover natively and restore the healthy source generation',
             'early initialization cancellation and replacement send',
             'same-thread Codex and Claude declarative customization',
             'normal replies, clarification and no-op proposals leave settings unchanged',
             'Life turn cancellation and SSH reconnect preserve local and remote conversation identity',
+            'Codex resume excludes large historical turns while retaining the actual conversation ID',
             'project response markers are never applied as Life settings',
-            'existing native selects preserved while ambiguous source changes request clarification',
+            'permanently incorporated customized controls remain intact while source changes request clarification',
             'reasoning and service-tier choices discovered remotely and delivered to both providers',
             'custom commands and Mermaid panels',
             'live configuration file watch and undo',
@@ -3043,11 +4016,44 @@ export function activityLabel(activity: ThreadActivity): string {
   } catch (error) {
     failed = true
     console.error(`Desktop smoke failed during: ${phase}: ${error.message}`)
+    const mainDiagnostics = await Promise.race([
+      application
+        ?.evaluate(({ BrowserWindow }) => ({
+          recovery: globalThis.__lifeRendererProof,
+          windows: BrowserWindow.getAllWindows().map((window) => {
+            try {
+              return {
+                id: window.id,
+                destroyed: window.isDestroyed(),
+                visible: window.isVisible(),
+                url: window.webContents.getURL(),
+                crashed: window.webContents.isCrashed(),
+                loading: window.webContents.isLoading(),
+                processId: window.webContents.getOSProcessId(),
+                bounds: window.getBounds(),
+              }
+            } catch (failure) {
+              return { id: window.id, error: failure.message }
+            }
+          }),
+        }))
+        .catch(() => undefined),
+      new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(undefined), 2000)),
+    ])
+    await writeFile(
+      join(artifacts, 'desktop-failure-native.json'),
+      JSON.stringify({ phase, error: error.message, main: mainDiagnostics, nativeLogs }, null, 2),
+    ).catch(() => {})
     if (page && !page.isClosed()) {
       const diagnostics = await page
         .evaluate(async () => ({
           source: await window.relay.sourceCode.get(),
           connection: await window.relay.connection.state(),
+          activeThreadId: localStorage.getItem('life.active-thread.v1'),
+          history: JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'),
+          rendererRecovery: document
+            .querySelector('[data-life-renderer-error]')
+            ?.getAttribute('data-life-renderer-error'),
         }))
         .catch(() => undefined)
       if (diagnostics)
@@ -3072,6 +4078,7 @@ export function activityLabel(activity: ThreadActivity): string {
     }
     throw error
   } finally {
+    clearInterval(progressTimer)
     if (application) {
       const child = application.process()
       const timeout = setTimeout(() => child.kill('SIGKILL'), 5000)
@@ -3082,6 +4089,11 @@ export function activityLabel(activity: ThreadActivity): string {
       }
     }
     await fixture.close()
+    await Promise.all(
+      [...attachmentDirectories].map((directory) =>
+        rm(directory, { recursive: true, force: true }),
+      ),
+    )
     remoteService.closeAllConnections()
     await new Promise((resolveClosed) => remoteService.close(resolveClosed))
     if (failed && process.env.LIFE_TEST_KEEP_FAILURE === '1') {

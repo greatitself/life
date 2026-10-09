@@ -1,0 +1,58 @@
+/* Keep every part of the application chrome on the same compact row. */
+.app-shell.life-unified-layout.life-refined-layout {
+  --life-chrome-row-height: 40px;
+  --titlebar-height: var(--life-chrome-row-height) !important;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .life-unified-titlebar
+  :is(
+    .titlebar-sidebar,
+    .titlebar-content,
+    .titlebar-right,
+    .titlebar-tools,
+    .native-window-controls
+  ) {
+  height: var(--life-chrome-row-height) !important;
+  min-height: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .titlebar-content .workspace-header {
+  height: 100% !important;
+  min-height: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .surface-header {
+  height: var(--life-chrome-row-height) !important;
+  min-height: var(--life-chrome-row-height);
+}
+.app-shell.life-unified-layout.life-refined-layout .surface-tab > button[role='tab'] {
+  padding-block: 4px;
+}
+
+/* The rail stays centered; long conversations scroll within the compact ticks. */
+.app-shell.life-refined-layout .thread-message-navigator {
+  top: 50% !important;
+  bottom: auto !important;
+  transform: translateY(-50%);
+  height: auto;
+  max-height: min(45%, 320px);
+  gap: 4px;
+}
+.app-shell.life-refined-layout .thread-message-ticks {
+  gap: 0;
+  min-height: 0;
+  flex: 0 1 auto;
+}
+.app-shell.life-refined-layout .thread-message-tick {
+  height: 12px;
+  min-height: 12px;
+  padding: 0;
+}
+
+/* Narrow windows retain two compact rows and correct sidebar offsets. */
+@media (max-width: 900px) {
+  .app-shell.life-unified-layout.life-refined-layout:not(.life-replacement-active) {
+    --titlebar-height: calc(var(--life-chrome-row-height) * 2) !important;
+  }
+  .app-shell.life-unified-layout.life-refined-layout .titlebar-content {
+    top: var(--life-chrome-row-height);
+  }
+}

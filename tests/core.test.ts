@@ -59,9 +59,27 @@ describe('agent JSON line framing', () => {
     const invalid = vi.fn()
     const parser = new JsonLines(receive, invalid)
     parser.push('x'.repeat(8_000_001))
-    parser.push('{"ok":true}\n')
+    parser.push('untrusted frame suffix\n{"ok":true}\n')
     expect(invalid).toHaveBeenCalledOnce()
     expect(receive).toHaveBeenCalledWith({ ok: true })
+  })
+
+  it('limits each frame separately even when a packet contains many valid messages', () => {
+    const received: Record<string, unknown>[] = []
+    const invalid = vi.fn()
+    const parser = new JsonLines((message) => received.push(message), invalid, 40)
+    parser.push('{"id":1,"text":"one"}\n{"id":2,"text":"two"}\n{"id":3,"text":"three"}\n')
+    expect(received.map((message) => message.id)).toEqual([1, 2, 3])
+    expect(invalid).not.toHaveBeenCalled()
+  })
+
+  it('drops only an oversized complete frame while preserving subsequent frames in the same packet', () => {
+    const received: Record<string, unknown>[] = []
+    const invalid = vi.fn()
+    const parser = new JsonLines((message) => received.push(message), invalid, 20)
+    parser.push('{"oversized":"' + 'x'.repeat(30) + '"}\n{"id":2}\n')
+    expect(received).toEqual([{ id: 2 }])
+    expect(invalid).toHaveBeenCalledOnce()
   })
 })
 
@@ -224,9 +242,53 @@ describe('conversation state', () => {
 
   it('restores persisted threads as idle and removes stale permission requests', () => {
     vi.stubGlobal('localStorage', { getItem: () => JSON.stringify([thread(), { invalid: true }]) })
-    expect(readThreads()).toEqual([{ ...thread(), busy: false, pending: [] }])
+    const restored = readThreads()
+    expect(restored).toHaveLength(1)
+    expect(restored[0]).toMatchObject({ ...thread(), busy: false, pending: [], queue: [] })
+    expect(restored[0].workspace).toBeUndefined()
+    expect(restored[0].remoteId).toBeUndefined()
+    expect(restored[0].gitBranch).toBeUndefined()
+    expect(restored[0].gitHost).toBeUndefined()
     vi.stubGlobal('localStorage', { getItem: () => 'broken JSON' })
     expect(readThreads()).toEqual([])
+  })
+
+  it('retains project and provider identities while pausing saved follow-ups and interrupting unfinished tools', () => {
+    const saved = {
+      ...thread(),
+      remoteId: 'existing-conversation',
+      workspace: '/srv/research',
+      gitBranch: 'research-branch',
+      pending: [event({ type: 'approval', requestId: 'stale-permission' })],
+      messages: [
+        { id: 'user-message', role: 'user', text: 'Research this', turn: 1, createdAt: 100 },
+        { id: 'tool-message', role: 'tool', text: 'Working', turn: 1, status: 'running' },
+      ],
+      queue: [
+        {
+          id: 'queued-follow-up',
+          text: 'Compare the findings',
+          createdAt: 200,
+          attachments: [],
+          paused: false,
+        },
+      ],
+    }
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify([saved]) })
+    const restored = readThreads()[0]
+    expect(restored).toMatchObject({
+      id: saved.id,
+      profileId: saved.profileId,
+      workspace: saved.workspace,
+      remoteId: saved.remoteId,
+      gitBranch: saved.gitBranch,
+      busy: false,
+      pending: [],
+      queue: [{ ...saved.queue[0], paused: true }],
+    })
+    expect(restored.messages.map((message) => message.id)).toEqual(['user-message', 'tool-message'])
+    expect(restored.messages[0]).toMatchObject({ text: 'Research this', createdAt: 100 })
+    expect(restored.messages[1]).toMatchObject({ status: 'interrupted' })
   })
 
   it('retains remote identity and turns provider failures into visible messages', () => {

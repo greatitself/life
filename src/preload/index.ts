@@ -105,9 +105,11 @@ const api: RelayAPI = {
   },
   chooseKey: () => ipcRenderer.invoke('choose-key'),
   window: {
+    initialRecovery: () => ipcRenderer.invoke('window:initial-recovery'),
     minimize: () => ipcRenderer.send('window:action', 'minimize'),
     maximize: () => ipcRenderer.send('window:action', 'maximize'),
     close: () => ipcRenderer.send('window:action', 'close'),
+    restart: () => ipcRenderer.invoke('window:restart'),
     state: () => ipcRenderer.invoke('window:state'),
     onState: (callback) => subscribe('window:state', callback),
   },

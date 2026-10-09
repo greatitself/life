@@ -13,7 +13,11 @@ async function boot() {
   const restore = async (error: unknown) => {
     if (restoring) return
     restoring = true
-    const message = error instanceof Error ? error.message : String(error)
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 10000)
+    // This window may be finishing an old render while another source revision
+    // has already been installed. The native host also checks this revision.
+    const current = await api!.sourceCode.get().catch(() => undefined)
+    if (current && (!current.enabled || current.active?.revision !== revision)) return
     await api!.sourceCode.reportError(revision, message).catch(() => {})
   }
   const onError = (event: ErrorEvent) => {
@@ -22,8 +26,17 @@ async function boot() {
   const onRejection = (event: PromiseRejectionEvent) => {
     if (!ready) void restore(event.reason)
   }
+  const onRendererError = (event: Event) => {
+    const message = (event as CustomEvent<unknown>).detail
+    void restore(
+      typeof message === 'string' ? message : 'The customized workspace could not render.',
+    )
+  }
   window.addEventListener('error', onError)
   window.addEventListener('unhandledrejection', onRejection)
+  // React error boundaries handle their errors without dispatching a global
+  // error. Keep this listener after startup for later fatal render failures.
+  window.addEventListener('life:renderer-error', onRendererError)
   try {
     if (css) {
       const link = document.createElement('link')
@@ -50,6 +63,14 @@ async function boot() {
     })
     await new Promise<void>((resolve) => setTimeout(resolve, 250))
     if (restoring) return
+    const failedRoot = document.getElementById('root')?.querySelector('[data-life-renderer-error]')
+    if (failedRoot) {
+      await restore(
+        failedRoot.getAttribute('data-life-renderer-error') ||
+          'The customized workspace could not render.',
+      )
+      return
+    }
     await api!.sourceCode.ready(revision)
     localStorage.removeItem('life.pendingSourceApply')
     ready = true

@@ -1,0 +1,463 @@
+.app-shell.life-refined-layout .sidebar .thread-card-project .thread-project-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  min-width: 16px;
+  max-width: 16px;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  color: #fff;
+  font: 600 8px/16px var(--sans, 'DM Sans Variable', sans-serif);
+  letter-spacing: 0;
+  text-align: center;
+  text-indent: 0;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px #ffffff12;
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-project
+  .thread-project-badge
+  > .thread-project-initials {
+  display: block;
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  line-height: 16px;
+  letter-spacing: 0;
+  text-align: center;
+  text-indent: 0;
+}
+.thread-timeline-turn {
+  min-width: 0;
+}
+.thread-work-activity,
+.thread-subagent-activity {
+  margin: 0 0 18px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.thread-work-activity > summary,
+.thread-subagent-activity > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 0;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.thread-work-activity > summary:hover,
+.thread-subagent-activity > summary:hover {
+  color: var(--text);
+}
+.thread-work-activity > summary::-webkit-details-marker,
+.thread-subagent-activity > summary::-webkit-details-marker,
+.thread-changes summary::-webkit-details-marker {
+  display: none;
+}
+.thread-work-activity[open] > summary > svg,
+.thread-subagent-activity[open] > summary > svg:last-child {
+  transform: rotate(90deg);
+}
+.thread-work-activity > summary > small,
+.thread-subagent-activity > summary > small {
+  font-size: 11px;
+  color: var(--dim);
+}
+.thread-work-content {
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+}
+.thread-work-content > p {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-content .message.assistant {
+  margin: 0;
+  padding: 4px 0 14px;
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-content .markdown {
+  font-size: 13px;
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-content .tool-message,
+.app-shell.life-refined-layout .main-workspace .thread-subagent-list .tool-message {
+  margin: 0 0 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.thread-work-content pre,
+.thread-subagent-list pre {
+  max-height: 320px;
+}
+.thread-subagent-activity {
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.thread-subagent-list {
+  padding-top: 8px;
+}
+.thread-current-activity {
+  margin: -12px 0 16px;
+  color: var(--dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-shell.life-refined-layout .main-workspace .thread-timeline-turn > .message.assistant {
+  position: relative;
+  padding: 0 28px 18px 0;
+}
+.app-shell.life-refined-layout
+  .main-workspace
+  .thread-timeline-turn
+  > .message.assistant
+  > .message-label {
+  height: 0;
+  margin: 0;
+  min-height: 0;
+}
+.thread-timeline-turn > .message.assistant > .message-label > .agent-avatar,
+.thread-timeline-turn > .message.assistant > .message-label > strong {
+  display: none;
+}
+.thread-timeline-turn > .message.assistant > .message-label > .copy-message {
+  position: absolute;
+  right: 0;
+  top: 1px;
+}
+.thread-changes {
+  --thread-added: #52c69c;
+  --thread-removed: #e77d7d;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 11px;
+  padding: 10px 12px;
+  margin: 2px 0 26px;
+  font-size: 12px;
+  color: var(--muted);
+}
+:root[data-theme='light'] .thread-changes {
+  --thread-added: #16794e;
+  --thread-removed: #b13232;
+}
+.thread-changes summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.thread-changes > summary > strong {
+  font-weight: 550;
+  color: var(--text);
+}
+.thread-changes > summary > svg:last-child {
+  margin-left: auto;
+}
+.thread-changes[open] > summary > svg:last-child,
+.thread-changes-folder[open] > summary > svg:first-child,
+.thread-changed-file[open] > summary > svg:first-child {
+  transform: rotate(90deg);
+}
+.thread-change-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font: 11px var(--mono);
+}
+.thread-lines-added {
+  color: var(--thread-added);
+}
+.thread-lines-removed {
+  color: var(--thread-removed);
+}
+.thread-changes-caption {
+  margin: 2px 0 9px;
+  font-size: 10px;
+  color: var(--dim);
+}
+.thread-changes-tree {
+  min-width: 0;
+}
+.thread-changes-folder > summary,
+.thread-changed-file > summary {
+  padding: 2px 4px;
+}
+.thread-changes-folder > summary:hover,
+.thread-changed-file > summary:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.thread-changes-folder > summary > span:not(.thread-change-counts),
+.thread-changed-file > summary > span:not(.thread-change-counts) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.thread-changes-folder > div {
+  margin-left: 18px;
+}
+.thread-changed-file > pre {
+  margin: 5px 0 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--base);
+  color: var(--text);
+  font: 11px/1.7 var(--mono);
+  white-space: pre;
+  overflow: auto;
+  max-height: 340px;
+}
+.thread-changed-file > p {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dim);
+  margin: 5px 4px 10px;
+  overflow-wrap: anywhere;
+}
+.thread-work-activity > summary:focus-visible,
+.thread-subagent-activity > summary:focus-visible,
+.thread-changes summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+@media (max-width: 760px) {
+  .thread-changes {
+    padding: 8px;
+  }
+  .thread-changes-folder > div {
+    margin-left: 10px;
+  }
+  .thread-change-counts {
+    gap: 5px;
+    font-size: 10px;
+  }
+}
+
+.app-shell.life-refined-layout .sidebar .thread-card-project .thread-card-run-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-left: auto;
+  color: #22c8ed;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+}
+:root[data-theme='light']
+  .app-shell.life-refined-layout
+  .sidebar
+  .thread-card-project
+  .thread-card-run-status {
+  color: #007b9a;
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-project
+  .thread-card-run-status[data-waiting='true'] {
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-project .thread-card-run-status > span {
+  flex: none;
+  overflow: visible;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-meta .thread-card-provider {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin-left: auto;
+  padding: 0;
+  overflow: visible;
+  color: var(--text);
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-meta
+  .thread-card-provider
+  > svg.provider-icon {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+.thread-run-ring {
+  display: inline-block;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 1.5px dashed currentColor;
+  border-radius: 50%;
+  animation: life-thread-run-spin 1.2s linear infinite;
+}
+.thread-card-run-status[data-waiting='true'] .thread-run-ring {
+  animation: none;
+}
+@keyframes life-thread-run-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thread-run-ring {
+    animation: none;
+  }
+}
+.thread-work-provider {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 16px;
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-activity {
+  margin-bottom: 18px;
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-activity > summary {
+  min-height: 30px;
+  padding: 0 0 7px;
+  gap: 7px;
+}
+.app-shell.life-refined-layout .main-workspace .thread-work-content {
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.app-shell.life-refined-layout .main-workspace .thread-commentary .message.assistant {
+  position: relative;
+  padding: 0 28px 12px 0;
+  margin: 0;
+}
+.app-shell.life-refined-layout
+  .main-workspace
+  .thread-commentary
+  .message.assistant
+  > .message-label {
+  height: 0;
+  min-height: 0;
+  margin: 0;
+}
+.app-shell.life-refined-layout .main-workspace .thread-commentary .message-label > .agent-avatar,
+.app-shell.life-refined-layout .main-workspace .thread-commentary .message-label > strong {
+  display: none;
+}
+.app-shell.life-refined-layout .main-workspace .thread-commentary .copy-message {
+  position: absolute;
+  right: 0;
+  top: 1px;
+}
+.app-shell.life-refined-layout .main-workspace .thread-commentary .markdown {
+  color: var(--text);
+  font-size: var(--life-font-size, 14px);
+}
+.thread-tool-batch {
+  margin: 0 0 14px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.thread-tool-batch > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 3px 0;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.thread-tool-batch > summary::-webkit-details-marker,
+.thread-context-event > summary::-webkit-details-marker {
+  display: none;
+}
+.thread-tool-batch > summary > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.thread-tool-batch > summary > svg {
+  flex-shrink: 0;
+}
+.thread-tool-batch > summary > svg:last-child {
+  opacity: 0;
+  margin-left: 0;
+}
+.thread-tool-batch > summary:hover {
+  color: var(--text);
+}
+.thread-tool-batch > summary:hover > svg:last-child,
+.thread-tool-batch[open] > summary > svg:last-child,
+.thread-tool-batch > summary:focus-visible > svg:last-child {
+  opacity: 1;
+}
+.thread-tool-batch[open] > summary > svg:last-child {
+  transform: rotate(90deg);
+}
+.thread-tool-batch > summary > small {
+  color: var(--muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.thread-tool-batch-content {
+  padding: 8px 0 4px 26px;
+}
+.thread-context-event {
+  margin: 14px 0 20px;
+  color: var(--dim);
+  font-size: 11px;
+}
+.thread-context-event > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+.thread-context-event > summary::before,
+.thread-context-event > summary::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.thread-context-event > summary > span {
+  max-width: 80%;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+.thread-context-event > .tool-message {
+  margin-top: 10px;
+}
+.thread-tool-batch > summary:focus-visible,
+.thread-context-event > summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}

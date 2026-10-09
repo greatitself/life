@@ -1,0 +1,227 @@
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout {
+  --life-collapsed-width: 100px;
+  --life-thread-width: 860px;
+  --life-thread-inset: 22px;
+}
+.app-shell.life-polished-layout[data-platform='darwin'] {
+  --life-collapsed-width: 178px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-sidebar {
+  padding-inline: 10px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-sidebar-row {
+  padding-inline: 0;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-brand > svg {
+  display: block;
+}
+.life-brand-dot {
+  color: #69a7ff;
+  animation: life-brand-colors 10s linear infinite;
+}
+@keyframes life-brand-colors {
+  0%,
+  100% {
+    color: #69a7ff;
+  }
+  20% {
+    color: #b58aff;
+  }
+  40% {
+    color: #f28db8;
+  }
+  60% {
+    color: #edb76b;
+  }
+  80% {
+    color: #6dd5b1;
+  }
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .sidebar-inline-search {
+  padding-left: 8px;
+  gap: 8px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .titlebar-sidebar {
+  width: var(--life-collapsed-width);
+  min-width: var(--life-collapsed-width);
+  flex: 0 0 var(--life-collapsed-width);
+  background: var(--bg);
+  border-right: 0;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden .sidebar {
+  display: flex !important;
+  position: static;
+  width: var(--life-collapsed-width) !important;
+  min-width: var(--life-collapsed-width);
+  flex: 0 0 var(--life-collapsed-width);
+  padding-inline: 10px;
+  background: var(--bg);
+  border-right: 0;
+  box-shadow: none;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar
+  > :not(.sidebar-bottom),
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-arrangement-target,
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-tool-actions {
+  display: none;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout.sidebar-hidden
+  .sidebar-tool-row {
+  justify-content: flex-end;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-right {
+  flex-shrink: 0;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .native-window-controls {
+  width: 138px;
+  min-width: 138px;
+  max-width: 138px;
+  flex: 0 0 138px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .native-window-button {
+  width: 46px;
+  min-width: 46px;
+  max-width: 46px;
+  flex: 0 0 46px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-tools {
+  flex: 0 0 auto;
+  gap: 4px;
+  padding-inline: 4px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-theme,
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .surface-collapse-control {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-theme > svg {
+  width: 16px;
+  height: 16px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-theme:hover,
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .surface-collapse-control:hover {
+  background: var(--surface);
+  color: var(--text-strong);
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .titlebar-surface-content {
+  justify-content: flex-end;
+}
+.surface-collapse-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  flex: 0 0 40px;
+  padding: 0 6px;
+  -webkit-app-region: no-drag;
+}
+.surface-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 40px;
+  flex: 0 0 auto;
+  padding: 5px 6px;
+  background: var(--base);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+}
+.surface-controls > .icon-button {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .header-project-badge {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  height: 16px;
+  overflow: visible;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .header-project-badge
+  > .thread-project-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 4px;
+  color: #fff;
+  font: 600 8px/16px var(--sans, 'DM Sans Variable', sans-serif);
+  letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px #ffffff12;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .header-project-badge
+  .thread-project-initials {
+  display: block;
+  width: 100%;
+  height: 16px;
+  padding: 0;
+  font: inherit;
+  text-align: center;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .conversation {
+  padding-inline: var(--life-thread-inset);
+  scrollbar-width: none;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .conversation::-webkit-scrollbar {
+  display: none;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .main-workspace .messages {
+  width: 100%;
+  max-width: calc(var(--life-thread-width) - var(--life-thread-inset) * 2);
+  margin-inline: auto;
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .composer-container {
+  width: 100%;
+  max-width: var(--life-thread-width);
+  padding-inline: var(--life-thread-inset);
+}
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout .main-workspace .composer,
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .composer:focus-within {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: 0 2px 0 color-mix(in srgb, var(--text) 2%, transparent);
+}
+@media (max-width: 760px) {
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout {
+    --life-thread-inset: 22px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .life-brand-dot {
+    animation: none;
+  }
+}

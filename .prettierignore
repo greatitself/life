@@ -6,3 +6,5 @@ dist-web
 output
 .playwright-cli
 package-lock.json
+# Local exported user data; preserve the original backup.
+life-extension-backup-*.json

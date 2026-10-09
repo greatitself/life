@@ -1,4 +1,4 @@
-import type { Message } from './state'
+import type { Message, Thread } from './state'
 
 export interface TurnGroup {
   key: string
@@ -30,6 +30,75 @@ export function groupThreadTurns(messages: Message[]): TurnGroup[] {
 /** Never move a response past a tool, steering request, or error. */
 export function threadOutputSequence(group: TurnGroup): Message[] {
   return group.messages
+}
+
+/** Keep live and unsuccessful work visible; only a completed parent response replaces activity. */
+export function completedTurnResponse(
+  group: TurnGroup,
+  busy: boolean,
+  turnStatus?: string,
+): Message | undefined {
+  if (busy || group.messages.some((message) => message.role === 'error')) return undefined
+  const responses = group.messages.filter(
+    (message) =>
+      message.role === 'assistant' &&
+      !message.agentId &&
+      !message.parentItemId &&
+      !message.kind &&
+      (message.text.trim() || message.attachments?.length || message.sourceChange),
+  )
+  const final = responses.filter((message) => message.phase === 'final_answer').at(-1)
+  const response = final || responses.filter((message) => message.phase !== 'commentary').at(-1)
+  const status = group.user?.finishStatus || turnStatus || response?.finishStatus
+  return (status ? status === 'completed' : Boolean(final)) ? response : undefined
+}
+
+export function isProgressUpdate(message: Message): boolean {
+  return (
+    message.role === 'assistant' &&
+    !message.kind &&
+    !message.agentId &&
+    !message.parentItemId &&
+    message.phase !== 'final_answer'
+  )
+}
+
+/** Summaries use reported action text instead of exposing reasoning labels or provider metadata. */
+export function activitySummary(message: Message): string {
+  if (message.kind === 'plan') return 'Updated the plan'
+  const title = message.title?.trim()
+  if (title && !/^reasoning(?: summary)?$/i.test(title)) return title
+  const line = message.text
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:#{1,6}\s+|[-*]\s+)|[*`]/g, '').trim())
+    .find(Boolean)
+  return line ? `${line.slice(0, 120)}${line.length > 120 ? '…' : ''}` : 'Agent activity'
+}
+
+/** The finder only links to messages that are mounted in the preview timeline. */
+export function previewNavigableMessages(thread: Thread): Message[] {
+  return groupThreadTurns(thread.messages).flatMap((group) => {
+    const response = completedTurnResponse(
+      group,
+      thread.busy && group.turn === thread.turn,
+      group.turn === thread.turn ? thread.turnStatus : undefined,
+    )
+    return [
+      ...(group.user ? [group.user] : []),
+      ...(response
+        ? [...group.messages.filter((message) => message.role === 'user'), response]
+        : group.messages.filter(
+            (message) =>
+              message.role === 'user' ||
+              isProgressUpdate(message) ||
+              (message.role === 'assistant' &&
+                !message.kind &&
+                !message.agentId &&
+                !message.parentItemId &&
+                message.phase === 'final_answer'),
+          )),
+    ]
+  })
 }
 
 export function messagePhaseLabel(message: Message): string | undefined {

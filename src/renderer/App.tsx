@@ -47,7 +47,8 @@ import type {
   Provider,
   StartInput,
 } from '../shared/types'
-import { api, desktop, errorText } from './api'
+import { api, desktop, errorText, streamlinedWorkspace } from './api'
+import './workspace-presentation.css'
 import {
   applyEvent,
   resolveAgentRequest,
@@ -65,6 +66,7 @@ import { ConnectionDialog } from './components/ConnectionDialog'
 import { ProjectDialog } from './components/ProjectDialog'
 import { ApprovalCard } from './components/MessageView'
 import { ThreadTimeline } from './components/ThreadTimeline'
+import { previewNavigableMessages } from './thread-presentation'
 import { WorkspaceSurfaces } from './components/WorkspaceSurfaces'
 import { ResizeHandle, usePanelSizes } from './components/SidebarResize'
 import { ThreadMessageNavigator } from './components/ThreadMessageNavigator'
@@ -182,8 +184,10 @@ export function App() {
   const viewCurrent = useRef(view)
   viewCurrent.current = view
   const [customizeOpen, setCustomizeOpen] = useState(false)
+  const [studioOpen, setStudioOpen] = useState(false)
   const extensions = useExtensions()
   const [extensionsOpen, setExtensionsOpen] = useState(false)
+  const returnToStudioAfterExtensions = useRef(false)
   const [sourceCodeOpen, setSourceCodeOpen] = useState(false)
   const sourceUI = useSourceCode()
   const [selectedExtension, setSelectedExtension] = useState<string>()
@@ -424,6 +428,11 @@ export function App() {
   const appContext = useRef({ preferences, config, extensions, connection })
   appContext.current = { preferences, config, extensions, connection }
   const active = threads.find((t) => t.id === activeId)
+  const navigableMessages = useMemo(
+    () =>
+      active ? (streamlinedWorkspace ? previewNavigableMessages(active) : active.messages) : [],
+    [active],
+  )
   useEffect(() => {
     settingsRequest.current += 1
     cancelThreadContext()
@@ -927,7 +936,7 @@ export function App() {
     if (selected.errors.length) setToast(selected.errors.join(' '))
   }
 
-  async function send(queued?: QueuedSubmission): Promise<boolean | undefined> {
+  async function send(queued?: QueuedSubmission, intent?: 'queue'): Promise<boolean | undefined> {
     if (!startupReady) return
     const active = threadsCurrent.current.find(
       (thread) => thread.id === (queued?.threadId || activeIdCurrent.current),
@@ -961,6 +970,14 @@ export function App() {
     let connected = connection.status === 'connected'
     let projectReady = connected && Boolean(connection.workspace)
     if (!prompt.trim() && !selectedAttachments.length) return
+    if (streamlinedWorkspace && !queued && active?.busy && intent !== 'queue') {
+      await steerDraft()
+      return
+    }
+    if (intent === 'queue' && !builtin.enabled('message-queue')) {
+      setToast('Enable message queueing to queue this follow-up. Your message is kept.')
+      return
+    }
     if (
       !queued &&
       active &&
@@ -1492,7 +1509,8 @@ export function App() {
     }
     if (existing?.purpose === 'customization') {
       setHistoryOpen(false)
-      setView('customization')
+      if (streamlinedWorkspace) setStudioOpen(true)
+      else setView('customization')
       return
     }
     let imported: Thread
@@ -1672,6 +1690,20 @@ export function App() {
           contentRef={setTitleBarContent}
           surfaceContentRef={setSurfaceHeader}
           leadingActionsRef={setHeaderLeadingActions}
+          studioOpen={studioOpen}
+          onStudioToggle={
+            streamlinedWorkspace
+              ? () => {
+                  setStudioOpen((open) => !open)
+                  if (replacement) {
+                    setExtensionRecovery(true)
+                    setView('research')
+                  }
+                  setProjectOpen(false)
+                  setThreadMenu(false)
+                }
+              : undefined
+          }
           onThemeToggle={() => {
             void preferences
               .apply({ theme: config.theme === 'dark' ? 'light' : 'dark' })
@@ -1696,7 +1728,17 @@ export function App() {
               >
                 Back to Life
               </button>
-              <button onClick={() => setExtensionsOpen(true)}>Manage extensions</button>
+              <button
+                onClick={() => {
+                  if (streamlinedWorkspace) {
+                    setExtensionRecovery(true)
+                    setView('research')
+                    setStudioOpen(true)
+                  } else setExtensionsOpen(true)
+                }}
+              >
+                {streamlinedWorkspace ? 'Customize Life' : 'Manage extensions'}
+              </button>
               <small>{shortcutModifier} ⇧ L to recover</small>
             </div>
             {extensionHost(replacement)}
@@ -1809,26 +1851,28 @@ export function App() {
                 </div>
               )}
               <div className="sidebar-bottom">
-                <button
-                  type="button"
-                  className={`life-studio-entry ${view === 'customization' ? 'selected' : ''}`}
-                  aria-label="Life Studio"
-                  aria-pressed={view === 'customization'}
-                  title="Customize Life in its dedicated workspace"
-                  onClick={() => {
-                    cancelThreadContext()
-                    setView('customization')
-                    setProjectOpen(false)
-                    setThreadMenu(false)
-                  }}
-                >
-                  <Sparkles size={16} />
-                  <span>
-                    <strong>Life Studio</strong>
-                    <small>Customize your application</small>
-                  </span>
-                  <ArrowUpRight size={13} />
-                </button>
+                {!streamlinedWorkspace ? (
+                  <button
+                    type="button"
+                    className={`life-studio-entry ${view === 'customization' ? 'selected' : ''}`}
+                    aria-label="Life Studio"
+                    aria-pressed={view === 'customization'}
+                    title="Customize Life in its dedicated workspace"
+                    onClick={() => {
+                      cancelThreadContext()
+                      setView('customization')
+                      setProjectOpen(false)
+                      setThreadMenu(false)
+                    }}
+                  >
+                    <Sparkles size={16} />
+                    <span>
+                      <strong>Life Studio</strong>
+                      <small>Customize your application</small>
+                    </span>
+                    <ArrowUpRight size={13} />
+                  </button>
+                ) : null}
 
                 <div className="sidebar-arrangement-target" ref={setSidebarFooter} />
                 <div className="sidebar-tool-row" aria-label="Life tools">
@@ -1859,17 +1903,19 @@ export function App() {
                     >
                       <Server size={16} />
                     </button>
-                    <button
-                      className="icon-button extension-sidebar-entry"
-                      aria-label="Live extensions"
-                      title={`Live extensions (${extensions.extensions.length + (sourceUI.extensions?.length || 0)})`}
-                      onClick={() => setExtensionsOpen(true)}
-                    >
-                      <Code2 size={16} />
-                      {extensions.extensions.length + (sourceUI.extensions?.length || 0) ? (
-                        <i className="tool-notification-dot" />
-                      ) : null}
-                    </button>
+                    {!streamlinedWorkspace ? (
+                      <button
+                        className="icon-button extension-sidebar-entry"
+                        aria-label="Live extensions"
+                        title={`Live extensions (${extensions.extensions.length + (sourceUI.extensions?.length || 0)})`}
+                        onClick={() => setExtensionsOpen(true)}
+                      >
+                        <Code2 size={16} />
+                        {extensions.extensions.length + (sourceUI.extensions?.length || 0) ? (
+                          <i className="tool-notification-dot" />
+                        ) : null}
+                      </button>
+                    ) : null}
                     <button
                       className="icon-button extension-sidebar-entry"
                       aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
@@ -1878,14 +1924,16 @@ export function App() {
                     >
                       <Cable size={16} />
                     </button>
-                    <button
-                      className="icon-button extension-sidebar-entry"
-                      aria-label={`Source code ${sourceUI.enabled ? 'Edited' : 'Built-in'}`}
-                      title="Source code"
-                      onClick={() => setSourceCodeOpen(true)}
-                    >
-                      <Folder size={16} />
-                    </button>
+                    {!streamlinedWorkspace ? (
+                      <button
+                        className="icon-button extension-sidebar-entry"
+                        aria-label={`Source code ${sourceUI.enabled ? 'Edited' : 'Built-in'}`}
+                        title="Source code"
+                        onClick={() => setSourceCodeOpen(true)}
+                      >
+                        <Folder size={16} />
+                      </button>
+                    ) : null}
                     <button
                       className="icon-button update-life-button"
                       aria-label="Updates"
@@ -1925,17 +1973,34 @@ export function App() {
               </div>
             </aside>
             <CustomizationStudio
-              visible={view === 'customization'}
+              visible={streamlinedWorkspace ? studioOpen : view === 'customization'}
+              dialog={streamlinedWorkspace}
+              onOpenChange={setStudioOpen}
               connection={connection}
               config={config}
               extensions={extensions}
               source={sourceUI}
               applySettings={preferences.apply}
               onNotify={setToast}
-              onConnect={() => setConnectOpen(true)}
-              onOpenExtensions={() => setExtensionsOpen(true)}
-              onOpenSource={() => setSourceCodeOpen(true)}
-              onOpenSettings={() => setCustomizeOpen(true)}
+              onConnect={() => {
+                if (streamlinedWorkspace) setStudioOpen(false)
+                setConnectOpen(true)
+              }}
+              onOpenExtensions={() => {
+                if (streamlinedWorkspace) {
+                  returnToStudioAfterExtensions.current = true
+                  setStudioOpen(false)
+                }
+                setExtensionsOpen(true)
+              }}
+              onOpenSource={() => {
+                if (streamlinedWorkspace) setStudioOpen(false)
+                setSourceCodeOpen(true)
+              }}
+              onOpenSettings={() => {
+                if (streamlinedWorkspace) setStudioOpen(false)
+                setCustomizeOpen(true)
+              }}
             />
             {view === 'customization' ? null : (view === 'research' &&
                 !builtin.enabled('project-map')) ||
@@ -1949,9 +2014,12 @@ export function App() {
                 <button
                   type="button"
                   className="button secondary"
-                  onClick={() => setExtensionsOpen(true)}
+                  onClick={() => {
+                    if (streamlinedWorkspace) setStudioOpen(true)
+                    else setExtensionsOpen(true)
+                  }}
                 >
-                  Manage extensions
+                  {streamlinedWorkspace ? 'Customize Life' : 'Manage extensions'}
                 </button>
               </main>
             ) : view === 'extension' && selectedView ? (
@@ -1962,9 +2030,11 @@ export function App() {
                       <Code2 size={15} />
                       <strong>{selectedView.name}</strong>
                     </div>
-                    <button className="button secondary" onClick={() => setExtensionsOpen(true)}>
-                      Manage extensions
-                    </button>
+                    {!streamlinedWorkspace ? (
+                      <button className="button secondary" onClick={() => setExtensionsOpen(true)}>
+                        Manage extensions
+                      </button>
+                    ) : null}
                   </header>
                 </TitleBarContent>
                 {extensionHost(selectedView)}
@@ -2221,7 +2291,7 @@ export function App() {
                     {active && builtin.enabled('message-navigation') ? (
                       <ThreadMessageNavigator
                         key={active.id}
-                        messages={active.messages}
+                        messages={navigableMessages}
                         conversation={conversation}
                         onJump={() => setStickToBottom(false)}
                       />
@@ -2449,19 +2519,36 @@ export function App() {
                           placeholder={
                             view === 'investigation' && !workbench.goal
                               ? 'Create a goal to begin…'
-                              : queueing
-                                ? 'Add a follow-up to queue while the agent works…'
-                                : view === 'investigation'
-                                  ? `Ask ${providerName(currentProvider)} about this ${workbench.problem ? 'problem' : 'goal'}…`
-                                  : projectReady
-                                    ? 'Ask for changes, explore ideas, or send a follow-up…'
-                                    : connected
-                                      ? 'Choose a project to start a thread…'
-                                      : 'Connect a machine to start a thread…'
+                              : streamlinedWorkspace && busy
+                                ? 'Send an update… Enter to steer · Tab to queue'
+                                : queueing
+                                  ? 'Add a follow-up to queue while the agent works…'
+                                  : view === 'investigation'
+                                    ? `Ask ${providerName(currentProvider)} about this ${workbench.problem ? 'problem' : 'goal'}…`
+                                    : projectReady
+                                      ? 'Ask for changes, explore ideas, or send a follow-up…'
+                                      : connected
+                                        ? 'Choose a project to start a thread…'
+                                        : 'Connect a machine to start a thread…'
                           }
                           value={draft}
                           onChange={(e) => setDraft(e.target.value)}
                           onKeyDown={(e) => {
+                            if (
+                              streamlinedWorkspace &&
+                              busy &&
+                              e.key === 'Tab' &&
+                              !e.shiftKey &&
+                              !e.ctrlKey &&
+                              !e.metaKey &&
+                              !e.altKey &&
+                              !e.nativeEvent.isComposing &&
+                              (draft.trim() || attachments.length)
+                            ) {
+                              e.preventDefault()
+                              void send(undefined, 'queue')
+                              return
+                            }
                             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                               e.preventDefault()
                               void send()
@@ -2488,7 +2575,7 @@ export function App() {
                             }}
                           />
                           <div className="composer-send-actions">
-                            {busy ? (
+                            {busy && !streamlinedWorkspace ? (
                               <button
                                 type="button"
                                 className="composer-steer"
@@ -2528,26 +2615,32 @@ export function App() {
                             ) : null}
                             <button
                               type="button"
-                              className={`send-button ${!queueing && !projectReady ? 'connect-send' : ''}`}
+                              className={`send-button ${streamlinedWorkspace && busy ? 'steer-send' : ''} ${!queueing && !projectReady ? 'connect-send' : ''}`}
+                              aria-keyshortcuts="Enter"
                               aria-label={
-                                queueing
-                                  ? 'Queue follow-up message'
-                                  : projectReady || view === 'investigation'
-                                    ? 'Send message'
-                                    : connected
-                                      ? 'Select project to send'
-                                      : 'Connect to send'
+                                streamlinedWorkspace && busy
+                                  ? 'Steer current response'
+                                  : queueing
+                                    ? 'Queue follow-up message'
+                                    : projectReady || view === 'investigation'
+                                      ? 'Send message'
+                                      : connected
+                                        ? 'Select project to send'
+                                        : 'Connect to send'
                               }
                               title={
-                                queueing
-                                  ? 'Queue this message using the selected settings for its next turn'
-                                  : projectReady || view === 'investigation'
-                                    ? 'Send message'
-                                    : connected
-                                      ? 'Select project to send'
-                                      : 'Connect to send'
+                                streamlinedWorkspace && busy
+                                  ? 'Steer current response (Enter). Queue this message with Tab.'
+                                  : queueing
+                                    ? 'Queue this message using the selected settings for its next turn'
+                                    : projectReady || view === 'investigation'
+                                      ? 'Send message'
+                                      : connected
+                                        ? 'Select project to send'
+                                        : 'Connect to send'
                               }
                               disabled={
+                                (streamlinedWorkspace && busy && !queueControlsReady) ||
                                 queue.preparing ||
                                 Boolean(attachmentProgress) ||
                                 ((queueing || projectReady || view === 'investigation') &&
@@ -2555,7 +2648,12 @@ export function App() {
                                   !attachments.length)
                               }
                               onClick={() => {
-                                if (view === 'investigation' || queueing) void send()
+                                if (
+                                  view === 'investigation' ||
+                                  queueing ||
+                                  (streamlinedWorkspace && busy)
+                                )
+                                  void send()
                                 else if (!connected) setConnectOpen(true)
                                 else if (!projectReady) setProjectOpen(true)
                                 else void send()
@@ -2672,6 +2770,10 @@ export function App() {
           onOpenChange={(open) => {
             setExtensionsOpen(open)
             if (!open) {
+              if (streamlinedWorkspace && returnToStudioAfterExtensions.current) {
+                returnToStudioAfterExtensions.current = false
+                setStudioOpen(true)
+              }
               emergencyReview.current = false
               queue.wake()
             }
@@ -2923,7 +3025,8 @@ export function App() {
               ['Connections', 'Ctrl / ⌘ ,'],
               ['Toggle terminal', 'Ctrl / ⌘ `'],
               ['Toggle sidebar', 'Ctrl / ⌘ B'],
-              ['Send message', 'Enter'],
+              [streamlinedWorkspace ? 'Send or steer while working' : 'Send message', 'Enter'],
+              ...(streamlinedWorkspace ? [['Queue while working', 'Tab']] : []),
               ['New line', 'Shift + Enter'],
             ].map(([label, key]) => (
               <div className="shortcut" key={label}>

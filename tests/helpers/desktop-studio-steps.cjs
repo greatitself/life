@@ -55,7 +55,10 @@ async function runStudioChecks(context) {
     )
   const openStudio = async () => {
     if (context.openStudio) await context.openStudio()
-    else await page().getByRole('button', { name: 'Life Studio', exact: true }).click()
+    else if (
+      !(await page().getByRole('dialog', { name: 'Customize Life', exact: true }).isVisible())
+    )
+      await page().getByRole('button', { name: 'Customize', exact: true }).click()
     await studio().waitFor()
   }
   const sendStudio = async (request) => {
@@ -401,6 +404,7 @@ async function runStudioChecks(context) {
       `${provider} reviewed settings undo`,
     )
     await closeDialog()
+    await openStudio()
     await autoApply.check()
     checks.push(`${provider} separates proposal review from application and supports Undo`)
 
@@ -413,6 +417,7 @@ async function runStudioChecks(context) {
     const manifest = installed.extensions.find((extension) => extension.id === 'research-tools')
     assert.equal(manifest?.enabled, true)
     assert.deepEqual(installed.errors, {})
+    await workspace()
     await page().getByRole('button', { name: 'Research tools', exact: true }).click()
     const frame = page().frameLocator('iframe[title="Research tools"]')
     await frame.getByRole('heading', { name: 'Research counter', exact: true }).waitFor()

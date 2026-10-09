@@ -4,7 +4,7 @@ Agents, Research, and Life Studio have distinct purposes and saved conversations
 
 ## Current project and environment
 
-Connect to a machine first, then select an Agents project when you want to work in one. The new-thread page identifies the active project rather than presenting a generic placeholder. **Current Active Environment** in the header provides the selected machine, SSH identity, connection state, project folder, scope, and provider availability. A saved folder is not described as an active project before selection succeeds.
+Connect to a machine first, then select an Agents project when you want to work in one. The new-thread page asks what you want to do in the active project. Its dashed-underlined project name opens the project selector. **Current Active Environment** in the header provides the selected machine, SSH identity, connection state, project folder, scope, and provider availability. A saved folder is not described as an active project before selection succeeds.
 
 Each Agents thread retains its provider, saved connection, project folder, and remote conversation ID. Selecting a thread restores that context. On the same machine Life can select the folder without reconnecting; saved key, agent, and SSH-config profiles can reconnect when needed. A password or encrypted-key passphrase may require the connection dialog if it is no longer held in memory. Navigation is serialized so a late project selection cannot send a message to the wrong folder.
 
@@ -20,15 +20,15 @@ Selected attachments are separate inputs. Codex supports raster images natively;
 
 The conversation preserves chronological provider events: responses, provider-emitted reasoning, plans, tools, approvals, errors, and subagent work. Subagents retain their provider identity, name or role, parent relationship, status, tool calls, and emitted text. Their output stays associated with its owning conversation rather than appearing as an unrelated project thread.
 
-Activity rows show useful live output, with raw/code views and copying. Large outputs have bounded previews so a long diff or tool response cannot freeze the interface; the full retained output remains available to copy or download. Provider reasoning can be shown only when the provider emits it. Life cannot expose internal information absent from the stream.
+While work runs, progress updates stay expanded between collapsed action rows. Reasoning uses the reported action text without a separate reasoning-summary label. Expanded tool rows retain their code views and copying. Successfully completed turns show the final parent response and elapsed work time; submitted prompts and the complete stored transcript are preserved. Large outputs have bounded previews so a long diff or tool response cannot freeze the interface; the full retained output remains available to copy or download. Provider reasoning can be shown only when the provider emits it. Life cannot expose internal information absent from the stream.
 
 ## Queue a follow-up or steer current work
 
-With the message-queue feature enabled, sending while a provider is busy queues a follow-up. The queue runs in order after the current response reaches provider-confirmed completion. A partial result, pending approval, failure, interruption, or lost connection does not start the next queued prompt. Claude's native session-idle event takes precedence over individual result events when that protocol is available.
+With the message-queue feature enabled, pressing Tab in a nonempty composer while a provider is busy queues a follow-up. Empty Tab and modified Tab retain normal keyboard navigation. The queue runs in order after the current response reaches provider-confirmed completion. A partial result, pending approval, failure, interruption, or lost connection does not start the next queued prompt. Claude's native session-idle event takes precedence over individual result events when that protocol is available.
 
-To influence current work instead, choose **Steer** beside the composer or the steering arrow on a queued message while the thread is busy. Life sends native steering: Codex uses the current turn ID with `turn/steer`; Claude uses its noninterrupting `next` priority. It sends the exact selected message and does not stop the current turn. If the turn changes before steering can be delivered, Life reports that outcome instead of replaying the message into unrelated work.
+While a thread is busy, the Send button turns yellow. Click it or press Enter to steer the current response. The steering arrow on a queued message can also steer current work. Life sends native steering: Codex uses the current turn ID with `turn/steer`; Claude uses its noninterrupting `next` priority. It sends the exact selected message and does not stop the current turn. If the turn changes before steering can be delivered, Life reports that outcome instead of replaying the message into unrelated work.
 
-Queue entries preserve their attachments and can be removed. Restarted queues are paused for review rather than automatically sending old work. A paused or failed queue entry stays recoverable. The queue supports up to 32 messages per thread. If you disable the message-queue built-in, sending while busy uses native steering directly instead of creating a new queue entry; previously saved queue entries remain recoverable.
+Queue entries preserve their attachments and can be removed. Restarted queues are paused for review rather than automatically sending old work. A paused or failed queue entry stays recoverable. The queue supports up to 32 messages per thread. If you disable the message-queue built-in, Send and Enter still steer current work; Tab reports that queueing is disabled and retains the draft. Previously saved queue entries remain recoverable.
 
 ## Change run settings during a response
 
@@ -82,7 +82,7 @@ Open **Host chat history** after connecting to browse conversations already save
 1. Select All, Codex, or Claude Code. Search saved chat titles and refresh when sessions have changed. Claude's search also matches saved project folders.
 2. Select a session to preview its messages, tools, reasoning, and saved subagents.
 3. Use **Load more sessions** or **Load more of this conversation** for older records.
-4. Choose **Resume in Life** to import display history with the existing provider session ID, or **Open in Life** for a previously imported session.
+4. Choose **Bring to Life** to import display history with the existing provider session ID, or **Open in Life** for a previously imported session.
 
 Reading and importing do not start a coding turn or rewrite original provider files. Resuming work later uses the original session ID and folder. If a folder is unavailable, Life asks for the missing context instead of assuming the current project. Imported paginated history retains its continuation so remaining messages can still be loaded.
 

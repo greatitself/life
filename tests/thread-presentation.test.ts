@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import type { Message } from '../src/renderer/state'
 import {
   activityAnchor,
+  activitySummary,
+  completedTurnResponse,
   groupThreadTurns,
   messagePhaseLabel,
   outputPreview,
   providerPlanSteps,
+  previewNavigableMessages,
   subagentPresentation,
   threadOutputSequence,
   toolOutputSections,
@@ -21,6 +24,74 @@ function message(
 }
 
 describe('thread output presentation', () => {
+  it('replaces completed Codex activity with its parent final response without changing stored history', () => {
+    const user = message('user', 'user', 1, { finishStatus: 'completed' })
+    const progress = message('progress', 'assistant', 1, { phase: 'commentary' })
+    const reasoning = message('reasoning', 'assistant', 1, { kind: 'reasoning' })
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    const child = message('child', 'assistant', 1, { phase: 'final_answer', agentId: 'child' })
+    const messages = [user, progress, reasoning, final, child]
+    const group = groupThreadTurns(messages)[0]
+    expect(completedTurnResponse(group, false, 'completed')).toBe(final)
+    expect(completedTurnResponse(group, true, 'running')).toBeUndefined()
+    expect(group.messages).toEqual([progress, reasoning, final, child])
+    expect(messages).toEqual([user, progress, reasoning, final, child])
+  })
+
+  it('uses the last unphased Claude response on completion and preserves unsuccessful or uncertain work', () => {
+    const user = message('user', 'user', 1)
+    const progress = message('progress', 'assistant', 1)
+    const final = message('final', 'assistant', 1)
+    const reasoning = message('reasoning', 'assistant', 1, { kind: 'reasoning' })
+    const group = groupThreadTurns([user, progress, final, reasoning])[0]
+    expect(completedTurnResponse(group, false, 'completed')).toBe(final)
+    for (const status of ['running', 'reconnecting', 'unknown', 'failed', 'interrupted']) {
+      expect(completedTurnResponse(group, false, status)).toBeUndefined()
+    }
+    group.messages.push(message('error', 'error', 1))
+    expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
+  })
+
+  it('does not mistake a progress update or a child response for the final result', () => {
+    const group = groupThreadTurns([
+      message('user', 'user', 1, { finishStatus: 'completed' }),
+      message('progress', 'assistant', 1, { phase: 'commentary' }),
+      message('child', 'assistant', 1, { phase: 'final_answer', parentItemId: 'child-task' }),
+    ])[0]
+    expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
+  })
+
+  it('keeps every human request and the final response navigable after activity is hidden', () => {
+    const user = message('user', 'user', 1, { finishStatus: 'completed' })
+    const progress = message('progress', 'assistant', 1, { phase: 'commentary' })
+    const steering = message('steering', 'user', 1, { text: 'Use the other approach.' })
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    const messages = [user, progress, steering, final]
+    expect(
+      previewNavigableMessages({
+        messages,
+        busy: false,
+        turn: 1,
+        turnStatus: 'completed',
+      } as import('../src/renderer/state').Thread),
+    ).toEqual([user, steering, final])
+  })
+
+  it('uses reported action text rather than a reasoning-summary label', () => {
+    expect(
+      activitySummary(
+        message('reasoning', 'assistant', 1, {
+          kind: 'reasoning',
+          title: 'Reasoning summary',
+          text: '**Inspecting the renderer**\nDetails.',
+        }),
+      ),
+    ).toBe('Inspecting the renderer')
+    expect(activitySummary(message('plan', 'assistant', 1, { kind: 'plan' }))).toBe(
+      'Updated the plan',
+    )
+  })
+
   it('keeps steering inside its running turn and associates delayed output with its recorded turn', () => {
     const request = message('request', 'user', 1)
     const progress = message('progress', 'assistant', 1)

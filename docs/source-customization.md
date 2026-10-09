@@ -1,6 +1,6 @@
 # Life Studio and source customization
 
-Open **Life Studio** at the bottom of Life's left sidebar to change the application by prompting. Studio has its own conversations, saved history, provider controls, and proposal inspector. Agents and Research conversations keep their original purpose: Life does not interpret `/life`, `@life`, or an answer containing a Life proposal there as permission to modify the application.
+Open **Customize**, the paintbrush button in Life's header, to change the application by prompting. Studio has its own conversations, saved history, provider controls, and proposal inspector. Agents and Research conversations keep their original purpose: Life does not interpret `/life`, `@life`, or an answer containing a Life proposal there as permission to modify the application.
 
 Examples to send in Studio:
 
@@ -11,7 +11,7 @@ Examples to send in Studio:
 
 ## Start and manage a customization
 
-1. Open **Life Studio** and create a new customization conversation, or continue a saved one.
+1. Open **Customize** and create a new customization conversation, or continue a saved one.
 2. Choose Codex or Claude Code, model, reasoning effort, and speed. The provider stays associated with that conversation once it starts.
 3. Describe the desired change normally. There is no slash-command prefix to add.
 4. Review progress and the **Details**, **Changes**, **Build**, and **Recovery** inspector tabs. Source proposals expose their file changes and dependencies; runtime proposals expose their code and capabilities; settings proposals expose their changed values.
@@ -59,7 +59,7 @@ Each successful change becomes its own extension layer. A request to add a real 
 
 ## Manage custom and built-in extensions
 
-Open **Life Studio → Manage extensions** to manage source and runtime extensions. Source extensions contain file changes, dependency specifications, and descriptive metadata. Enable or disable a change, edit its code, export it, or remove it. The Import tab accepts portable files, pasted JSON, or public Gist links. Enabled source layers compose in creation order against the installed base.
+Open **Customize → Manage and share extensions** to manage source and runtime extensions. Source extensions contain file changes, dependency specifications, and descriptive metadata. Enable or disable a change, edit its code, export it, or remove it. The Import tab accepts portable files, pasted JSON, or public Gist links. Enabled source layers compose in creation order against the installed base.
 
 Custom changes can depend on an earlier layer. Disabling or removing a component another layer imports can make the combined source fail to compile. Each extension should declare the dependencies its feature needs. Overlapping patches can conflict, and the later enabled layer supplies a shared package's version. An unsuccessful composition or build retains the prior working interface. Use Studio to adapt the affected layers; arbitrary combinations are not guaranteed to work.
 

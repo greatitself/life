@@ -81,7 +81,10 @@ async function runRecoveryChecks(context) {
 
   await workspace()
   await page().getByRole('button', { name: 'New thread', exact: false }).click()
-  await page().getByRole('button', { name: 'Codex By OpenAI', exact: true }).click()
+  await page()
+    .getByRole('combobox', { name: /^Model:/ })
+    .click()
+  await page().getByRole('option', { name: 'Codex default', exact: true }).click()
   const retryLogStart = (await fixture.log()).length
   await send('hang')
   await page()

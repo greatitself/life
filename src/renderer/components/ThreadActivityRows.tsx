@@ -1,13 +1,53 @@
-import { useMemo } from 'react'
-import { Bot, CornerDownRight, Globe, Hammer, Minimize2, Terminal, Wrench } from 'lucide-react'
+import { useMemo, useState, type ReactNode } from 'react'
+import {
+  Bot,
+  ChevronRight,
+  CornerDownRight,
+  Globe,
+  Hammer,
+  Minimize2,
+  Terminal,
+  Wrench,
+} from 'lucide-react'
 import type { Message, Thread } from '../state'
 import { isSubagentActivity, isSubagentLaunch, reportedFileChanges } from '../thread-activity'
-import { activityAnchor, subagentPresentation, toolOutputSections } from '../thread-presentation'
+import {
+  activityAnchor,
+  activitySummary,
+  isProgressUpdate,
+  subagentPresentation,
+  toolOutputSections,
+} from '../thread-presentation'
 import { MessageView, RawOutput, ToolStatus } from './MessageView'
 
 type Row =
   | { kind: 'message' | 'context'; message: Message }
   | { kind: 'tools' | 'agents'; messages: Message[] }
+
+function ActivityDisclosure({
+  summary,
+  children,
+  label,
+}: {
+  summary: ReactNode
+  children: ReactNode
+  label: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <details
+      className="thread-action-disclosure"
+      aria-label={label}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary className="thread-action-heading">
+        <ChevronRight size={13} aria-hidden="true" />
+        {summary}
+      </summary>
+      {expanded ? <div className="thread-action-content">{children}</div> : null}
+    </details>
+  )
+}
 function rowsFor(messages: Message[]): Row[] {
   const rows: Row[] = []
   let batch: Extract<Row, { messages: Message[] }> | undefined
@@ -153,15 +193,44 @@ function ToolBatch({
   messages,
   agents,
   provider,
+  compact,
 }: {
   messages: Message[]
   agents: boolean
   provider: Thread['provider']
+  compact: boolean
 }) {
   const { Icon, label } = useMemo(() => describe(messages, agents), [messages, agents])
   const running = messages.some((message) => message.status === 'running')
   const failures = messages.filter((message) => message.status === 'failed').length
   const interrupted = messages.some((message) => message.status === 'interrupted')
+  if (compact) {
+    return (
+      <ActivityDisclosure
+        label={agents ? 'Subagent activity' : 'Tool activity'}
+        summary={
+          <>
+            <Icon size={15} aria-hidden="true" />
+            <span>{label}</span>
+            {running ? <i className="thread-run-ring" aria-hidden="true" /> : null}
+            {failures ? (
+              <small>{plural(failures, 'failure')}</small>
+            ) : interrupted ? (
+              <small>Interrupted</small>
+            ) : null}
+          </>
+        }
+      >
+        {messages.map((message) =>
+          agents ? (
+            <SubagentCard key={message.id} message={message} />
+          ) : (
+            <MessageView key={message.id} message={message} provider={provider} />
+          ),
+        )}
+      </ActivityDisclosure>
+    )
+  }
   return (
     <section
       className="thread-tool-batch"
@@ -193,9 +262,11 @@ function ToolBatch({
 export function ThreadActivityRows({
   messages,
   provider,
+  compact = false,
 }: {
   messages: Message[]
   provider: Thread['provider']
+  compact?: boolean
 }) {
   const rows = useMemo(() => rowsFor(messages), [messages])
   return (
@@ -208,7 +279,23 @@ export function ThreadActivityRows({
               messages={row.messages}
               agents={row.kind === 'agents'}
               provider={provider}
+              compact={compact}
             />
+          )
+        if (
+          compact &&
+          row.message.role !== 'user' &&
+          row.message.role !== 'error' &&
+          !isProgressUpdate(row.message)
+        )
+          return (
+            <ActivityDisclosure
+              key={row.message.id}
+              label="Agent activity"
+              summary={<span>{activitySummary(row.message)}</span>}
+            >
+              <MessageView message={row.message} provider={provider} minimal />
+            </ActivityDisclosure>
           )
         if (row.kind === 'context')
           return (

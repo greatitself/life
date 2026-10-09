@@ -675,7 +675,7 @@ async function runHostHistoryChecks(context) {
           message.role === 'tool' && message.text.includes('No summary was substituted.'),
       ),
     )
-    await dialog.getByRole('button', { name: 'Resume in Life', exact: true }).click()
+    await dialog.getByRole('button', { name: 'Bring to Life', exact: true }).click()
     await dialog.waitFor({ state: 'hidden' })
     await context.waitUntil(
       async () =>
@@ -763,7 +763,13 @@ async function runBuiltinChecks(context) {
   const initialResizeHandles = await page.locator('.sidebar-resize-handle').count()
   assert.ok(initialResizeHandles > 0)
   const openManager = async () => {
-    await page.getByRole('button', { name: 'Live extensions', exact: true }).click()
+    const customization = page.getByRole('dialog', { name: 'Customize Life', exact: true })
+    if (!(await customization.isVisible()))
+      await page.getByRole('button', { name: 'Customize', exact: true }).click()
+    await customization.getByRole('button', { name: 'Details', exact: true }).click()
+    await customization
+      .getByRole('button', { name: 'Manage and share extensions', exact: true })
+      .click()
     const dialog = page.getByRole('dialog', { name: 'Manage extensions', exact: true })
     await dialog.waitFor()
     return dialog

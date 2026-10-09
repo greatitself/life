@@ -287,6 +287,9 @@ export function activityLabel(activity: ThreadActivity): string {
     await navigation().getByRole('button', { name, exact: true }).click()
   }
   const workspace = async () => {
+    const customization = page.getByRole('dialog', { name: 'Customize Life', exact: true })
+    if (await customization.isVisible())
+      await customization.getByRole('button', { name: 'Close dialog', exact: true }).click()
     const labels = (await configuration()).config.labels
     const name = labels.workspaceTitle === 'Agent workspace' ? 'Agents' : labels.workspaceTitle
     await navigation().getByRole('button', { name, exact: true }).click()
@@ -461,22 +464,18 @@ export function activityLabel(activity: ThreadActivity): string {
   const extensions = () => page.evaluate(() => window.relay.extensions.get())
   const sourceCode = () => page.evaluate(() => window.relay.sourceCode.get())
   const openSourceCode = async () => {
-    await page
-      .getByRole('button', { name: /^Source code(?:\s|$)/ })
-      .first()
-      .click()
+    await openStudio()
+    await page.getByRole('button', { name: 'Details', exact: true }).click()
+    await page.getByRole('button', { name: 'Inspect Life source', exact: true }).click()
     const manager = page.getByRole('dialog', { name: 'Life source', exact: true })
     await manager.waitFor()
     return manager
   }
   const extensionFrame = () => page.frameLocator('iframe[title="Research tools"]')
   const openExtensions = async () => {
-    const replacementManager = page.getByRole('button', {
-      name: 'Manage extensions',
-      exact: true,
-    })
-    if (await replacementManager.isVisible()) await replacementManager.click()
-    else await page.getByRole('button', { name: /^Live extensions/ }).click()
+    await openStudio()
+    await page.getByRole('button', { name: 'Details', exact: true }).click()
+    await page.getByRole('button', { name: 'Manage and share extensions', exact: true }).click()
     const manager = page.getByRole('dialog', { name: 'Manage extensions', exact: true })
     await manager.waitFor()
     assert.equal(await manager.getByRole('tab', { name: 'Prompt', exact: true }).count(), 0)
@@ -538,16 +537,13 @@ export function activityLabel(activity: ThreadActivity): string {
   const newThread = async (provider) => {
     await workspace()
     await page.getByRole('button', { name: 'New thread', exact: true }).click()
-    await page
-      .getByRole('button', {
-        name: provider === 'codex' ? 'Codex By OpenAI' : 'Claude Code By Anthropic',
-        exact: true,
-      })
-      .click()
+    await selectModel(provider, '')
     await page.getByRole('region', { name: 'New thread', exact: true }).waitFor()
   }
   const openStudio = async () => {
-    await page.getByRole('button', { name: 'Life Studio', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Customize Life', exact: true })
+    if (!(await dialog.isVisible()))
+      await page.getByRole('button', { name: 'Customize', exact: true }).click()
     await page.getByRole('region', { name: 'Life Customization Studio', exact: true }).waitFor()
   }
   const sendStudio = async (request) => {
@@ -833,9 +829,12 @@ export function activityLabel(activity: ThreadActivity): string {
     await chooseProject({ reopen: true, browse: true })
     await page
       .getByRole('region', { name: 'New thread', exact: true })
-      .getByRole('heading', { name: "workspace's project", exact: true })
+      .getByRole('heading', { name: /^What do you want to do in workspace's project\s*\?$/ })
       .waitFor()
-    assert.equal(await page.locator('.active-project-path code').textContent(), input.workspace)
+    assert.equal(
+      await page.locator('.active-project-selector').textContent(),
+      "workspace's project",
+    )
     await environmentButton.click()
     await page.getByRole('dialog', { name: 'Current Active Environment', exact: true }).waitFor()
     assert.ok(
@@ -974,11 +973,7 @@ export function activityLabel(activity: ThreadActivity): string {
         assert.equal((await extensions()).revision, markerExtensions.revision)
         await send('native-subagent-probe')
         await waitForSend()
-        await page.locator('.thread-subagent-card').first().waitFor()
-        if (provider === 'codex')
-          await page.getByRole('list', { name: 'Subagent states', exact: true }).first().waitFor()
-        else
-          await page.getByRole('link', { name: 'Parent activity', exact: true }).first().waitFor()
+        assert.equal(await page.locator('.thread-subagent-card').count(), 0)
         const delegatedThread = await ordinaryThread(exactPrompt, provider)
         assert.ok(
           delegatedThread.messages.some(
@@ -987,10 +982,13 @@ export function activityLabel(activity: ThreadActivity): string {
               (message.agentId || message.agentName || message.parentItemId),
           ),
         )
-        await page
-          .getByText('Subagent inspected every visible output block.', { exact: true })
-          .first()
-          .waitFor()
+        assert.ok(
+          JSON.stringify(delegatedThread.messages).includes(
+            'Subagent inspected every visible output block.',
+          ),
+          'The completed display retains the full subagent result in saved history',
+        )
+        await page.locator('.thread-work-summary').last().waitFor()
         const original = await ordinaryThread(exactPrompt, provider)
         assert.ok(original.remoteId)
         await waitUntil(
@@ -1098,9 +1096,9 @@ export function activityLabel(activity: ThreadActivity): string {
         await selectRunChoice('speed', 'fast')
         const baseline = (await fixture.log()).length
         await send('queue-delay')
-        await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).waitFor()
+        await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
         await composer().fill('native-queued-follow-up')
-        await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).click()
+        await composer().press('Tab')
         const queued = page.getByRole('region', { name: 'Queued follow-up messages', exact: true })
         await queued.waitFor()
         await waitUntil(
@@ -1129,7 +1127,7 @@ export function activityLabel(activity: ThreadActivity): string {
           1,
         )
         await send('hang')
-        await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).waitFor()
+        await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
         const liveBaseline = (await fixture.log()).length
         await selectRunChoice('effort', provider === 'codex' ? 'low' : 'high')
         await selectRunChoice('speed', 'default')
@@ -1160,7 +1158,7 @@ export function activityLabel(activity: ThreadActivity): string {
         const steer = page.getByRole('button', { name: /Steer (?:the )?current (?:turn|response)/ })
         if (await steer.count()) await steer.click()
         else {
-          await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).click()
+          await composer().press('Tab')
           await queued
             .getByRole('button', { name: /Steer (?:the )?current (?:turn|response)/ })
             .click()
@@ -1190,9 +1188,9 @@ export function activityLabel(activity: ThreadActivity): string {
           .click()
         await waitForSend()
         await send('hang')
-        await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).waitFor()
+        await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
         await composer().fill('native-paused-follow-up')
-        await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).click()
+        await composer().press('Tab')
         await page
           .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
           .click()

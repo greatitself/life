@@ -1,6 +1,6 @@
 import type { ReactNode, Ref } from 'react'
 import { createPortal } from 'react-dom'
-import { FlaskConical, MessageSquare, Moon, Network, Sun } from 'lucide-react'
+import { FlaskConical, MessageSquare, Moon, Network, Paintbrush, Sun } from 'lucide-react'
 import { api } from '../api'
 import { RelayMark } from './Icons'
 import { ActiveEnvironment, type ActiveEnvironmentProps } from './ActiveEnvironment'
@@ -23,6 +23,8 @@ type TitleBarProps = {
   surfaceContentRef?: Ref<HTMLDivElement>
   leadingActionsRef?: Ref<HTMLDivElement>
   environment?: ActiveEnvironmentProps
+  studioOpen?: boolean
+  onStudioToggle?: () => void
 }
 
 function WindowGlyph({ action }: { action: 'minimize' | 'maximize' | 'restore' | 'close' }) {
@@ -81,6 +83,8 @@ export function TitleBar({
   surfaceContentRef,
   leadingActionsRef,
   environment,
+  studioOpen = false,
+  onStudioToggle,
   researchTitle = 'Map',
   workspaceTitle = 'Agents',
 }: TitleBarProps) {
@@ -154,6 +158,19 @@ export function TitleBar({
         <div className="titlebar-tools">
           {version ? <span className="version">v{version.replace(/^v/, '')}</span> : null}
           <div className="titlebar-action-slot titlebar-leading-actions" ref={leadingActionsRef} />
+          {onStudioToggle ? (
+            <button
+              type="button"
+              className="icon-button titlebar-studio-toggle"
+              aria-label="Customize"
+              aria-haspopup="dialog"
+              aria-expanded={studioOpen}
+              title="Customize"
+              onClick={onStudioToggle}
+            >
+              <Paintbrush size={16} aria-hidden="true" />
+            </button>
+          ) : null}
           <button
             type="button"
             className="icon-button titlebar-theme"

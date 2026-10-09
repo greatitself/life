@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { MessageSquare, Puzzle, RefreshCw, RotateCcw } from 'lucide-react'
 import type { LifeConfigPatch, LifeConfigState } from '../../shared/customization'
-import { errorText } from '../api'
+import { errorText, streamlinedWorkspace } from '../api'
 import { Modal } from './Modal'
 
 export function CustomizationDialog({
@@ -53,10 +53,11 @@ export function CustomizationDialog({
       <div className="customization-scope">
         <MessageSquare size={17} />
         <p>
-          Open <strong>Life Studio</strong> at the bottom of the sidebar to describe a change. Its
-          dedicated conversations can update settings, build features, and change the interface,
-          with source details, build output, and recovery controls. Project chats and Research
-          remain separate.
+          Open <strong>{streamlinedWorkspace ? 'Customize' : 'Life Studio'}</strong>{' '}
+          {streamlinedWorkspace ? 'in the header' : 'at the bottom of the sidebar'} to describe a
+          change. Its dedicated conversations can update settings, build features, and change the
+          interface, with source details, build output, and recovery controls. Project chats and
+          Research remain separate.
         </p>
       </div>
       <div className="customization-current" aria-label="Current settings">
@@ -90,13 +91,15 @@ export function CustomizationDialog({
           </ul>
         </details>
       ) : null}
-      <button
-        className="button secondary extension-entry-button"
-        disabled={busy}
-        onClick={onOpenExtensions}
-      >
-        <Puzzle size={15} /> Manage extensions
-      </button>
+      {!streamlinedWorkspace ? (
+        <button
+          className="button secondary extension-entry-button"
+          disabled={busy}
+          onClick={onOpenExtensions}
+        >
+          <Puzzle size={15} /> Manage extensions
+        </button>
+      ) : null}
       <div className="customization-file">
         <span>Live configuration</span>
         <code>{state.path || 'Browser preview storage'}</code>

@@ -6,7 +6,7 @@ import type {
   HostHistorySession,
 } from '../../shared/agent-history'
 import type { Provider } from '../../shared/types'
-import { errorText } from '../api'
+import { errorText, streamlinedWorkspace } from '../api'
 import { Modal } from './Modal'
 import { ProviderIcon } from './Icons'
 import { MessageView } from './MessageView'
@@ -324,16 +324,23 @@ export function HostHistoryDialog({
                       <button
                         className="primary-button"
                         disabled={reading}
+                        title={
+                          streamlinedWorkspace
+                            ? 'Continue this conversation as an interactive Life thread'
+                            : undefined
+                        }
                         onClick={() => {
                           onImport(page)
                           onOpenChange(false)
                         }}
                       >
-                        {page.session.lifePurpose === 'research'
-                          ? 'Open in Research'
-                          : imported
-                            ? 'Open in Life'
-                            : 'Resume in Life'}
+                        {streamlinedWorkspace && !imported
+                          ? 'Bring to Life'
+                          : page.session.lifePurpose === 'research'
+                            ? 'Open in Research'
+                            : imported
+                              ? 'Open in Life'
+                              : 'Resume in Life'}
                         <ArrowRight size={14} />
                       </button>
                     )}

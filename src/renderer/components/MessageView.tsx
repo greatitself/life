@@ -23,6 +23,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Provider, AgentEvent } from '../../shared/types'
 import type { Message } from '../state'
+import { streamlinedWorkspace } from '../api'
 import { ProviderIcon } from './Icons'
 import { AttachmentList } from './ThreadAttachments'
 import { splitSourceMessage, withoutSourceReceiptNotice } from '../source-presentation'
@@ -187,13 +188,16 @@ const markdownComponents = {
 export const MessageView = memo(function MessageView({
   message,
   provider,
+  minimal = false,
 }: {
   message: Message
   provider: Provider
+  minimal?: boolean
 }) {
   const [rawOpen, setRawOpen] = useState(false)
   const { copied, copy } = useCopy(message.text)
-  const phase = messagePhaseLabel(message)
+  const phase =
+    streamlinedWorkspace && message.kind === 'reasoning' ? undefined : messagePhaseLabel(message)
   const parts = useMemo(
     () =>
       message.role === 'assistant'
@@ -255,30 +259,34 @@ export const MessageView = memo(function MessageView({
       tabIndex={-1}
       aria-label={message.role === 'user' ? 'Your message' : phase || 'Agent message'}
     >
-      <div className="message-label">
-        {message.role !== 'user' ? (
-          <>
-            <span className={`agent-avatar ${provider}`}>
-              <ProviderIcon provider={provider} brand size={16} />
+      {!minimal ? (
+        <div className="message-label">
+          {message.role !== 'user' ? (
+            <>
+              <span className={`agent-avatar ${provider}`}>
+                <ProviderIcon provider={provider} brand size={16} />
+              </span>
+              <strong>
+                {message.agentName || (provider === 'codex' ? 'Codex' : 'Claude Code')}
+              </strong>
+            </>
+          ) : null}
+          {phase ? <span className="thread-message-phase">{phase}</span> : null}
+          {message.role === 'assistant' && (message.agentId || message.parentItemId) ? (
+            <span className="thread-message-agent">
+              {message.agentName || `Subagent ${message.agentId || ''}`}
             </span>
-            <strong>{message.agentName || (provider === 'codex' ? 'Codex' : 'Claude Code')}</strong>
-          </>
-        ) : null}
-        {phase ? <span className="thread-message-phase">{phase}</span> : null}
-        {message.role === 'assistant' && (message.agentId || message.parentItemId) ? (
-          <span className="thread-message-agent">
-            {message.agentName || `Subagent ${message.agentId || ''}`}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          className="icon-button copy-message"
-          aria-label="Copy message"
-          onClick={() => void copy()}
-        >
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
-      </div>
+          ) : null}
+          <button
+            type="button"
+            className="icon-button copy-message"
+            aria-label="Copy message"
+            onClick={() => void copy()}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+          </button>
+        </div>
+      ) : null}
       <div className="markdown">
         {plan.length ? (
           <ol className="thread-plan-steps" aria-label="Agent plan">
@@ -317,7 +325,7 @@ export const MessageView = memo(function MessageView({
         ) : null}
       </div>
       <AttachmentList attachments={message.attachments || []} />
-      {message.text || providerDetails ? (
+      {!streamlinedWorkspace && (message.text || providerDetails) ? (
         <details
           className="thread-original-message"
           onToggle={(event) => setRawOpen(event.currentTarget.open)}

@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import type { LifeSourceContext, LifeSourcePatch } from '../../shared/source-code'
 import { lifeSourcePathSchema } from '../../shared/source-code'
-import { api, errorText } from '../api'
+import { api, errorText, streamlinedWorkspace } from '../api'
 import { useSourceCode } from '../useSourceCode'
 import { Modal } from './Modal'
 import './source-code.css'
@@ -230,7 +230,11 @@ export function SourceCodeDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Life source"
-      description="Inspect the source behind your interface. Ask for changes in Life Studio at the bottom of the sidebar."
+      description={
+        streamlinedWorkspace
+          ? 'Inspect the source behind your interface. Open Customize in the header to request a change.'
+          : 'Inspect the source behind your interface. Ask for changes in Life Studio at the bottom of the sidebar.'
+      }
       className="source-code-modal"
     >
       {!api ? (

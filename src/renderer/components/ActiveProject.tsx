@@ -30,6 +30,27 @@ export function ActiveProject({
   const hasProject = Boolean(environment.workspace)
   const projectLabel = scope === 'research' ? 'Research directory' : 'Active project'
 
+  if (scope === 'agents' && connected && hasProject) {
+    return (
+      <section className="active-project-start active-project-prompt" aria-label="New thread">
+        <h1>
+          What do you want to do in{' '}
+          <button
+            type="button"
+            className="active-project-selector"
+            onClick={onChooseProject}
+            disabled={!connected || !onChooseProject}
+            aria-haspopup="dialog"
+            title={hasProject ? 'Change project' : 'Choose project'}
+          >
+            {environment.projectName || 'your project'}
+          </button>
+          ?
+        </h1>
+      </section>
+    )
+  }
+
   return (
     <section className="active-project-start" aria-label="New thread">
       <div className="active-project-eyebrow">

@@ -63,7 +63,9 @@ async function main() {
   })
   try {
     await page.goto(base)
-    await page.getByRole('heading', { name: 'life-example', exact: true }).waitFor()
+    await page
+      .getByRole('heading', { name: /^What do you want to do in life-example\s*\?$/ })
+      .waitFor()
     assert.equal(
       await page.getByRole('complementary', { name: 'Browser preview information' }).count(),
       1,
@@ -96,7 +98,9 @@ async function main() {
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'light')
     await page.screenshot({ path: resolve(artifacts, 'agents-light.png') })
     await page.reload()
-    await page.getByRole('heading', { name: 'life-example', exact: true }).waitFor()
+    await page
+      .getByRole('heading', { name: /^What do you want to do in life-example\s*\?$/ })
+      .waitFor()
     assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'light')
     checks.push('Light and dark themes persist across reload')
     await page.getByRole('button', { name: 'Research', exact: true }).click()
@@ -295,7 +299,9 @@ async function main() {
     })
     assert.equal(builtin.enabled, false)
     await page.reload()
-    await page.getByRole('heading', { name: 'life-example', exact: true }).waitFor()
+    await page
+      .getByRole('heading', { name: /^What do you want to do in life-example\s*\?$/ })
+      .waitFor()
     const choice = await page.evaluate(
       async (id) =>
         (await window.relay.sourceCode.get()).extensions.find((entry) => entry.id === id).enabled,
@@ -309,12 +315,46 @@ async function main() {
     checks.push(
       'Built-in feature changes are real and persist independently of native source compilation',
     )
-    await page.getByRole('button', { name: 'Life Studio', exact: true }).click()
+    await page.getByRole('button', { name: 'Customize', exact: true }).click()
     await page.getByRole('heading', { name: 'Make Life yours', exact: true }).first().waitFor()
     await page.screenshot({ path: resolve(artifacts, 'studio-dark.png') })
-    await page.getByRole('button', { name: 'Map', exact: true }).click()
+    await page
+      .getByRole('dialog', { name: 'Customize Life', exact: true })
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click()
+    await page
+      .getByRole('navigation', { name: 'Workspace views' })
+      .getByRole('button', { name: 'Map', exact: true })
+      .click()
     await page.screenshot({ path: resolve(artifacts, 'map-dark.png') })
     checks.push('Studio and Map render from the same application')
+    const mapFeatureId = await page.evaluate(async () => {
+      const state = await window.relay.sourceCode.get()
+      const item = state.extensions.find((entry) => entry.features?.includes('project-map'))
+      await window.relay.sourceCode.setExtensionEnabled(item.id, false)
+      return item.id
+    })
+    await page.getByRole('heading', { name: 'Project Map is disabled', exact: true }).waitFor()
+    assert.equal(
+      await page.getByRole('button', { name: 'Manage extensions', exact: true }).count(),
+      0,
+    )
+    await page.getByRole('button', { name: 'Customize Life', exact: true }).click()
+    const customization = page.getByRole('dialog', { name: 'Customize Life', exact: true })
+    await customization
+      .getByRole('button', { name: 'Manage and share extensions', exact: true })
+      .click()
+    await page
+      .getByRole('dialog', { name: 'Manage extensions', exact: true })
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click()
+    await customization.waitFor()
+    await page.evaluate(
+      async (id) => window.relay.sourceCode.setExtensionEnabled(id, true),
+      mapFeatureId,
+    )
+    await customization.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    checks.push('Disabled features route extension management through Customize and return to it')
     await page.setViewportSize({ width: 390, height: 844 })
     await page.reload()
     await page.getByRole('button', { name: 'Research', exact: true }).waitFor()

@@ -296,7 +296,7 @@ async function runResearchMethodChecks(context) {
         .some((entry) => promptFrom(entry) === firstRequest),
     'The first operator request reaches the real provider channel',
   )
-  await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
   const first = JSON.parse(
     await readFile(join(conversationDirectory, '.life-context.json'), 'utf8'),
   )
@@ -339,7 +339,7 @@ async function runResearchMethodChecks(context) {
   const queuedRequest =
     '  Compare the recorded evidence exactly as stated.\nKeep this request unchanged.  '
   await context.composer().fill(queuedRequest)
-  await page.getByRole('button', { name: 'Queue follow-up message', exact: true }).click()
+  await context.composer().press('Tab')
   await context.waitUntil(
     async () =>
       (await threads(page)).some((thread) =>

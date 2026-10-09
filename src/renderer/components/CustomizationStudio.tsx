@@ -26,6 +26,7 @@ import { ApprovalCard } from './MessageView'
 import { ProviderIcon } from './Icons'
 import { ReferenceComposerControls } from './ReferenceComposer'
 import { ThreadTimeline } from './ThreadTimeline'
+import { Modal } from './Modal'
 import './customization-studio.css'
 
 const stageNames: Record<StudioStage, string> = {
@@ -135,6 +136,8 @@ function ProposalDetails({ proposal }: { proposal: StudioProposal }) {
 
 export function CustomizationStudio({
   visible = true,
+  dialog = false,
+  onOpenChange,
   connection,
   config,
   extensions,
@@ -147,6 +150,8 @@ export function CustomizationStudio({
   onOpenSettings,
 }: StudioOptions & {
   visible?: boolean
+  dialog?: boolean
+  onOpenChange?: (open: boolean) => void
   onConnect: () => void
   onOpenExtensions: () => void
   onOpenSource: () => void
@@ -224,7 +229,7 @@ export function CustomizationStudio({
     }
   }
 
-  return (
+  const content = (
     <section
       className="customization-studio"
       hidden={!visible}
@@ -233,7 +238,7 @@ export function CustomizationStudio({
       <aside className="studio-history" aria-label="Customization conversations">
         <div className="studio-history-heading">
           <Sparkles size={15} />
-          <strong>Life Studio</strong>
+          <strong>{dialog ? 'Customizations' : 'Life Studio'}</strong>
         </div>
         <button className="button secondary studio-new" onClick={() => studio.newSession()}>
           <MessageSquarePlus size={14} /> New customization
@@ -666,5 +671,26 @@ export function CustomizationStudio({
         </div>
       </aside>
     </section>
+  )
+  return dialog ? (
+    <Modal
+      open={visible}
+      onOpenChange={(open) => onOpenChange?.(open)}
+      title="Customize Life"
+      description="Describe a change, review the result, and customize your workspace."
+      className="life-studio-dialog"
+      onCloseAutoFocus={(event) => {
+        event.preventDefault()
+        if (
+          !document.querySelector('[role="dialog"][data-state="open"]:not(.life-studio-dialog)')
+        ) {
+          document.querySelector<HTMLButtonElement>('.titlebar-studio-toggle')?.focus()
+        }
+      }}
+    >
+      {content}
+    </Modal>
+  ) : (
+    content
   )
 }

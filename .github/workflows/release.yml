@@ -40,6 +40,7 @@ jobs:
       - run: node tests/thread-presentation-smoke.cjs
       - run: node tests/studio-lifecycle-smoke.cjs
       - run: node tests/app-live-controls-smoke.cjs
+      - run: node tests/app-live-controls-smoke.cjs --preview
       - run: node tests/run-selectors-smoke.cjs
       - run: node tests/research-method-ui-smoke.cjs
       - run: xvfb-run -a npm run test:desktop
@@ -95,10 +96,10 @@ jobs:
           path: .release-verification
           sparse-checkout: tests/windows-upgrade.ps1
           sparse-checkout-cone-mode: false
-      - name: Verify Windows upgrades from Life 0.1.0, 0.5.1 and 0.6.0
+      - name: Verify Windows upgrades from Life 0.1.0, 0.5.1, 0.6.0 and 0.7.0
         if: matrix.platform == 'windows-x64'
         shell: pwsh
-        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1','0.6.0')
+        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1','0.6.0','0.7.0')
       - name: Save Windows upgrade proof
         if: matrix.platform == 'windows-x64'
         uses: actions/upload-artifact@v4

@@ -2,11 +2,188 @@
 // Exercise Life's actual App, UI handlers and IndexedDB in Chromium.
 const assert = require('node:assert/strict')
 const { createServer } = require('node:http')
-const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
+const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { build } = require('esbuild')
 const { chromium } = require('playwright')
+const preview = process.argv.includes('--preview')
+
+async function previewChecks(page, checks) {
+  const artifacts = resolve(__dirname, '../output/playwright/v0.8.0')
+  await mkdir(artifacts, { recursive: true })
+  assert.equal(
+    await page
+      .locator('.sidebar .life-studio-entry, .sidebar [aria-label="Live extensions"]')
+      .count(),
+    0,
+  )
+  const customize = page.getByRole('button', { name: 'Customize', exact: true })
+  assert.equal(await customize.locator('.lucide-paintbrush').count(), 1)
+  assert.equal(await customize.locator('span').count(), 0)
+  await customize.click()
+  let studio = page.getByRole('dialog', { name: 'Customize Life', exact: true })
+  const studioDraft = studio.getByRole('textbox', { name: 'Describe a Life customization' })
+  await studioDraft.fill('Keep this customization draft across dialog closes.')
+  await page.screenshot({ path: join(artifacts, 'customize.png') })
+  await studio.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await customize.click()
+  assert.equal(
+    await studioDraft.inputValue(),
+    'Keep this customization draft across dialog closes.',
+  )
+  await studio.getByRole('button', { name: 'Manage and share extensions', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Manage extensions', exact: true }).waitFor()
+  await page
+    .getByRole('dialog', { name: 'Manage extensions', exact: true })
+    .getByRole('button', { name: 'Close dialog', exact: true })
+    .click()
+  await studio.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  checks.push(
+    'An icon-only Customize header button opens a state-preserving dialog; extensions are managed from it',
+  )
+
+  const environment = page.getByRole('button', { name: 'Current Active Environment', exact: true })
+  assert.equal(await environment.evaluate((el) => getComputedStyle(el).borderRadius), '9999px')
+  assert.equal(
+    await environment.evaluate((el) => getComputedStyle(el.parentElement).borderBottomWidth),
+    '0px',
+  )
+  checks.push('The active environment is a pill with no underline beneath its header container')
+
+  await page.evaluate(() => {
+    const emit = window.controlsTest.emit
+    emit('thread-a')
+    emit('thread-a', 'tool', {
+      itemId: 'first-command',
+      title: 'exec_command',
+      text: 'Read the component files.',
+      status: 'completed',
+    })
+    emit('thread-a', 'text', {
+      itemId: 'progress',
+      phase: 'commentary',
+      text: 'The header is updated. I am checking the thread controls.',
+    })
+    emit('thread-a', 'reasoning', {
+      itemId: 'reasoning',
+      text: '**Checking the thread layout**\nPreserve the reported events.',
+    })
+    emit('thread-a', 'tool', {
+      itemId: 'last-command',
+      title: 'npm run typecheck',
+      text: 'Types passed.',
+      status: 'completed',
+    })
+  })
+  await page
+    .getByText('The header is updated. I am checking the thread controls.', { exact: true })
+    .waitFor()
+  assert.equal(await page.locator('.thread-action-disclosure[open]').count(), 0)
+  assert.equal(await page.locator('.thread-action-disclosure').count(), 3)
+  assert.equal(await page.locator('.thread-original-message').count(), 0)
+  assert.equal(await page.getByText('Reasoning summary', { exact: true }).count(), 0)
+  assert.equal(await page.locator('.composer-steer').count(), 0)
+  await page.screenshot({ path: join(artifacts, 'running.png') })
+  checks.push(
+    'Actions stay collapsed around expanded progress updates, with no Original message or Reasoning summary labels',
+  )
+
+  const composer = page.getByRole('textbox', { name: 'Message your coding agent' })
+  const send = page.getByRole('button', { name: 'Steer current response', exact: true })
+  const exact = '  Steer with exactly this text.\nNo extra words.  '
+  await composer.fill(exact)
+  assert.equal(
+    await send.evaluate((el) => getComputedStyle(el).backgroundColor),
+    'rgb(244, 196, 78)',
+  )
+  await composer.press('Enter')
+  await page.waitForFunction(() => window.controlsTest.records.steering.length === 1)
+  assert.equal(await page.evaluate(() => window.controlsTest.records.steering[0].prompt), exact)
+  await composer.fill('Steering from the yellow send button.')
+  await send.click()
+  await page.waitForFunction(() => window.controlsTest.records.steering.length === 2)
+  assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
+  await composer.fill('Queue this exact follow-up.')
+  await composer.press('Tab')
+  await page.getByRole('region', { name: 'Queued follow-up messages' }).waitFor()
+  await page.waitForFunction(
+    () => window.controlsTest.stored().find((t) => t.id === 'thread-a').queue?.length === 1,
+  )
+  assert.equal(await composer.inputValue(), '')
+  assert.equal(await page.evaluate(() => window.controlsTest.records.steering.length), 2)
+  assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
+  await page.getByRole('button', { name: 'Remove queued message', exact: true }).click()
+  checks.push(
+    'Enter and the yellow send button steer the exact draft; Tab queues without steering or starting another turn',
+  )
+
+  await page.evaluate(() => {
+    window.controlsTest.emit('thread-a', 'text', {
+      itemId: 'final',
+      phase: 'final_answer',
+      text: 'The requested changes are ready.',
+      status: 'replace',
+    })
+    window.controlsTest.emit('thread-a', 'complete', { status: 'completed' })
+  })
+  await page.getByText('The requested changes are ready.', { exact: true }).waitFor()
+  await page.getByText(/^Worked for /).waitFor()
+  assert.equal(
+    await page
+      .locator('.thread-action-disclosure, .thread-work-activity, .thread-original-message')
+      .count(),
+    0,
+  )
+  assert.equal(
+    await page
+      .getByText('The header is updated. I am checking the thread controls.', { exact: true })
+      .count(),
+    0,
+  )
+  assert.ok(
+    await page.evaluate(() =>
+      window.controlsTest
+        .stored()
+        .find((t) => t.id === 'thread-a')
+        .messages.some((m) => m.title === 'exec_command'),
+    ),
+  )
+  await page.screenshot({ path: join(artifacts, 'completed.png') })
+  checks.push(
+    'Completion leaves only the parent final response and Worked for time; stored activity stays intact',
+  )
+
+  for (const provider of ['codex', 'claude']) {
+    await page.getByRole('button', { name: 'Host chat history', exact: true }).click()
+    const history = page.getByRole('dialog', { name: 'Host chat history', exact: true })
+    await history
+      .getByRole('button')
+      .filter({ hasText: `External ${provider} conversation` })
+      .click()
+    await history.getByRole('button', { name: 'Bring to Life', exact: true }).click()
+    await page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+    const before = await page.evaluate(() => window.controlsTest.records.starts.length)
+    await composer.fill(`Continue the imported ${provider} conversation.`)
+    await composer.press('Enter')
+    await page.waitForFunction(
+      (before) => window.controlsTest.records.starts.length === before + 1,
+      before,
+    )
+    const start = await page.evaluate(() => window.controlsTest.records.starts.at(-1))
+    assert.equal(start.provider, provider)
+    assert.equal(start.remoteId, `external-${provider}`)
+    assert.equal(start.workspace, '/srv/project')
+    assert.equal(start.prompt, `Continue the imported ${provider} conversation.`)
+    await page.evaluate(
+      (id) => window.controlsTest.emit(id, 'complete', { status: 'completed' }),
+      start.sessionId,
+    )
+  }
+  checks.push(
+    'Bring to Life imports both external Codex and Claude conversations and resumes their original provider IDs and project',
+  )
+}
 
 async function run() {
   const directory = await mkdtemp(join(tmpdir(), 'life-app-live-controls-'))
@@ -26,6 +203,8 @@ async function run() {
           import {createRoot} from 'react-dom/client'
           import {App} from './src/renderer/App'
           import {defaultLifeConfig} from './src/shared/customization'
+          import './src/renderer/styles.css'
+          ${preview ? "import './src/renderer/web-preview.css'; document.documentElement.classList.add('life-browser-preview');" : ''}
           window.testConfig = {...defaultLifeConfig, workspacePanel:false}
           createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>)
         `,
@@ -33,7 +212,10 @@ async function run() {
       bundle: true,
       jsx: 'automatic',
       outfile: join(directory, 'fixture.js'),
-      define: { 'process.env.NODE_ENV': '"development"' },
+      define: {
+        'process.env.NODE_ENV': '"development"',
+        'import.meta.env.VITE_LIFE_WEB_PREVIEW': JSON.stringify(preview ? 'true' : 'false'),
+      },
       logLevel: 'silent',
       loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
     })
@@ -218,6 +400,30 @@ async function run() {
         subagents: [],
         warnings: [],
       })
+      for (const provider of ['codex', 'claude']) {
+        historyPages.push({
+          session: {
+            id: `${provider}:external-${provider}`,
+            provider,
+            remoteId: `external-${provider}`,
+            title: `External ${provider} conversation`,
+            workspace: profile.workspace,
+            createdAt: 1,
+            updatedAt: 2,
+            source: 'cli',
+          },
+          messages: [
+            {
+              id: `${provider}:external-user`,
+              role: 'user',
+              text: `Earlier ${provider} request.`,
+              turn: 1,
+            },
+          ],
+          subagents: [],
+          warnings: [],
+        })
+      }
       localStorage.setItem('life.active-thread.v1', 'thread-a')
       const originalTransaction = IDBDatabase.prototype.transaction
       IDBDatabase.prototype.transaction = function (...args) {
@@ -360,13 +566,21 @@ async function run() {
     await page.getByRole('textbox', { name: 'Message your coding agent' }).waitFor()
     await page.waitForFunction(() => window.controlsTest.records.stateReads >= 2)
     await settle()
+    if (preview) {
+      await previewChecks(page, checks)
+      assert.deepEqual(errors, [])
+      console.log(
+        JSON.stringify({ ok: true, preview: true, checks, browserErrors: errors }, null, 2),
+      )
+      return
+    }
     await page.evaluate(() => window.controlsTest.emit('thread-a'))
     await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
     const literal = '  Exact steering text.\n\nNo extra words.  '
     await page.getByRole('textbox', { name: 'Message your coding agent' }).fill(literal)
     await page.evaluate(() => {
       window.controlsTest.holdState(true)
-      const button = document.querySelector('.composer-steer')
+      const button = document.querySelector('.send-button.steer-send')
       button.click()
       button.click()
     })
@@ -397,7 +611,7 @@ async function run() {
       .fill('  Steer with the real attachment.\n')
     await page.evaluate(() => {
       window.controlsTest.holdWrites(true)
-      const button = document.querySelector('.composer-steer')
+      const button = document.querySelector('.send-button.steer-send')
       button.click()
       button.click()
     })
@@ -470,7 +684,7 @@ async function run() {
       await dialog.locator('.host-history-session').filter({ hasText: title }).click()
       await dialog
         .locator('.host-history-preview-header')
-        .getByRole('button', { name: /^(Open in (Life|Research)|Resume in Life)$/ })
+        .getByRole('button', { name: /^(Open in (Life|Research)|Bring to Life)$/ })
         .click()
       await dialog.waitFor({ state: 'hidden' })
       await settle()
@@ -527,7 +741,8 @@ async function run() {
       'Opening ordinary existing host history reuses its saved Life thread and preserves its transcript',
     )
     await openNativeHistory('Native verified Studio')
-    assert.equal(await page.locator('.app-shell').getAttribute('data-view'), 'customization')
+    assert.equal(await page.locator('.app-shell').getAttribute('data-view'), 'workspace')
+    await page.getByRole('dialog', { name: 'Customize Life', exact: true }).waitFor()
     assert.equal(
       await page.evaluate(() => localStorage.getItem('life.active-thread.v1')),
       'thread-b',

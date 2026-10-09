@@ -29,6 +29,7 @@ async function run() {
           import { ApprovalCard, ToolStatus } from './src/renderer/components/MessageView'
           import { ThreadRunStatus } from './src/renderer/components/ThreadRunStatus'
           import './src/renderer/styles.css'
+          import './src/renderer/workspace-presentation.css'
           import './src/renderer/components/thread-output.css'
           const original = 'Progress before the command.\\n\\n<artifact>exact original angle-bracket contents</artifact>\\n\\n- [x] Keep complete output\\n- [ ] Finish the checks\\n'
           const commandInput = 'printf "<done>\\\\n"\\ncat notes.txt\\n'
@@ -122,6 +123,12 @@ async function run() {
     })
     await page.goto('http://127.0.0.1:' + server.address().port)
     await page.locator('[data-message-id="1:error"]').waitFor()
+    assert.equal(await page.locator('.thread-action-disclosure[open]').count(), 0)
+    assert.equal(await page.locator('.thread-original-message').count(), 0)
+    await page
+      .locator('.thread-action-disclosure > summary')
+      .evaluateAll((nodes) => nodes.forEach((node) => node.click()))
+    await page.locator('[data-message-id="1:later-tool"]').waitFor()
     assert.deepEqual(
       await page
         .locator('[data-message-id]')
@@ -168,11 +175,12 @@ async function run() {
       await command.getByRole('region', { name: 'Output', exact: true }).isVisible(),
       true,
     )
-    for (const label of ['Progress update', 'Reasoning summary', 'Plan', 'Response'])
+    for (const label of ['Progress update'])
       assert.equal(
         await page.locator('.thread-message-phase').getByText(label, { exact: true }).isVisible(),
         true,
       )
+    assert.equal(await page.getByText('Reasoning summary', { exact: true }).count(), 0)
     assert.equal(await page.locator('[data-message-id="1:error"]').isVisible(), true)
     assert.match(
       await page.locator('[data-run-state="reconnecting"]').textContent(),
@@ -213,16 +221,9 @@ async function run() {
     )
     checks.push('Immutable streamed rerenders retain visible tool output and commentary')
     const commentary = page.locator('[data-message-id="1:commentary"]')
-    await commentary.locator('.thread-original-message > summary').click()
-    const exactOriginal = fixture.original + '\nStreaming update stays visible.'
-    const original = commentary.getByRole('region', { name: 'Original message', exact: true })
-    assert.equal(await original.locator('pre').textContent(), exactOriginal)
-    await original.getByRole('button', { name: 'Copy original message', exact: true }).click()
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), exactOriginal)
+    assert.equal(await commentary.locator('.thread-original-message').count(), 0)
     assert.equal(await commentary.locator('.markdown artifact').count(), 0)
-    checks.push(
-      'Original model output with angle-bracket content is inspectable and copies exactly as text',
-    )
+    checks.push('Progress renders safe Markdown without an Original message control')
     const plan = page.locator('[data-message-id="1:plan"]')
     const planList = plan.getByRole('list', { name: 'Agent plan', exact: true })
     assert.deepEqual(
@@ -240,20 +241,9 @@ async function run() {
     )
     for (const label of ['completed', 'in progress', 'pending'])
       assert.equal(await planList.getByText(label, { exact: true }).isVisible(), true)
-    await plan.locator('.thread-original-message > summary').click()
-    const planMetadata = plan.getByRole('region', { name: 'Provider details', exact: true })
-    assert.equal(
-      await planMetadata.locator('pre').textContent(),
-      JSON.stringify(fixture.planDetails, null, 2),
-    )
-    await planMetadata.getByRole('button', { name: 'Copy provider details', exact: true }).click()
-    assert.equal(
-      await page.evaluate(() => navigator.clipboard.readText()),
-      JSON.stringify(fixture.planDetails, null, 2),
-    )
-    await plan.locator('.thread-original-message > summary').click()
+    assert.equal(await plan.locator('.thread-original-message').count(), 0)
     checks.push(
-      'Actual provider plans render complete ordered steps and statuses with exact raw metadata still inspectable and copyable',
+      'Expanded actions retain complete ordered plan steps and statuses without extra raw-message controls',
     )
     const final = page.locator('[data-message-id="1:final"]')
     assert.equal(await final.locator('.markdown table').isVisible(), true)
@@ -385,7 +375,6 @@ async function run() {
     checks.push(
       'Approval failure is visible, preserves exact answers and reenables controls for a successful retry without unhandled rejection',
     )
-    await commentary.locator('.thread-original-message > summary').click()
     await page.evaluate(() => window.scrollTo(0, 0))
     await page.screenshot({ path: join(output, 'thread-presentation-v07.png') })
     await child.screenshot({ path: join(output, 'thread-presentation-v07-subagents.png') })

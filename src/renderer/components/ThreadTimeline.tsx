@@ -1,11 +1,17 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { ChevronRight, FileCode2, Folder } from 'lucide-react'
 import type { Message, Thread } from '../state'
+import { streamlinedWorkspace } from '../api'
 import { reportedFileChanges, type ThreadFileChange } from '../thread-activity'
 import { MessageView } from './MessageView'
 import { ProviderIcon } from './Icons'
 import { ThreadActivityRows } from './ThreadActivityRows'
-import { groupThreadTurns, threadOutputSequence, type TurnGroup } from '../thread-presentation'
+import {
+  completedTurnResponse,
+  groupThreadTurns,
+  threadOutputSequence,
+  type TurnGroup,
+} from '../thread-presentation'
 import './thread-experience.css'
 
 function duration(milliseconds: number): string {
@@ -23,10 +29,12 @@ function WorkActivity({
   group,
   busy,
   provider,
+  turnStatus,
 }: {
   group: TurnGroup
   busy: boolean
   provider: Thread['provider']
+  turnStatus?: string
 }) {
   const [now, setNow] = useState(Date.now)
   const started = group.user?.createdAt
@@ -50,9 +58,24 @@ function WorkActivity({
       ? `Worked for ${elapsed}`
       : 'Activity'
   const files = useMemo(
-    () => reportedFileChanges(group.messages, group.user?.fileChanges),
+    () =>
+      streamlinedWorkspace ? [] : reportedFileChanges(group.messages, group.user?.fileChanges),
     [group.messages, group.user?.fileChanges],
   )
+  const response = streamlinedWorkspace ? completedTurnResponse(group, busy, turnStatus) : undefined
+  if (response) {
+    return (
+      <div className="thread-completed-work">
+        {group.messages
+          .filter((message) => message.role === 'user')
+          .map((message) => (
+            <MessageView key={message.id} message={message} provider={provider} />
+          ))}
+        <MessageView message={response} provider={provider} minimal />
+        <p className="thread-work-summary">{elapsed ? `Worked for ${elapsed}` : 'Worked'}</p>
+      </div>
+    )
+  }
   return (
     <>
       {activity.length || elapsed || busy ? (
@@ -71,7 +94,11 @@ function WorkActivity({
           </div>
           <div className="thread-work-content">
             {activity.length ? (
-              <ThreadActivityRows messages={activity} provider={provider} />
+              <ThreadActivityRows
+                messages={activity}
+                provider={provider}
+                compact={streamlinedWorkspace}
+              />
             ) : (
               <p>
                 {busy
@@ -82,7 +109,7 @@ function WorkActivity({
           </div>
         </section>
       ) : null}
-      {files.length ? (
+      {!streamlinedWorkspace && files.length ? (
         <ChangedFiles files={files} source={Boolean(group.user?.fileChanges?.length)} />
       ) : null}
     </>
@@ -180,21 +207,24 @@ const TimelineTurn = memo(
     group,
     busy,
     provider,
+    turnStatus,
   }: {
     group: TurnGroup
     busy: boolean
     provider: Thread['provider']
+    turnStatus?: string
   }) {
     return (
       <section className="thread-timeline-turn" aria-label={`Turn ${group.turn || 1}`}>
         {group.user ? <MessageView message={group.user} provider={provider} /> : null}
-        <WorkActivity group={group} busy={busy} provider={provider} />
+        <WorkActivity group={group} busy={busy} provider={provider} turnStatus={turnStatus} />
       </section>
     )
   },
   (previous, next) =>
     previous.busy === next.busy &&
     previous.provider === next.provider &&
+    previous.turnStatus === next.turnStatus &&
     previous.group.user === next.group.user &&
     previous.group.messages.length === next.group.messages.length &&
     previous.group.messages.every((message, index) => message === next.group.messages[index]),
@@ -210,6 +240,7 @@ export function ThreadTimeline({ thread }: { thread: Thread }) {
           group={group}
           busy={thread.busy && group.turn === thread.turn}
           provider={thread.provider}
+          turnStatus={group.turn === thread.turn ? thread.turnStatus : undefined}
         />
       ))}
     </div>

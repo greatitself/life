@@ -1,0 +1,174 @@
+:root .active-project-prompt {
+  max-width: min(680px, calc(100dvw - 64px));
+  text-align: center;
+}
+:root .active-project-prompt h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  font-size: 32px;
+  font-weight: 400;
+  letter-spacing: -0.8px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+:root .active-project-selector {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline dashed;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 7px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+:root .active-project-selector:hover {
+  text-decoration-color: var(--muted);
+}
+:root .active-project-selector:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 5px;
+}
+:root .active-project-selector:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+@media (max-width: 600px) {
+  :root .active-project-prompt h1 {
+    font-size: 28px;
+  }
+}
+:root .titlebar-environment {
+  border-bottom: 0;
+}
+:root .active-environment-trigger {
+  border-radius: 9999px;
+  padding-inline: 12px;
+}
+:root .titlebar-studio-toggle[aria-expanded='true'] {
+  color: var(--text-strong);
+  background: var(--surface);
+}
+:root .modal.life-studio-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: min(1320px, calc(100dvw - 40px));
+  max-width: min(1320px, calc(100dvw - 40px));
+  height: min(880px, calc(100dvh - 64px));
+  max-height: calc(100dvh - 64px);
+  padding: 0;
+  overflow: hidden;
+  border-radius: 18px;
+}
+:root .life-studio-dialog > .modal-heading {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+}
+:root .life-studio-dialog > .customization-studio {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  grid-template-columns: 180px minmax(0, 1fr) 270px;
+}
+:root .thread-action-disclosure {
+  margin: 6px 0 12px;
+  color: var(--muted);
+}
+:root .thread-action-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+}
+:root .thread-action-heading::-webkit-details-marker {
+  display: none;
+}
+:root .thread-action-heading > svg {
+  flex-shrink: 0;
+}
+:root .thread-action-heading > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+:root .thread-action-heading > small {
+  color: var(--dim);
+  font-size: 11px;
+}
+:root .thread-action-disclosure[open] > summary > svg:first-child {
+  transform: rotate(90deg);
+}
+:root .thread-action-heading:hover {
+  color: var(--text-strong);
+}
+:root .thread-action-heading:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+:root .thread-action-content {
+  padding: 8px 0 4px 20px;
+}
+:root .thread-work-summary {
+  margin: 14px 0 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+:root
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .life-reference-composer
+  .send-button.steer-send {
+  background: #f4c44e;
+  border-color: #f4c44e;
+  color: #2d2206;
+  border-radius: 9999px;
+}
+:root
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .life-reference-composer
+  .send-button.steer-send:hover:not(:disabled) {
+  background: #ffda70;
+  border-color: #ffda70;
+}
+@media (max-width: 1100px) {
+  :root .life-studio-dialog > .customization-studio {
+    grid-template-columns: 160px minmax(0, 1fr) 230px;
+  }
+}
+@media (max-width: 850px) {
+  :root .life-studio-dialog > .customization-studio {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  :root .life-studio-dialog .studio-history {
+    flex: 0 0 auto;
+    max-height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  :root .life-studio-dialog .studio-conversation {
+    flex: 0 0 auto;
+    min-height: 500px;
+  }
+  :root .life-studio-dialog .studio-inspector {
+    flex: 0 0 auto;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}

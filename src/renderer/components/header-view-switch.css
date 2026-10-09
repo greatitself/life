@@ -1,0 +1,116 @@
+/* Keep each view's icon and label inside its own button. */
+.app-shell.life-unified-layout.life-refined-layout .titlebar-view-switch.life-header-view-switch {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  gap: 4px;
+  width: max-content;
+  min-width: 92px;
+  max-width: 100%;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.app-shell.life-unified-layout.life-refined-layout .life-header-view-switch > button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 1 auto !important;
+  width: auto !important;
+  min-width: 28px !important;
+  max-width: none !important;
+  height: 28px;
+  gap: 6px;
+  padding: 0 7px;
+  overflow: hidden;
+  border-radius: 6px;
+}
+.app-shell.life-unified-layout.life-refined-layout
+  .life-header-view-switch
+  > button[aria-pressed='false'] {
+  flex: 0 0 28px !important;
+  width: 28px !important;
+  max-width: 28px !important;
+  padding: 0;
+}
+.app-shell.life-unified-layout.life-refined-layout .life-header-view-switch > button > svg {
+  display: block;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.life-header-view-label {
+  display: none;
+  min-width: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.life-header-view-switch > button[aria-pressed='true'] > .life-header-view-label {
+  display: block;
+  flex: 0 1 auto;
+}
+.app-shell.life-unified-layout.life-refined-layout .life-header-view-switch > button::after {
+  content: none !important;
+  display: none !important;
+}
+@container (max-width: 200px) {
+  .app-shell.life-unified-layout.life-refined-layout
+    .life-header-view-switch
+    > button
+    > .life-header-view-label {
+    display: none !important;
+  }
+}
+@container (max-width: 280px) {
+  .app-shell.life-unified-layout.life-refined-layout
+    .titlebar-mac
+    .life-header-view-switch
+    > button
+    > .life-header-view-label {
+    display: none !important;
+  }
+}
+@container (max-width: 270px) {
+  .app-shell.life-unified-layout.life-refined-layout .titlebar-mac .life-header-view-switch {
+    min-width: 82px;
+    gap: 2px;
+  }
+  .app-shell.life-unified-layout.life-refined-layout
+    .titlebar-mac
+    .life-header-view-switch
+    > button {
+    flex: 0 0 26px !important;
+    width: 26px !important;
+    min-width: 26px !important;
+    max-width: 26px !important;
+    padding: 0;
+  }
+  .app-shell.life-unified-layout.life-refined-layout
+    .titlebar-mac
+    .titlebar-sidebar-row
+    > .titlebar-brand
+    > svg {
+    display: none !important;
+  }
+  .app-shell.life-unified-layout.life-refined-layout
+    .titlebar-mac
+    .titlebar-sidebar-row
+    > .titlebar-brand
+    strong {
+    font-size: 18px;
+  }
+}
+@media (max-width: 600px) {
+  .app-shell.life-unified-layout.life-refined-layout
+    .life-header-view-switch
+    > button
+    > .life-header-view-label {
+    display: none !important;
+  }
+}

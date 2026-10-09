@@ -1,7 +1,10 @@
 import type { ConnectionProfile, ConnectionState, RelayAPI } from '../shared/types'
 import type { Thread } from './state'
 
-type ThreadTarget = Pick<Thread, 'id' | 'profileId' | 'workspace' | 'workspaceUnknown' | 'remoteId'>
+type ThreadTarget = Pick<
+  Thread,
+  'id' | 'profileId' | 'workspace' | 'workspaceUnknown' | 'remoteId' | 'purpose'
+>
 type ConnectionClient = Pick<RelayAPI['connection'], 'state' | 'connect' | 'selectWorkspace'>
 
 export type ThreadContextResult =
@@ -18,6 +21,7 @@ function targetKey(thread: ThreadTarget): string {
     thread.workspace || '',
     Boolean(thread.remoteId),
     Boolean(thread.workspaceUnknown),
+    thread.purpose || 'agents',
   ])
 }
 
@@ -86,7 +90,9 @@ export class ThreadContextController {
         if (state.status === 'connecting' || profile.auth === 'password')
           return { kind: 'credentials', profileId: profile.id }
         try {
-          state = await client.connect(profile)
+          state = await client.connect(
+            thread.purpose === 'research' ? { ...profile, workspace: undefined } : profile,
+          )
         } catch {
           return current() ? { kind: 'credentials', profileId: profile.id } : { kind: 'superseded' }
         }
@@ -94,6 +100,8 @@ export class ThreadContextController {
       }
       if (state.status !== 'connected' || state.profile?.id !== thread.profileId)
         return { kind: 'credentials', profileId: thread.profileId }
+      // Research owns its cwd without selecting it as an Agents project.
+      if (thread.purpose === 'research') return { kind: 'ready', connection: state }
       if (!thread.workspace)
         return state.workspace
           ? { kind: 'ready', connection: state }

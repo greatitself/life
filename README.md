@@ -1,52 +1,58 @@
 # Life
 
-Life is an Electron research workspace for **Codex and Claude Code over SSH**, with an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a Mermaid project map, and prompt-driven customization.
+Life is an Electron research workspace for **Codex and Claude Code over SSH**, with an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
 Download installers from [GitHub Releases](https://github.com/greatitself/life/releases/latest). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
 
+Try the [public browser preview](https://greatitself.github.io/life/) to explore the same interface with editable sample Research. Your edits and preferences stay in that browser; **Export Research** downloads them. SSH connections, provider runs, native updates, and source compilation require the desktop application.
+
 ## Upgrade your installed Life
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.6.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0 and 0.5.1 releases, upgrades each, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.7.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0, 0.5.1, and 0.6.0 releases, upgrades each, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
 
-Life 0.6 includes the 27 workspace customizations from the earlier extension backup in its installed interface. They no longer need to be rebuilt or imported after an update. Exact matching installed layers are archived as **Built into Life** and remain exportable; unrelated or subsequently edited extensions are preserved.
+Life 0.7 includes all **37 incorporated customizations**: the 27 earlier workspace changes and 10 additions from the October 9 backup. They are installed features with individual enable, disable, delete, and restore controls. Exact matching old source layers remain exportable archives; unrelated or subsequently edited extensions are preserved. See the [incorporation audit](docs/backup-incorporation-2026-10-09.md) and [release notes](docs/release-notes-v0.7.0.md).
 
-## Two views, two monochrome themes
+## Workspaces and monochrome themes
 
-- **Research map:** Track projects, hypotheses, notes, tags, status, and dependencies. Link projects to saved SSH workspaces and agent threads. Switch between Mermaid graph and list views, filter and search, group by status or machine, change direction, zoom, and export SVG or Mermaid source. JSON backups preserve all project data and can be imported later.
-- **Agent workspace:** A resizable project-grouped thread rail, open conversation area, and wide diff pane bring the layout closer to T3 Code. Search, filter, sort, snooze and settle threads; attach files or images, queue follow-ups, navigate conversation messages, and choose Browser, Terminal, Files, Diff, Git and pull-request surfaces. The compact composer includes model, reasoning, speed and permission menus. Threads retain their original provider, machine and folder, restore their project automatically, and resume remote sessions after reconnecting.
+- **Research:** Manage goals, problems, notes, artifacts, and editable maps in the connected machine's `~/.life/research` directory. Research conversations have their own scope and stay out of Agents project lists. They work without selecting an Agents project. Goal overviews and individual problems use separate working directories, with native instruction files and structured context identifying the selected goal and problem. Each goal supports HTML, Mermaid, JSON, or automatic maps, with a resizable conversation panel, saved drafts, search, and filters. The project map also retains project status, tags, dependencies, and diagram export.
+- **Agents:** A resizable project-grouped thread rail, open conversation area, and wide diff pane bring the layout closer to T3 Code. The new-thread page shows the selected project, and **Current Active Environment** in the header shows the machine, connection, folder, and installed providers. Search, filter, sort, snooze and settle threads; attach files or images; navigate messages; and choose Browser, Terminal, Files, Diff, Git and pull-request surfaces. Threads restore their own project, use provider-generated titles, and show reasoning, tools, and subagent activity in order. Queue follow-ups for completion or explicitly steer a running response. Model, reasoning, and speed menus remain usable while the provider works.
 - **Dark and light:** Neutral black, white, and gray surfaces. Theme changes apply to diagrams and the terminal. Windows has rectangular controls on the right; macOS uses native traffic lights. Official Codex and Claude marks come from [SVGL](https://github.com/pheralb/svgl), with its MIT notice bundled in installers.
 
-Fresh installations open the agent workspace. Switch to **Map** from the sidebar header to manage research projects; existing saved view preferences are respected.
+Fresh installations open Agents. Use the header view controls for **Research** and the project map; existing saved view preferences are respected. See [conversations, environments, and host history](docs/conversations-and-research.md) for the detailed behavior.
 
 ![Life agent workspace in light theme](docs/images/life-workspace-light.png)
 
-## Tell Life to change itself
+## Research methods and evidence
 
-Ask Life from any existing Codex or Claude Code thread. Use `/life`, `@life`, or name Life explicitly so it can distinguish changes to the application from changes to your connected project. The composer shows the current scope; use `/project` or the scope control to return to project work. There is no separate customization conversation or prompt button.
+Research supports a trace from requirements and blockers to candidate solutions, interactions, and verification. **Anti-abstraction** decomposes a whole into constituent parts; **abstraction** composes parts into a higher-level whole. **Grounding** separately records the evidence, constraints, and assumptions supporting a claim. A cited source or proposed solution does not become a verified result automatically.
 
-Common settings work offline in the same thread:
+The 12 approaches are Explore, Anti-abstraction, Abstraction, Grounding, Constructive interference, Counterfactual, Analogy transfer, Constraint inversion, Reverse design, Morphological search, Causal intervention, and Verification. Each produces inspectable records linked by stable IDs. A submitted operation has its own immutable invocation file; the native method guide and schema supply context without adding words to your message. See the [research methodology](docs/research-method.md) for the workbench, evidence states, composition, and testing workflow.
 
-- “/life switch to light theme and use a compact layout.”
-- “Life, set font size to 16.”
-- “/life hide the workspace panel.”
+## Customize Life in Life Studio
 
-A connected Codex or Claude Code agent can edit Life’s actual **React, TypeScript/TSX, shared code, and CSS**, add npm dependencies, change settings, and create executable extensions. It uses the same thread and provider session, including follow-up questions. Life supplies exact source files when the agent requests them, stages the proposed edits, and compiles them locally with bundled npm and esbuild. You do not need a separate Node.js installation to customize the installed application. Adding packages requires access to the npm registry.
+Open **Life Studio** at the bottom of the left sidebar. It has separate customization conversations, provider controls, and an inspector for **Details**, **Changes**, **Build**, and **Recovery**. Ask naturally, for example “Replace the model dropdown with a shadcn Select,” or “Add a research-review page with saved notes.” Ordinary Agents and Research chats do not apply application proposals; `/life` is sent to their provider as the literal text you typed.
 
-Successfully compiled source becomes the active interface after a reload. Life saves the conversation before reloading and retains local workspace data. Failed builds leave the working interface active and return their diagnostics to the same agent for up to two repair attempts; one request can make up to six automatic source-read round trips. Revision checks reject proposals based on stale source. Explanations, clarification questions, and replies proposing no changes remain ordinary chat messages.
+Studio can change actual **React, TypeScript/TSX, shared source, CSS, npm dependencies, settings, and runtime extensions**. Common settings such as theme and font size work offline. Larger changes use a connected Codex or Claude Code agent, without requiring an Agents project. Life places its source context and proposal schemas in a private Studio workspace's `AGENTS.md`, `CLAUDE.md`, and `.life/*.json` files. It sends your message unchanged, including during bounded source-reading and repair continuations.
 
-Each source change becomes its own extension layer over the immutable installed source. Open **Live extensions** in the sidebar to manage source and runtime extensions. Enable, disable, remove, export, and import individual changes without replacing the entire app with another workspace. Life composes enabled layers and rebuilds the result; conflicting patches or failed builds leave the previous working interface active. Existing 0.4 customizations migrate into one legacy source extension with their edits preserved.
+**Apply valid changes automatically** is on by default. Turn it off to inspect a completed proposal and choose **Apply** or **Discard**. Source changes compile locally using bundled npm and esbuild, then reload the interface with Studio history preserved. Failed builds leave the working interface active and show their diagnostics. Each change becomes an independently managed extension. No separate local Node.js installation is needed; new npm packages require network access.
 
-Open **Settings** for configuration undo, reset, and reload. Click **Source code** in the sidebar to open **Life source**, inspect or edit files, compile and reload, restore the previous revision, use the built-in interface, or open the source folder. The local `life.config.json` file also reloads when edited externally. See [source customization](docs/source-customization.md) for the workflow and supported dependencies.
+Open **Live extensions** to manage custom source and runtime extensions and the incorporated built-in features. Disabling or deleting a built-in feature persists its choice without erasing chats, research files, or the installed recovery code; deleted features can be restored. Built-ins use feature controls rather than replaying old backup patches. Custom source layers still need to compose and compile, and incompatible changes keep the previous working build active.
 
-**Runtime extensions** can generate executable UI and behavior, including new views, CSS changes to the existing interface, or replacements for the entire workspace. Renderer extensions run in isolated frames and use the Life bridge to access connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers and can use local files, commands, and Node modules with your user permissions. Enable, disable, edit, reload, and roll back extensions without rebuilding the app. The built-in workspace remains accessible through the recovery control and **Ctrl/Cmd + Shift + L**.
+Studio's **Recovery** tab can restore the previous source revision or use the installed interface. **Ctrl/Cmd + Shift + L** remains available through the native host. Live changes cover renderer/shared source and supported backend workers; changes to the Electron host, preload bridge, native binaries, or installer signing require a packaged update. See [Life Studio and source customization](docs/source-customization.md) for context files, build controls, dependencies, sharing, and recovery.
 
-Extensions and source revisions are stored in Life’s local data directory. When an app update changes the built-in source baseline, Life preserves source extensions and starts with its built-in interface. Ask `/life update my customization for this Life version` to rebuild against the new baseline. Patches must still compose and compile; overlapping edits or changed host contracts can require repair. Renderer and shared source can change immediately; the native Electron host, preload bridge, and recovery loader remain the installed copy. Backend extensions can implement new local behavior, and advanced agent calls accept provider-specific options. Changes to Electron/native binaries or installer signing need a packaged release.
+## Your words stay your words
 
-The model, reasoning, speed and permission menus now include the Radix controls from the incorporated customization backup. They remain editable through `/life`; for example, ask “/life replace Life’s model dropdown with a shadcn Select.” The agent can add actual React component source and required npm dependencies through the live source workflow. Tailwind v4 styles also compile when the proposal includes `tailwindcss`, `@tailwindcss/postcss`, `postcss`, and the stylesheet directives. Changing styles alone does not install the requested component library.
+Life preserves the text of every submitted message. It does not append research instructions, source files, attachment explanations, or hidden title requests to your coding conversation. User-selected attachments travel as native provider content where supported; otherwise Life supplies their visible uploaded paths as separate input blocks. Providers may still load their own project `AGENTS.md` or `CLAUDE.md` and account configuration.
+
+Research instructions live in its own workspace files. Studio instructions and diagnostics live in its separate workspace files. Chat titles come from provider metadata or a separate, disposable title-generation task with the original message unchanged; title instructions never enter the coding thread. A title task may use the provider account's inference allowance. A failed title task leaves an untitled conversation usable.
+
+## Continue existing chats from your machine
+
+Open **Host chat history** after connecting to browse Codex and Claude Code conversations created outside Life. Search saved chat titles, filter by provider, refresh, and page through older sessions and messages. Preview tool results, reasoning, and saved subagents before choosing **Resume in Life**. Life copies display history and keeps the provider's existing session ID; browsing and importing do not rewrite the original provider records or send a coding prompt. Research sessions open in Research, while internal Studio and title jobs stay out of this list. A project selection is optional for browsing.
 
 ## Share a customization
 
@@ -75,13 +81,15 @@ Jump hosts use OpenSSH with key/agent authentication and must already be trusted
 
 Profiles save connection details, key **paths**, and the last selected project. Passwords, passphrases, and key contents are never saved. A changed pinned target fingerprint fails the connection. One SSH connection is active at a time; multiple agent threads can use it. Connecting does not require a project folder, and automatic forwarding starts before project selection. Selecting a saved thread restores its original project on the current machine. Saved key, agent and SSH-config profiles can reconnect automatically; missing passwords or passphrases still require the connection dialog. Rapid navigation is serialized so an older request cannot send a prompt to the wrong project.
 
-Project browsing, selection and remote execution have deadlines and settle when the connection closes. Codex resumes request thread metadata without downloading its entire remote history; Life keeps the displayed conversation locally. Invalid or oversized provider frames report a transport error rather than silently turning into a login timeout. Large activity diffs use bounded previews, and late React errors show a recoverable interface instead of an empty window. Native recovery remains available even when a renderer stops responding. Emergency extension recovery opens one review dialog and keeps SSH disconnected; saved threads remain available for normal selection afterward.
+Unexpected SSH interruption leaves a running provider in a detached remote broker. Life retries the same machine using credentials held only in memory, then catches up from its output journal without resending the prompt. The remote host needs Node.js, `nodejs`, or Python 3 for this broker; no additional npm or pip package is needed. Explicit disconnect stops automatic reconnecting. Host shutdown, a terminated provider, or restarting the Life process is different from an SSH interruption; Life does not silently restart work. See [connection continuity](docs/conversations-and-research.md#connection-continuity).
+
+Project browsing, selection and remote execution have deadlines and settle when the connection closes. Codex resumes request thread metadata without downloading its entire remote history; Life keeps the displayed conversation locally. Invalid or oversized provider frames report a transport error rather than silently turning into a login timeout. Large activity diffs use bounded previews with complete output available separately, and late React errors show a recoverable interface instead of an empty window. Native recovery remains available even when a renderer stops responding. Emergency extension recovery opens one review dialog and keeps SSH disconnected; saved threads remain available for normal selection afterward.
 
 ## Automatic port forwarding
 
 Automatic forwarding is enabled by default. While connected over SSH, Life checks for TCP services listening on loopback or all interfaces, on ports 1024 and above, and exposes up to 32 of them on `127.0.0.1` on your computer. Open **Ports** to see the remote-to-local mappings, copy an address, or open a web service in your browser. If a matching local port is occupied, Life selects an available port and shows it in the list.
 
-Turn off **Automatic port forwarding** in the Ports panel to close its tunnels. This preference survives restarts. You can also say “/life turn off automatic port forwarding” in any thread. Disconnecting closes the tunnels; reconnecting discovers services again when forwarding is enabled. Linux discovery uses `ss` or `lsof`, and macOS uses `lsof`.
+Turn off **Automatic port forwarding** in the Ports panel to close its tunnels. This preference survives restarts. You can also ask Life Studio to turn off automatic port forwarding. Disconnecting closes the tunnels; reconnecting discovers services again when forwarding is enabled. Linux discovery uses `ss` or `lsof`, and macOS uses `lsof`.
 
 ## Prepare the remote agents
 
@@ -99,7 +107,7 @@ claude auth login
 
 Life starts the installed CLI through SSH, using its remote account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard local CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
 
-Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model’s advertised capabilities; supported choices are saved per thread. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability still depends on the remote CLI version, account, and managed policy. Older providers without capability metadata retain a default choice.
+Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The interface reports the provider's actual result. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the remote CLI version, account, and managed policy.
 
 **Review actions** surfaces approval requests, **Allow edits** allows workspace edits, and **Plan only** selects the provider’s planning/read-only behavior. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
 
@@ -120,7 +128,7 @@ npm start
 npm run dist
 ```
 
-Installers appear in `release/`. Build on the target platform. `npm run dev:web` provides a browser preview at `http://localhost:5173`; SSH, native updates, executable backend extensions, and local source compilation require Electron. Development from this checkout needs Node.js; source customization inside an installed Life uses its bundled tools.
+Installers appear in `release/`. Build on the target platform. `npm run dev:web` provides the browser preview at `http://localhost:5173/life/`; `npm run build:web` builds its static files into `dist-web/`. The browser uses the shared interface with locally persistent, editable sample Research. SSH, provider execution, native updates, executable backend extensions, and local source compilation require Electron. Development from this checkout needs Node.js; source customization inside an installed Life uses its bundled tools.
 
 Pushing a version tag runs verification, builds Windows x64, Linux x64, and both macOS architectures, tests Windows upgrades, and publishes installers, updater metadata, blockmaps, and SHA-256 checksums.
 
@@ -131,6 +139,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:desktop
+npm run test:web-preview
 npm run format:check
 ```
 

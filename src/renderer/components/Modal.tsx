@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
-import { useRef, type ReactNode } from 'react'
+import { useRef, type ComponentProps, type ReactNode } from 'react'
 export function Modal({
   open,
   onOpenChange,
@@ -8,6 +8,7 @@ export function Modal({
   description,
   children,
   className = '',
+  onCloseAutoFocus,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
@@ -15,6 +16,7 @@ export function Modal({
   description: string
   children: ReactNode
   className?: string
+  onCloseAutoFocus?: ComponentProps<typeof Dialog.Content>['onCloseAutoFocus']
 }) {
   const content = useRef<HTMLDivElement>(null)
   return (
@@ -24,6 +26,7 @@ export function Modal({
         <Dialog.Content
           ref={content}
           className={`modal ${className}`}
+          onCloseAutoFocus={onCloseAutoFocus}
           onOpenAutoFocus={(event) => {
             const field = content.current?.querySelector<HTMLInputElement>(
               'input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), select:not(:disabled)',

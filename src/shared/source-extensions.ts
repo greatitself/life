@@ -80,6 +80,13 @@ export interface SourceExtensionSummary {
   description: string
   version: string
   enabled: boolean
+  /** Trusted optional feature shipped with Life; controlled without compiling archived code. */
+  builtIn?: true
+  /** Deleted built-ins stay disabled and remain available only in the recovery list. */
+  deleted?: true
+  originalId?: string
+  features?: readonly string[]
+  effect?: string
   /** Original portable bundle retained for export after its changes became built-in. */
   incorporated?: true
   files: string[]

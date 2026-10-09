@@ -89,12 +89,13 @@ describe('provider capabilities and extensible request validation', () => {
       '--permission-mode=acceptEdits',
       '-p',
       '--input-format=text',
+      '--append-system-prompt',
     ])
       expect(agentProviderOptionsSchema.safeParse({ args: [arg] }).success).toBe(false)
     expect(
       agentProviderOptionsSchema.safeParse({
         settings: { future_flag: true },
-        args: ['--append-system-prompt', 'A literal `$(command)` value'],
+        args: ['--add-dir', 'A literal `$(command)` value'],
       }).success,
     ).toBe(true)
   })
@@ -214,39 +215,77 @@ describe('actual SSH provider option routing', () => {
     const remoteId = events.find((event) => event.type === 'session')!.remoteId
     events = []
     await agents.start(
-      input('claude', { model: 'opus', reasoningEffort: '', serviceTier: 'default' }),
+      input('claude', {
+        prompt: 'Follow up with exactly this user message.',
+        model: 'opus',
+        reasoningEffort: '',
+        serviceTier: 'default',
+      }),
     )
     await completed()
-    const launches = (await fixture.log())
-      .filter((entry) => entry.provider === 'claude' && entry.argv?.includes('--model=opus'))
-      .slice(-2)
+    const logs = await fixture.log()
+    const launches = logs.filter(
+      (entry) => entry.provider === 'claude' && entry.argv?.includes('--model=opus'),
+    )
+    expect(launches).toHaveLength(1)
     expect(launches[0].argv).toContain('--effort=max')
     expect(
       JSON.parse(launches[0].argv![launches[0].argv!.indexOf('--settings') + 1]),
     ).toMatchObject({ fastMode: true })
-    expect(launches[1].argv).toContain('--resume=' + remoteId)
-    expect(launches[1].argv!.some((argument) => argument.startsWith('--effort'))).toBe(false)
+    const messages = logs
+      .filter((entry) => entry.provider === 'claude' && entry.message)
+      .map((entry) => entry.message!)
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'control_request',
+        request: { subtype: 'set_permission_mode', mode: 'plan' },
+      }),
+    )
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'control_request',
+        request: { subtype: 'set_model', model: 'opus' },
+      }),
+    )
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'control_request',
+        request: {
+          subtype: 'apply_flag_settings',
+          settings: { effortLevel: null, fastMode: false },
+        },
+      }),
+    )
+    const users = messages.filter((message) => message.type === 'user')
+    expect(users).toHaveLength(2)
+    expect(users[1]).toMatchObject({
+      session_id: remoteId,
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'Follow up with exactly this user message.' }],
+      },
+    })
     expect(
-      JSON.parse(launches[1].argv![launches[1].argv!.indexOf('--settings') + 1]),
-    ).toMatchObject({ fastMode: false })
+      messages.some(
+        (message) => message.type === 'control_request' && message.request?.subtype === 'interrupt',
+      ),
+    ).toBe(false)
   })
 
   it('quotes generic Claude arguments and forwards session-scoped settings', async () => {
-    const literal = "Do not execute `$(touch /tmp/life-provider-injection)`; quote ' me"
+    const literal = "/tmp/life-provider-`$(touch /tmp/life-provider-injection)`; quote ' me"
     await agents.start(
       input('claude', {
         providerOptions: {
           settings: { future_flag: { enabled: true } },
-          args: ['--append-system-prompt', literal],
+          args: ['--add-dir', literal],
         },
       }),
     )
     await completed()
     const launch = [...(await fixture.log())]
       .reverse()
-      .find(
-        (entry) => entry.provider === 'claude' && entry.argv?.includes('--append-system-prompt'),
-      )!
+      .find((entry) => entry.provider === 'claude' && entry.argv?.includes('--add-dir'))!
     expect(launch.argv).toContain(literal)
     expect(JSON.parse(launch.argv![launch.argv!.indexOf('--settings') + 1])).toEqual({
       future_flag: { enabled: true },

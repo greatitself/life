@@ -8,7 +8,8 @@ import { SSHConnection } from '../src/main/ssh'
 import { Agents } from '../src/main/agents'
 import type { AgentEvent, HostKeyRequest, Provider, StartInput } from '../src/shared/types'
 import { SSHFixture } from './helpers/ssh-fixture'
-import { buildLifeThreadPrompt, extractLifeThreadResponse } from '../src/renderer/life-thread'
+import { extractLifeThreadResponse } from '../src/renderer/life-thread'
+import { buildStudioInstructions } from '../src/renderer/studio-instructions'
 import { defaultLifeConfig } from '../src/shared/customization'
 
 let fixture: SSHFixture
@@ -27,6 +28,10 @@ const start = (
 ): StartInput => ({ sessionId: provider + '-local', provider, prompt, mode: 'review', ...extra })
 const eventOf = (type: AgentEvent['type'], sessionId?: string) =>
   events.find((event) => event.type === type && (!sessionId || event.sessionId === sessionId))
+const conversationLog = async () =>
+  (await fixture.log())
+    .filter((entry) => (entry as { kind?: string }).kind !== 'title-metadata')
+    .map((entry) => entry as typeof entry & Record<string, any>)
 
 beforeAll(async () => {
   fixture = await new SSHFixture().start()
@@ -44,8 +49,8 @@ beforeEach(async () => {
   agents = new Agents(connection, (event) => events.push(event))
 })
 afterEach(() => {
-  connection.disconnect()
   agents.close()
+  connection.disconnect()
 })
 
 async function connect(accept = true, selectProject = true) {
@@ -139,11 +144,15 @@ describe('project selection after SSH connection', () => {
       () => connection.read('README.md'),
       () => connection.git(),
       () => connection.openTerminal(),
-      () => agents.models('codex'),
-      () => agents.models('claude'),
       () => agents.start(start('codex', 'hello')),
     ])
       await expect(operation()).rejects.toThrow(/project|workspace/i)
+    expect(await agents.models('codex')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'fixture-model' })]),
+    )
+    expect(await agents.models('claude')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'opus' })]),
+    )
     expect(connection.state.status).toBe('connected')
     expect(connection.state.workspace).toBeUndefined()
   })
@@ -225,7 +234,7 @@ describe('project selection after SSH connection', () => {
       )
     })
 
-    it('closes the previous project agent and terminal before starting work in a different project', async () => {
+    it('keeps the previous project agent running while a new project gets its own thread and terminal', async () => {
       const nextProject = join(fixture.root, 'next-project-' + provider)
       await mkdir(nextProject, { recursive: true })
       let terminal = ''
@@ -239,14 +248,22 @@ describe('project selection after SSH connection', () => {
       await connection.selectWorkspace(nextProject)
       expect(connection.state).toMatchObject({ status: 'connected', workspace: nextProject })
       expect(terminal).toContain('[Terminal closed]')
-      expect(
-        events.some((event) => event.type === 'error' && /project/i.test(event.text || '')),
-      ).toBe(true)
-      events.length = 0
-      await agents.start(start(provider, 'hello', { workspace: nextProject }))
-      await waitFor(() => eventOf('complete'))
       expect(eventOf('error')).toBeUndefined()
-      const logs = await fixture.log()
+      expect(agents.hasRunningSessions()).toBe(true)
+      await expect(agents.start(start(provider, 'original-still-running'))).rejects.toThrow(
+        /already running/i,
+      )
+      events.length = 0
+      await agents.start(
+        start(provider, 'hello', { sessionId: provider + '-next-project', workspace: nextProject }),
+      )
+      await waitFor(() => eventOf('complete', provider + '-next-project'))
+      expect(eventOf('error')).toBeUndefined()
+      expect(agents.hasRunningSessions()).toBe(true)
+      await agents.stop(provider + '-local')
+      await waitFor(() => eventOf('complete', provider + '-local')?.status === 'interrupted')
+      expect(agents.hasRunningSessions()).toBe(false)
+      const logs = await conversationLog()
       if (provider === 'codex')
         expect(
           [...logs]
@@ -262,20 +279,16 @@ describe('project selection after SSH connection', () => {
               entry.provider === 'claude' && entry.argv && !entry.argv.includes('--version'),
           )
         expect(invocation?.argv).not.toContain('--resume=' + remoteId)
-        expect(
-          fixture.commands.some(
-            (command) => command.includes(nextProject) && command.includes('claude'),
-          ),
-        ).toBe(true)
+        expect(invocation?.cwd).toBe(nextProject)
       }
     })
 
     it('rejects an expected project mismatch before launching the provider', async () => {
-      const baseline = (await fixture.log()).length
+      const baseline = (await conversationLog()).length
       await expect(
         agents.start(start(provider, 'must-not-run', { workspace: fixture.root })),
       ).rejects.toThrow(/project|workspace/i)
-      expect((await fixture.log()).slice(baseline)).toEqual([])
+      expect((await conversationLog()).slice(baseline)).toEqual([])
       expect(connection.state.workspace).toBe(fixture.workspace)
       await agents.start(start(provider, 'hello', { workspace: fixture.workspace }))
       await waitFor(() => eventOf('complete'))
@@ -359,64 +372,256 @@ describe.each<Provider>(['codex', 'claude'])(
       expect(eventOf('error')).toBeUndefined()
     })
 
-    it('continues Life changes and clarification in the same ordinary provider conversation', async () => {
+    it('keeps native live settings and steering in the same active turn without an interrupt or synthetic prompt', async () => {
+      const baseline = (await conversationLog()).length
+      await agents.start(start(provider, 'hang'))
+      await waitFor(() => eventOf('text'))
+      const remoteId = eventOf('session')!.remoteId!
+      const configured = await agents.configure({
+        sessionId: provider + '-local',
+        model: provider === 'codex' ? 'fixture-model' : 'opus',
+        reasoningEffort: 'high',
+      })
+      expect(configured.applied).toBe('live')
+      const speed = await agents.configure({ sessionId: provider + '-local', serviceTier: 'fast' })
+      expect(speed.applied).toBe(provider === 'codex' ? 'live' : 'next-request')
+      const steering = '  native-steer-follow-up\nKeep these exact bytes.  '
+      await agents.steer({ sessionId: provider + '-local', prompt: steering })
+      await waitFor(async () =>
+        (await conversationLog())
+          .slice(baseline)
+          .some((entry) =>
+            provider === 'codex'
+              ? entry.message?.method === 'turn/steer' &&
+                entry.message.params.input[0].text === steering
+              : entry.message?.type === 'user' &&
+                entry.message.priority === 'next' &&
+                entry.message.message.content[0].text === steering,
+          ),
+      )
+      expect(agents.hasRunningSessions()).toBe(true)
+      const logs = (await conversationLog()).slice(baseline)
+      expect(
+        logs.some(
+          (entry) =>
+            entry.message?.method === 'turn/interrupt' ||
+            entry.message?.request?.subtype === 'interrupt',
+        ),
+      ).toBe(false)
+      if (provider === 'codex') {
+        const started = logs.find((entry) => entry.message?.method === 'turn/start')!
+        const applied = logs.find((entry) => entry.message?.method === 'turn/settings/update')!
+        const steered = logs.find((entry) => entry.message?.method === 'turn/steer')!
+        expect(applied.message!.params).toMatchObject({
+          threadId: remoteId,
+          model: 'fixture-model',
+          effort: 'high',
+        })
+        expect(
+          logs.find(
+            (entry) =>
+              entry.message?.method === 'turn/settings/update' &&
+              entry.message?.params.serviceTier === 'fast',
+          ),
+        ).toBeDefined()
+        expect(steered.message!.params).toMatchObject({
+          threadId: remoteId,
+          expectedTurnId: applied.message!.params.turnId,
+          input: [{ type: 'text', text: steering }],
+        })
+        expect(logs.filter((entry) => entry.message?.method === 'turn/start')).toHaveLength(1)
+        expect(started.message!.params.input).toEqual([{ type: 'text', text: 'hang' }])
+      } else {
+        const controls = logs.filter((entry) => entry.message?.type === 'control_request')
+        expect(controls.map((entry) => entry.message!.request.subtype)).toEqual(
+          expect.arrayContaining(['set_model', 'apply_flag_settings']),
+        )
+        expect(
+          controls.find((entry) => entry.message!.request.subtype === 'apply_flag_settings')!
+            .message!.request.settings,
+        ).toEqual({ effortLevel: 'high' })
+        expect(
+          controls.find(
+            (entry) =>
+              entry.message!.request.subtype === 'apply_flag_settings' &&
+              entry.message!.request.settings.fastMode === true,
+          ),
+        ).toBeDefined()
+        const inputs = logs.filter((entry) => entry.message?.type === 'user')
+        expect(inputs).toHaveLength(2)
+        expect(inputs[1].message).toMatchObject({
+          session_id: remoteId,
+          priority: 'next',
+          message: { role: 'user', content: [{ type: 'text', text: steering }] },
+        })
+      }
+      await agents.stop(provider + '-local')
+      await waitFor(() => eventOf('complete')?.status === 'interrupted')
+    })
+
+    it('receives provider-generated titles without replacing or extending the original user message', async () => {
       const baseline = (await fixture.log()).length
+      const prompt =
+        '  native-generated-title\nThis original message is longer than its provider title.  '
+      await agents.start(start(provider, prompt))
+      await waitFor(() => eventOf('complete'))
+      await waitFor(() => eventOf('title'))
+      expect(eventOf('title')?.title).toBe('Provider-generated workspace title')
+      expect(eventOf('title')?.title).not.toBe(prompt.trim())
+      const logs = (await fixture.log()).slice(baseline) as Array<
+        Awaited<ReturnType<typeof fixture.log>>[number] & Record<string, any>
+      >
+      const ordinary = logs.filter((entry) => entry.kind !== 'title-metadata')
+      const inputs = ordinary.filter((entry) =>
+        provider === 'codex'
+          ? entry.message?.method === 'turn/start'
+          : entry.message?.type === 'user',
+      )
+      expect(inputs).toHaveLength(1)
+      const blocks =
+        provider === 'codex' ? inputs[0].message!.params.input : inputs[0].message!.message.content
+      expect(blocks).toEqual([{ type: 'text', text: prompt }])
+      expect(existsSync(join(fixture.workspace, 'AGENTS.md'))).toBe(false)
+      expect(existsSync(join(fixture.workspace, 'CLAUDE.md'))).toBe(false)
+      for (const metadata of logs.filter(
+        (entry) => entry.kind === 'title-metadata' && entry.prompt !== undefined,
+      ))
+        expect(metadata.prompt).toBe(prompt)
+    })
+
+    it('preserves native subagent identity and full child output in the parent conversation', async () => {
+      await agents.start(start(provider, 'native-subagent-probe'))
+      await waitFor(() => eventOf('complete'))
+      expect(eventOf('error')).toBeUndefined()
+      const delegated = events.filter((event) => event.type === 'subagent')
+      expect(delegated.length).toBeGreaterThan(0)
+      expect(delegated.some((event) => event.status === 'completed' && event.agentId)).toBe(true)
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'text' &&
+            event.text === 'Subagent inspected every visible output block.' &&
+            event.agentId &&
+            event.agentName === 'Fixture researcher',
+        ),
+      ).toBe(true)
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'text' &&
+            event.text === 'Native subagent work completed with its full output visible.',
+        ),
+      ).toBe(true)
+    })
+
+    it('isolates Studio proposals and instruction files from exact ordinary project messages', async () => {
+      const baseline = (await conversationLog()).length
       await agents.start(start(provider, 'hello'))
       await waitFor(() => eventOf('complete'))
-      const remoteId = eventOf('session')!.remoteId!
-      for (const [request, kind] of [
+      const ordinaryId = eventOf('session')!.remoteId!
+      const studioSessionId = provider + '-studio'
+      let studioRemoteId = ''
+      const requests = [
         ['clarify customization', 'message'],
         ['no change customization', 'message'],
         ['make select components use shadcn', 'message'],
         ['add research panels', 'settings'],
         ['add executable extension counter', 'extension'],
-      ] as const) {
+      ] as const
+      for (const [request, kind] of requests) {
         events.length = 0
         await agents.start(
-          start(provider, buildLifeThreadPrompt(request, defaultLifeConfig, []), { mode: 'plan' }),
+          start(provider, request, {
+            sessionId: studioSessionId,
+            mode: 'plan',
+            scope: 'life-customization',
+            studioContext: buildStudioInstructions({
+              config: defaultLifeConfig,
+              extensions: [],
+              capabilities: ['connection.state'],
+            }),
+          }),
         )
-        await waitFor(() => eventOf('complete'))
+        await waitFor(() => eventOf('complete', studioSessionId))
         const text = events
           .filter((event) => event.type === 'text' && event.status === 'replace')
           .map((event) => event.text)
           .join('\n')
         expect(extractLifeThreadResponse(text).kind, request).toBe(kind)
         expect(eventOf('error')).toBeUndefined()
-        if (eventOf('session')) expect(eventOf('session')!.remoteId).toBe(remoteId)
+        if (!studioRemoteId) studioRemoteId = eventOf('session', studioSessionId)!.remoteId!
+        if (eventOf('session', studioSessionId))
+          expect(eventOf('session', studioSessionId)!.remoteId).toBe(studioRemoteId)
+        expect(connection.state.workspace).toBe(fixture.workspace)
       }
+      expect(studioRemoteId).not.toBe(ordinaryId)
       events.length = 0
-      await agents.start(start(provider, 'remote-life-markers'))
-      await waitFor(() => eventOf('complete'))
+      const literal = '  /life literal message\nDo not change the application.  '
+      await agents.start(start(provider, literal))
+      await waitFor(() => eventOf('complete', provider + '-local'))
       const source = events.find(
         (event) => event.type === 'text' && event.status === 'replace',
       )!.text!
       expect(extractLifeThreadResponse(source, false)).toEqual({ kind: 'message', message: source })
-      const logs = (await fixture.log())
+      const logs = (await conversationLog())
         .slice(baseline)
         .filter((entry) => entry.provider === provider)
+      const studioEvidence = logs.filter((entry) => entry.kind === 'studio-context')
+      expect(studioEvidence).toHaveLength(requests.length)
+      expect(studioEvidence.map((entry) => entry.prompt)).toEqual(
+        requests.map(([request]) => request),
+      )
+      for (const evidence of studioEvidence) {
+        expect(evidence.cwd).toMatch(/\/\.life\/customization\/[a-f0-9]{64}$/)
+        expect(evidence.phase).toBe('request')
+        expect(evidence.instructions).toContain('# Life Customization Studio')
+        expect(evidence.instructions).not.toContain(evidence.prompt)
+        expect(evidence.contextFiles).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ path: '.life/configuration.json' }),
+            expect.objectContaining({ path: '.life/source-schema.json' }),
+            expect.objectContaining({ path: '.life/bridge.json' }),
+          ]),
+        )
+      }
+      const turns = logs.filter((entry) =>
+        provider === 'codex'
+          ? entry.message?.method === 'turn/start'
+          : entry.message?.type === 'user',
+      )
+      expect(turns).toHaveLength(7)
+      const inputOf = (entry: (typeof turns)[number]) =>
+        provider === 'codex' ? entry.message!.params.input : entry.message!.message.content
+      expect(turns.map((entry) => inputOf(entry)[0].text)).toEqual([
+        'hello',
+        ...requests.map(([request]) => request),
+        literal,
+      ])
+      expect(turns.every((entry) => inputOf(entry).length === 1)).toBe(true)
       if (provider === 'codex') {
-        const turns = logs.filter((entry) => entry.message?.method === 'turn/start')
-        expect(turns).toHaveLength(7)
-        expect(turns.every((entry) => entry.message?.params?.threadId === remoteId)).toBe(true)
+        expect(turns[0].message!.params.threadId).toBe(ordinaryId)
+        expect(turns.at(-1)!.message!.params.threadId).toBe(ordinaryId)
+        expect(
+          turns.slice(1, 6).every((entry) => entry.message!.params.threadId === studioRemoteId),
+        ).toBe(true)
         expect(
           turns
             .slice(1, 6)
-            .every((entry) => entry.message?.params?.sandboxPolicy?.type === 'readOnly'),
+            .every((entry) => entry.message!.params.sandboxPolicy.type === 'readOnly'),
         ).toBe(true)
-        expect(turns.at(-1)?.message?.params?.sandboxPolicy?.type).toBe('workspaceWrite')
-        expect(logs.filter((entry) => entry.message?.method === 'thread/start')).toHaveLength(1)
+        expect(turns.at(-1)!.message!.params.sandboxPolicy.type).toBe('workspaceWrite')
+        expect(logs.filter((entry) => entry.message?.method === 'thread/start')).toHaveLength(2)
       } else {
-        const invocations = logs.filter((entry) => entry.argv && !entry.argv.includes('--version'))
-        expect(invocations).toHaveLength(7)
+        const invocations = logs.filter((entry) =>
+          entry.argv?.includes('--include-partial-messages'),
+        )
+        expect(invocations).toHaveLength(2)
         expect(
-          invocations.slice(1).every((entry) => entry.argv!.includes('--resume=' + remoteId)),
-        ).toBe(true)
-        expect(
-          invocations
-            .slice(1, 6)
-            .every((entry) => entry.argv![entry.argv!.indexOf('--permission-mode') + 1] === 'plan'),
-        ).toBe(true)
-        expect(invocations.at(-1)?.argv).toContain('default')
+          invocations.find((entry) => /\/\.life\/customization\//.test(entry.cwd))?.argv,
+        ).toContain('plan')
+        expect(invocations.find((entry) => entry.cwd === fixture.workspace)?.argv).toContain(
+          'default',
+        )
       }
     })
 
@@ -428,7 +633,7 @@ describe.each<Provider>(['codex', 'claude'])(
       expect(eventOf('complete')).toBeUndefined()
       await agents.respond(approval.sessionId, approval.requestId!, true)
       await waitFor(() => eventOf('complete'))
-      const logs = await fixture.log()
+      const logs = await conversationLog()
       if (provider === 'codex') {
         expect(events.find((event) => event.type === 'tool-output')?.text).toBe('fixture output\n')
         expect(
@@ -456,7 +661,7 @@ describe.each<Provider>(['codex', 'claude'])(
       const approval = eventOf('approval')!
       await agents.respond(approval.sessionId, approval.requestId!, false)
       await waitFor(() => eventOf('complete'))
-      const logs = await fixture.log()
+      const logs = await conversationLog()
       if (provider === 'codex')
         expect(
           [...logs]
@@ -484,7 +689,7 @@ describe.each<Provider>(['codex', 'claude'])(
         [answerId]: ['TypeScript'],
       })
       await waitFor(() => eventOf('complete'))
-      const logs = await fixture.log()
+      const logs = await conversationLog()
       if (provider === 'codex')
         expect(
           [...logs]
@@ -513,7 +718,7 @@ describe.each<Provider>(['codex', 'claude'])(
       await waitFor(() =>
         events.find((event) => event.type === 'complete' && event.status === 'interrupted'),
       )
-      const logs = await fixture.log()
+      const logs = await conversationLog()
       expect(
         logs.some(
           (entry) =>
@@ -522,6 +727,7 @@ describe.each<Provider>(['codex', 'claude'])(
               entry.message?.request?.subtype === 'interrupt'),
         ),
       ).toBe(true)
+      await agents.dispose(provider + '-local')
       connection.disconnect()
       await connection.connect(fixture.input())
       await connection.selectWorkspace(fixture.workspace)
@@ -530,7 +736,7 @@ describe.each<Provider>(['codex', 'claude'])(
         start(provider, 'hello', { remoteId, mode: 'plan', model: 'fixture-model' }),
       )
       await waitFor(() => eventOf('complete'))
-      const resumed = await fixture.log()
+      const resumed = await conversationLog()
       if (provider === 'codex') {
         expect(
           [...resumed]
@@ -569,14 +775,14 @@ describe.each<Provider>(['codex', 'claude'])(
     })
 
     it('stops during slow initialization without sending the canceled prompt or corrupting a replacement turn', async () => {
-      const baseline = (await fixture.log()).length
+      const baseline = (await conversationLog()).length
       fixture.initializationDelay = 1200
       let startupSettled = false
       const starting = agents.start(start(provider, 'canceled-before-initialization')).then(() => {
         startupSettled = true
       })
       await waitFor(async () =>
-        (await fixture.log())
+        (await conversationLog())
           .slice(baseline)
           .some(
             (entry) =>
@@ -598,7 +804,7 @@ describe.each<Provider>(['codex', 'claude'])(
       await starting
       await waitFor(() => eventOf('complete'))
       expect(eventOf('error')).toBeUndefined()
-      const messages = (await fixture.log())
+      const messages = (await conversationLog())
         .slice(baseline)
         .filter((entry) => entry.provider === provider)
         .map((entry) => entry.message)
@@ -630,7 +836,7 @@ describe.each<Provider>(['codex', 'claude'])(
       events.length = 0
       await agents.start(start(provider, 'hello'))
       await waitFor(() => eventOf('complete'))
-      const logs = await fixture.log()
+      const logs = await conversationLog()
       if (provider === 'codex')
         expect(
           [...logs]
@@ -658,12 +864,12 @@ describe('provider configuration and cancellation', () => {
   })
 
   it('resumes a large saved Codex conversation without downloading its historical turns or replacing its ID', async () => {
-    const baseline = (await fixture.log()).length
+    const baseline = (await conversationLog()).length
     await agents.start(start('codex', 'hello', { remoteId: 'codex-large-history' }))
     await waitFor(() => eventOf('complete'))
     expect(eventOf('session')?.remoteId).toBe('codex-large-history')
     expect(eventOf('error')).toBeUndefined()
-    const messages = (await fixture.log()).slice(baseline).map((entry) => entry.message)
+    const messages = (await conversationLog()).slice(baseline).map((entry) => entry.message)
     expect(messages.find((message) => message?.method === 'thread/resume')?.params).toMatchObject({
       threadId: 'codex-large-history',
       excludeTurns: true,
@@ -674,12 +880,12 @@ describe('provider configuration and cancellation', () => {
   })
 
   it('cancels a hung Codex resume immediately and permits another project thread to run', async () => {
-    const baseline = (await fixture.log()).length
+    const baseline = (await conversationLog()).length
     const starting = agents.start(
       start('codex', 'never-send-this', { remoteId: 'codex-hung-resume' }),
     )
     await waitFor(async () =>
-      (await fixture.log())
+      (await conversationLog())
         .slice(baseline)
         .some(
           (entry) =>
@@ -695,7 +901,7 @@ describe('provider configuration and cancellation', () => {
     await agents.start(start('codex', 'hello', { sessionId: 'another-project-thread' }))
     await waitFor(() => eventOf('complete', 'another-project-thread'))
     expect(
-      (await fixture.log())
+      (await conversationLog())
         .slice(baseline)
         .some(
           (entry) =>
@@ -706,12 +912,12 @@ describe('provider configuration and cancellation', () => {
   })
 
   it('ignores a cancelled delayed resume response and retries the same saved conversation without replaying the cancelled prompt', async () => {
-    const baseline = (await fixture.log()).length
+    const baseline = (await conversationLog()).length
     const starting = agents.start(
       start('codex', 'cancelled-resume-prompt', { remoteId: 'codex-delayed-resume' }),
     )
     await waitFor(async () =>
-      (await fixture.log())
+      (await conversationLog())
         .slice(baseline)
         .some((entry) => entry.message?.method === 'thread/resume'),
     )
@@ -720,7 +926,7 @@ describe('provider configuration and cancellation', () => {
     events.length = 0
     await agents.start(start('codex', 'hello'))
     await waitFor(() => eventOf('complete'))
-    const messages = (await fixture.log()).slice(baseline).map((entry) => entry.message)
+    const messages = (await conversationLog()).slice(baseline).map((entry) => entry.message)
     expect(messages.filter((message) => message?.method === 'thread/resume')).toHaveLength(2)
     expect(messages.filter((message) => message?.method === 'turn/start')).toHaveLength(1)
     expect(eventOf('session')?.remoteId).toBe('codex-delayed-resume')
@@ -771,7 +977,7 @@ describe('provider configuration and cancellation', () => {
   it('uses the documented Codex review policy and workspace sandbox', async () => {
     await agents.start(start('codex', 'hello'))
     await waitFor(() => eventOf('complete'))
-    const logs = await fixture.log()
+    const logs = await conversationLog()
     expect(
       [...logs]
         .reverse()
@@ -816,7 +1022,7 @@ describe('provider configuration and cancellation', () => {
   it('cancels a Codex turn requested while its start response is still pending', async () => {
     const starting = agents.start(start('codex', 'delay-start'))
     await waitFor(async () =>
-      (await fixture.log()).some(
+      (await conversationLog()).some(
         (entry) =>
           entry.message?.method === 'turn/start' &&
           entry.message.params.input[0].text === 'delay-start',
@@ -828,7 +1034,7 @@ describe('provider configuration and cancellation', () => {
       events.find((event) => event.type === 'complete' && event.status === 'interrupted'),
     )
     await waitFor(async () =>
-      (await fixture.log()).some((entry) => entry.message?.method === 'turn/interrupt'),
+      (await conversationLog()).some((entry) => entry.message?.method === 'turn/interrupt'),
     )
   })
 })

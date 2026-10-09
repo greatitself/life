@@ -1,5 +1,6 @@
 import { ArrowUp, Clock3, LoaderCircle, Paperclip, X } from 'lucide-react'
 import type { QueuedMessage } from '../thread-queue'
+import { researchOperationCatalog } from '../../shared/research-method'
 
 export function QueuedMessages({
   messages,
@@ -22,6 +23,13 @@ export function QueuedMessages({
       {messages.map((message) => (
         <article className="thread-queued-message" key={message.id}>
           <p>{message.text}</p>
+          {message.researchOperation ? (
+            <div className="thread-queued-files">
+              Research approach:{' '}
+              {researchOperationCatalog.find((entry) => entry.id === message.researchOperation)
+                ?.label || message.researchOperation}
+            </div>
+          ) : null}
           {message.attachments.length ? (
             <div className="thread-queued-files">
               <Paperclip size={13} aria-hidden="true" />
@@ -35,19 +43,25 @@ export function QueuedMessages({
               <Clock3 size={14} />
             )}
             <span>
-              {actionId === message.id ? 'Preparing' : message.paused ? 'Paused' : 'Queued'}
+              {actionId === message.id
+                ? 'Preparing'
+                : message.paused
+                  ? 'Paused'
+                  : 'After current turn'}
             </span>
             <button
               type="button"
               className="icon-button"
               aria-label={
                 working
-                  ? 'Interrupt current response and send this message now'
+                  ? 'Steer current response with this message'
                   : 'Send this queued message now'
               }
               title={
                 working
-                  ? 'Interrupt and send now with the selected settings'
+                  ? message.researchOperation
+                    ? 'Steer the current Research operation. The queued approach applies when sent as a new turn.'
+                    : 'Send steering without stopping the current response'
                   : 'Send now with the selected settings'
               }
               disabled={!canSendNow || Boolean(actionId)}

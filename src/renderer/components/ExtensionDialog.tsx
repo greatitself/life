@@ -31,6 +31,8 @@ import {
 import { api, errorText } from '../api'
 import { Modal } from './Modal'
 import { ExtensionBundlePreview, ShareExtensionDialog } from './ShareExtensionDialog'
+import { deleteBuiltinExtension, setBuiltinEnabled, useBuiltinFeature } from '../builtin-extensions'
+import { relatedBuiltinExtensions } from '../../shared/builtin-extensions'
 import './extensions.css'
 
 const emptySnapshot: LifeExtensionsSnapshot = {
@@ -112,6 +114,7 @@ export function ExtensionDialog({
   defaultProvider?: Provider
   onInstalled?: (manifest: LifeExtensionManifest) => void
 }) {
+  const backupEnabled = useBuiltinFeature('extension-backups')
   const [snapshot, setSnapshot] = useState<LifeExtensionsSnapshot>(emptySnapshot)
   const [sourceSnapshot, setSourceSnapshot] = useState<LifeSourceSnapshot | undefined>(undefined)
   const [tab, setTab] = useState<Tab>('installed')
@@ -303,9 +306,33 @@ export function ExtensionDialog({
     }
   }
 
-  const sourceExtensions = sourceSnapshot?.extensions || []
+  const allSourceExtensions = sourceSnapshot?.extensions || []
+  const sourceExtensions = allSourceExtensions.filter((extension) => !extension.builtIn)
+  const builtinExtensions = allSourceExtensions.filter(
+    (extension) => extension.builtIn && !extension.deleted,
+  )
+  const deletedBuiltins = allSourceExtensions.filter(
+    (extension) => extension.builtIn && extension.deleted,
+  )
+  const builtinOriginalIds = new Set(
+    allSourceExtensions
+      .filter((extension) => extension.builtIn)
+      .map((extension) => extension.originalId),
+  )
+  const visibleSourceExtensions = sourceExtensions.filter(
+    (extension) => !extension.incorporated || !builtinOriginalIds.has(extension.id),
+  )
+  const featureEnabled = (extension: LifeSourceSnapshot['extensions'][number]) => extension.enabled
+
+  async function changeBuiltin(action: () => Promise<LifeSourceSnapshot>) {
+    setSourceSnapshot(await action())
+    setFeedback(
+      'Built-in feature choices are live and saved for the next startup. Conversations and project files are preserved.',
+    )
+  }
 
   async function exportAllExtensions() {
+    if (!backupEnabled) return
     if (!api) throw new Error('Open Life on your computer to export extensions.')
     const source = await Promise.all(
       sourceExtensions.map(async (extension) => ({
@@ -333,7 +360,8 @@ export function ExtensionDialog({
     sourceSnapshot !== undefined &&
     !sourceSnapshot.enabled &&
     sourceExtensions.some((extension) => extension.enabled)
-  const count = snapshot.extensions.length + sourceExtensions.length
+  const count =
+    snapshot.extensions.length + visibleSourceExtensions.length + builtinExtensions.length
   const busy = mutating
   const recoveryShortcut = api?.platform === 'darwin' ? '⌘+Shift+L' : 'Ctrl+Shift+L'
   return (
@@ -342,7 +370,7 @@ export function ExtensionDialog({
         open={open}
         onOpenChange={onOpenChange}
         title="Manage extensions"
-        description="Every /life code change is a named extension. Enable, review, export, or share your changes here."
+        description="Enable, disable, delete, export, or share extensions, including features built into Life."
         className="extensions-modal"
       >
         <div className="extension-scope">
@@ -421,25 +449,206 @@ export function ExtensionDialog({
                 change applies those choices again.
               </div>
             ) : null}
-            <div className="extension-card-actions">
-              <button
-                className="button secondary"
-                disabled={busy || !api}
-                onClick={() => void run(exportAllExtensions)}
-                title="Download every installed runtime and source extension, including full source payloads and saved state"
-              >
-                <Download size={13} /> Export all extensions
-              </button>
-            </div>
-            {!count ? (
+            {sourceSnapshot?.builtInError ? (
+              <div className="form-error" role="alert">
+                {sourceSnapshot.builtInError}
+              </div>
+            ) : null}
+            {backupEnabled ? (
+              <div className="extension-card-actions">
+                <button
+                  className="button secondary"
+                  disabled={busy || !api}
+                  onClick={() => void run(exportAllExtensions)}
+                  title="Download every installed runtime and source extension, including full source payloads and saved state"
+                >
+                  <Download size={13} /> Export all extensions
+                </button>
+              </div>
+            ) : null}
+            {!count && !deletedBuiltins.length ? (
               <div className="extensions-empty">
                 <Puzzle size={24} />
                 <strong>A workspace that can grow with you.</strong>
-                <p>Ask Life to change itself in any thread, or import an extension here.</p>
+                <p>Open Life Studio to change the application, or import an extension here.</p>
               </div>
             ) : (
               <div className="extension-list">
-                {sourceExtensions.map((extension) => (
+                {builtinExtensions.map((extension) => {
+                  const archive = sourceExtensions.find(
+                    (candidate) => candidate.id === extension.originalId && candidate.incorporated,
+                  )
+                  const related = relatedBuiltinExtensions(extension.id)
+                  const disabledRelated = related.filter((candidate) =>
+                    allSourceExtensions.some(
+                      (state) => state.id === candidate.id && (!state.enabled || state.deleted),
+                    ),
+                  )
+                  return (
+                    <article
+                      className="extension-card"
+                      key={extension.id}
+                      data-extension-kind="built-in"
+                      data-extension-id={extension.id}
+                    >
+                      <div className="extension-card-heading">
+                        <Puzzle size={18} />
+                        <div>
+                          <h3>{extension.name}</h3>
+                          <span>Built into Life · v{extension.version}</span>
+                        </div>
+                        <label className="extension-toggle">
+                          <input
+                            type="checkbox"
+                            aria-label={`Enable ${extension.name}`}
+                            checked={extension.enabled}
+                            disabled={busy || !api}
+                            onChange={(event) => {
+                              const enabled = event.target.checked
+                              void run(() =>
+                                changeBuiltin(() =>
+                                  setBuiltinEnabled(api!.sourceCode, extension.id, enabled),
+                                ),
+                              )
+                            }}
+                          />
+                          <span>{extension.enabled ? 'Enabled' : 'Disabled'}</span>
+                        </label>
+                      </div>
+                      <p>{extension.effect}</p>
+                      {extension.enabled && disabledRelated.length ? (
+                        <p className="extension-recovery-note">
+                          Shared features are paused while a related built-in extension is disabled
+                          or deleted. Enable its related extensions to restore every shared feature.
+                        </p>
+                      ) : null}
+                      <details className="extension-change-summary">
+                        <summary>Features, original identity, and shared dependencies</summary>
+                        <p>
+                          <code>{extension.originalId}</code>
+                        </p>
+                        <p>{extension.description}</p>
+                        <ul>
+                          {extension.features?.map((feature) => (
+                            <li key={feature}>{feature}</li>
+                          ))}
+                        </ul>
+                        {related.length ? (
+                          <>
+                            <p>
+                              These original changes overlap. A shared feature runs only when every
+                              related extension that owns it is enabled.
+                            </p>
+                            <ul>
+                              {related.map((candidate) => (
+                                <li key={candidate.id}>{candidate.name}</li>
+                              ))}
+                            </ul>
+                          </>
+                        ) : null}
+                        <p>
+                          Turning a feature off stops its optional behavior. Historical messages,
+                          saved attachments, drafts, and research files remain available for
+                          recovery. Core provider settings, steering, and thread continuity remain
+                          available.
+                        </p>
+                      </details>
+                      <div className="extension-card-actions">
+                        {archive ? (
+                          <>
+                            <button
+                              className="icon-button"
+                              aria-label={`Export ${extension.name}`}
+                              disabled={busy || !api}
+                              onClick={() =>
+                                void run(async () => download(await sourceBundle(archive.id)))
+                              }
+                            >
+                              <Download size={14} />
+                            </button>
+                            <button
+                              className="button secondary extension-share-action"
+                              aria-label={`Share ${extension.name} publicly`}
+                              disabled={busy || !api}
+                              onClick={() =>
+                                void run(async () => setSharing(await sourceBundle(archive.id)))
+                              }
+                            >
+                              <Globe size={12} /> Share original source
+                            </button>
+                          </>
+                        ) : null}
+                        <button
+                          className="icon-button"
+                          aria-label={`Delete ${extension.name}`}
+                          disabled={busy || !api}
+                          onClick={() =>
+                            setDeleting(deleting === extension.id ? undefined : extension.id)
+                          }
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      {deleting === extension.id ? (
+                        <div className="extension-delete-confirm">
+                          <span>
+                            Delete {extension.name}? Its features will remain off after restart and
+                            its installed record will be removed. Life saves a private
+                            feature-choice recovery copy before deletion. Project files and
+                            conversations are preserved.
+                          </span>
+                          <button
+                            className="button secondary"
+                            onClick={() => setDeleting(undefined)}
+                          >
+                            Keep
+                          </button>
+                          <button
+                            className="button primary"
+                            disabled={busy}
+                            onClick={() =>
+                              void run(() =>
+                                changeBuiltin(() =>
+                                  deleteBuiltinExtension(api!.sourceCode, extension.id),
+                                ),
+                              )
+                            }
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ) : null}
+                    </article>
+                  )
+                })}
+                {deletedBuiltins.length ? (
+                  <details className="extension-card">
+                    <summary>Deleted built-ins · {deletedBuiltins.length}</summary>
+                    <p>
+                      These features stay disabled after restart. Restore a record and its feature
+                      choice without changing any project data.
+                    </p>
+                    {deletedBuiltins.map((extension) => (
+                      <div className="extension-card-actions" key={extension.id}>
+                        <span>{extension.name}</span>
+                        <button
+                          className="button secondary"
+                          disabled={busy || !api}
+                          onClick={() =>
+                            void run(() =>
+                              changeBuiltin(() =>
+                                setBuiltinEnabled(api!.sourceCode, extension.id, true),
+                              ),
+                            )
+                          }
+                        >
+                          <RotateCcw size={13} /> Restore
+                        </button>
+                      </div>
+                    ))}
+                  </details>
+                ) : null}
+                {visibleSourceExtensions.map((extension) => (
                   <article
                     className="extension-card"
                     key={`source:${extension.id}`}
@@ -459,11 +668,11 @@ export function ExtensionDialog({
                         <input
                           type="checkbox"
                           aria-label={`Enable ${extension.name}`}
-                          checked={extension.enabled}
+                          checked={featureEnabled(extension)}
                           disabled={busy || !api || extension.incorporated}
                           title={
                             extension.incorporated
-                              ? 'These changes are built into Life.'
+                              ? 'Enable or disable these built-in changes.'
                               : undefined
                           }
                           onChange={(event) => {
@@ -477,7 +686,11 @@ export function ExtensionDialog({
                         />
                         <span>
                           {extension.incorporated
-                            ? 'Built into Life'
+                            ? featureEnabled(extension)
+                              ? 'Enabled · built-in'
+                              : sourcePaused
+                                ? 'Disable paused'
+                                : 'Disabled · built-in'
                             : extension.enabled
                               ? sourcePaused
                                 ? 'Paused'
@@ -489,8 +702,8 @@ export function ExtensionDialog({
                     {extension.description ? <p>{extension.description}</p> : null}
                     {extension.incorporated ? (
                       <p>
-                        These changes are included in Life. This saved extension remains available
-                        to export or share; create a new extension to change the built-in interface.
+                        Original source retained for export and sharing. Manage its feature choices
+                        in the built-in card above.
                       </p>
                     ) : null}
                     <details className="extension-change-summary">
@@ -519,7 +732,16 @@ export function ExtensionDialog({
                         disabled={busy || !api || extension.incorporated}
                         onClick={() =>
                           void run(async () => {
-                            setSource(serializePortableExtension(await sourceBundle(extension.id)))
+                            const bundle = await sourceBundle(extension.id)
+                            // A legacy saved source ID can collide with a new native feature.
+                            // Edit its safe routing alias; untouched exports retain the original ID.
+                            if (
+                              extension.originalId &&
+                              !extension.incorporated &&
+                              bundle.kind === 'source'
+                            )
+                              bundle.extension.id = extension.id
+                            setSource(serializePortableExtension(bundle))
                             setEditingSourceId(extension.id)
                             setImportPreview(undefined)
                             setTab('source')
@@ -572,7 +794,7 @@ export function ExtensionDialog({
                       <div className="extension-delete-confirm">
                         <span>
                           {extension.incorporated
-                            ? `Remove the saved ${extension.name} archive? Its built-in features will remain.`
+                            ? `Remove the original ${extension.name} source archive? Its built-in feature choice is managed separately.`
                             : `Remove ${extension.name} and compile the remaining extensions?`}
                         </span>
                         <button className="button secondary" onClick={() => setDeleting(undefined)}>

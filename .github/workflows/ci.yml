@@ -24,5 +24,11 @@ jobs:
       - run: npm run build
       - run: npx playwright install chromium --with-deps
       - run: npm run test:recovery
+      - run: node tests/thread-queue-smoke.cjs
+      - run: node tests/thread-presentation-smoke.cjs
+      - run: node tests/studio-lifecycle-smoke.cjs
+      - run: node tests/app-live-controls-smoke.cjs
+      - run: node tests/run-selectors-smoke.cjs
+      - run: node tests/research-method-ui-smoke.cjs
       - run: npm run test:desktop
       - run: npm run format:check

@@ -1,4 +1,5 @@
 import { providerArtwork } from '../provider-artwork'
+import { useBuiltinFeature } from '../builtin-extensions'
 
 /** Life's branching L represents research paths that share a common starting point. */
 export function LifeMark({ size = 24 }: { size?: number }) {
@@ -32,7 +33,7 @@ export function LifeMark({ size = 24 }: { size?: number }) {
 // Existing callers keep working while the application adopts the Life name.
 export const RelayMark = LifeMark
 
-/** Original SVGL artwork, rendered in the current theme's foreground color. */
+/** Original SVGL artwork; Claude retains its terracotta brand color. */
 export function ProviderIcon({
   provider,
   size = 20,
@@ -41,7 +42,28 @@ export function ProviderIcon({
   size?: number
   brand?: boolean
 }) {
+  const artworkEnabled = useBuiltinFeature('provider-artwork')
+  const brandColorEnabled = useBuiltinFeature('claude-brand-color')
   const artwork = providerArtwork[provider === 'claude' ? 'claude' : 'openai']
+
+  if (!artworkEnabled)
+    return (
+      <span
+        className="provider-initial"
+        aria-hidden="true"
+        style={{
+          width: size,
+          height: size,
+          display: 'inline-grid',
+          placeItems: 'center',
+          flexShrink: 0,
+          fontSize: size * 0.65,
+          fontWeight: 600,
+        }}
+      >
+        {provider === 'claude' ? 'C' : 'O'}
+      </span>
+    )
 
   return (
     <svg
@@ -65,7 +87,13 @@ export function ProviderIcon({
         verticalAlign: 'middle',
       }}
     >
-      <path d={artwork.path} fill="currentColor" fillRule="evenodd" clipRule="evenodd" />
+      <path
+        d={artwork.path}
+        fill="currentColor"
+        style={provider === 'claude' && brandColorEnabled ? { fill: '#D97757' } : undefined}
+        fillRule="evenodd"
+        clipRule="evenodd"
+      />
     </svg>
   )
 }

@@ -17,6 +17,8 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { applyPatch, createTwoFilesPatch, diffChars } from 'diff'
+import { BuiltinExtensionStore } from './builtin-extension-store'
+import type { BuiltinExtensionDefinition } from '../shared/builtin-extensions'
 import {
   isIncorporatedSourceExtension,
   type IncorporatedSourceExtension,
@@ -50,6 +52,8 @@ export interface SourceCodeStoreOptions {
   installTimeoutMs?: number
   /** Native, trusted migration identities; omitted in production to use the shipped manifest. */
   incorporatedExtensions?: readonly IncorporatedSourceExtension[]
+  /** Trusted optional features shipped with the installed release. */
+  builtinExtensions?: readonly BuiltinExtensionDefinition[]
 }
 
 const stateSchema = z
@@ -158,7 +162,7 @@ function mergeSource(
               : Math.max(edit.start, other.start) < Math.min(edit.end, other.end)
       if (overlap)
         throw new Error(
-          `Source extension “${name}” conflicts in ${path}. Another extension or the installed app changed the same code. Keep the working interface, then ask /life to adapt this extension.`,
+          `Source extension “${name}” conflicts in ${path}. Another extension or the installed app changed the same code. Keep the working interface, then open Life Studio to adapt this extension.`,
         )
     }
     if (!duplicate) combined.push(edit)
@@ -242,9 +246,11 @@ export class SourceCodeStore {
   private baselineHashes: Record<string, string> = {}
   private operationEpoch = 0
   private activeController?: AbortController
+  private builtinExtensions: BuiltinExtensionStore
 
   constructor(private options: SourceCodeStoreOptions) {
     this.path = resolve(options.directory)
+    this.builtinExtensions = new BuiltinExtensionStore(this.path, options.builtinExtensions || [])
   }
 
   async init(): Promise<LifeSourceSnapshot> {
@@ -252,6 +258,7 @@ export class SourceCodeStore {
     this.initialized = true
     await mkdir(join(this.path, 'revisions'), { recursive: true })
     await mkdir(join(this.path, 'packages'), { recursive: true })
+    await this.builtinExtensions.init()
     try {
       const packageFile = JSON.parse(
         await readFile(join(this.options.sourceDir, 'package.json'), 'utf8'),
@@ -304,8 +311,8 @@ export class SourceCodeStore {
             const error =
               this.metadata.baselineOnly &&
               this.metadata.extensions?.some((layer) => this.isIncorporated(layer))
-                ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Ask /life to adapt those extensions to the current Life version.'
-                : 'Life was updated after this customization was built. Your source edits are preserved. Ask /life to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.'
+                ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Open Life Studio to adapt those extensions to the current Life version.'
+                : 'Life was updated after this customization was built. Your source edits are preserved. Open Life Studio to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.'
             if (this.state.enabled || this.state.error !== error) {
               this.state = {
                 ...this.state,
@@ -355,6 +362,12 @@ export class SourceCodeStore {
     return {
       extensions: this.extensionSummaries(),
       revision: this.state.revision,
+      ...(this.options.builtinExtensions?.length
+        ? {
+            builtInRevision: this.builtinExtensions.revision,
+            ...(this.builtinExtensions.error ? { builtInError: this.builtinExtensions.error } : {}),
+          }
+        : {}),
       enabled: this.state.enabled,
       ...(this.state.enabled && this.state.current !== null
         ? { active: this.assets(this.state.current) }
@@ -513,8 +526,13 @@ export class SourceCodeStore {
     const epoch = this.operationEpoch
     return this.queue(async () => {
       this.checkEpoch(epoch)
+      if (this.builtinExtensions.has(id)) {
+        await this.builtinExtensions.setEnabled(id, enabled)
+        this.emit()
+        return this.get()
+      }
       const layers = this.cloneLayers()
-      const layer = layers.find((entry) => entry.bundle.id === id)
+      const layer = this.routeLayers(layers).find((entry) => entry.id === id)?.layer
       if (!layer) throw new Error(`Source extension does not exist: ${id}`)
       if (this.isIncorporated(layer)) {
         if (enabled)
@@ -538,8 +556,14 @@ export class SourceCodeStore {
     const epoch = this.operationEpoch
     return this.queue(async () => {
       this.checkEpoch(epoch)
+      if (this.builtinExtensions.has(id)) {
+        await this.builtinExtensions.remove(id)
+        this.emit()
+        return this.get()
+      }
       const layers = this.cloneLayers()
-      const index = layers.findIndex((entry) => entry.bundle.id === id)
+      const selected = this.routeLayers(layers).find((entry) => entry.id === id)?.layer
+      const index = selected ? layers.indexOf(selected) : -1
       if (index === -1) throw new Error(`Source extension does not exist: ${id}`)
       const [removed] = layers.splice(index, 1)
       return this.commitLayers(layers, `Remove ${removed.bundle.name}`, epoch)
@@ -548,7 +572,13 @@ export class SourceCodeStore {
 
   async exportExtension(id: string): Promise<SourceExtensionBundle> {
     await this.operations
-    const layer = this.metadata?.extensions?.find((entry) => entry.bundle.id === id)
+    if (this.builtinExtensions.has(id))
+      throw new Error(
+        'Built-in feature choices are included in Export all extensions. Export its original source archive when one is available.',
+      )
+    const layer = this.routeLayers(this.metadata?.extensions || []).find(
+      (entry) => entry.id === id,
+    )?.layer
     if (!layer) throw new Error(`Source extension does not exist: ${id}`)
     // Export only portable code and dependency declarations, never paths, build caches,
     // machine profiles, SSH keys, messages, or account credentials.
@@ -557,12 +587,19 @@ export class SourceCodeStore {
 
   async importExtension(value: unknown): Promise<LifeSourceSnapshot> {
     const bundle = parseSourceExtensionBundle(value)
+    if (this.builtinExtensions.has(bundle.id))
+      throw new Error(
+        'This ID belongs to a built-in Life feature. Choose a different extension ID.',
+      )
     this.verifyBundle(bundle)
     const epoch = this.operationEpoch
     return this.queue(async () => {
       this.checkEpoch(epoch)
       const layers = this.cloneLayers()
-      if (layers.some((entry) => entry.bundle.id === bundle.id))
+      if (
+        layers.some((entry) => entry.bundle.id === bundle.id) ||
+        this.routeLayers(layers).some((entry) => entry.id === bundle.id)
+      )
         throw new Error(
           `Source extension “${bundle.name}” is already installed. Remove it before importing another copy.`,
         )
@@ -577,6 +614,10 @@ export class SourceCodeStore {
 
   async updateExtension(value: unknown): Promise<LifeSourceSnapshot> {
     const bundle = parseSourceExtensionBundle(value)
+    if (this.builtinExtensions.has(bundle.id))
+      throw new Error(
+        'This ID belongs to a built-in Life feature. Create a source extension with a different ID to customize it.',
+      )
     bundle.files = bundle.files.map((file) => {
       if (file.kind === 'create') return file
       if (file.kind === 'delete') return { ...file, baseHash: this.hash(file.preimage) }
@@ -600,7 +641,7 @@ export class SourceCodeStore {
     return this.queue(async () => {
       this.checkEpoch(epoch)
       const layers = this.cloneLayers()
-      const layer = layers.find((entry) => entry.bundle.id === bundle.id)
+      const layer = this.routeLayers(layers).find((entry) => entry.id === bundle.id)?.layer
       if (!layer) throw new Error(`Source extension does not exist: ${bundle.id}`)
       if (this.isIncorporated(layer))
         throw new Error(
@@ -637,19 +678,43 @@ export class SourceCodeStore {
       this.state.current !== null && this.state.failed.includes(this.state.current)
         ? layers.findLastIndex((layer) => layer.enabled)
         : -1
-    return layers.map((layer, index) => ({
-      id: layer.bundle.id,
-      name: layer.bundle.name,
-      description: layer.bundle.description,
-      version: layer.bundle.version,
-      enabled: layer.enabled,
-      ...(this.isIncorporated(layer) ? { incorporated: true as const } : {}),
-      files: layer.bundle.files.map((file) => file.path),
-      dependencies: { ...layer.bundle.dependencies },
-      createdAt: layer.bundle.createdAt,
-      updatedAt: layer.bundle.updatedAt,
-      ...(index === failedIndex && this.state.error ? { error: this.state.error } : {}),
-    }))
+    return [
+      ...this.builtinExtensions.list(),
+      ...this.routeLayers(layers).map(({ layer, id }, index) => ({
+        id,
+        ...(id !== layer.bundle.id ? { originalId: layer.bundle.id } : {}),
+        name: layer.bundle.name,
+        description: layer.bundle.description,
+        version: layer.bundle.version,
+        enabled: layer.enabled,
+        ...(this.isIncorporated(layer) ? { incorporated: true as const } : {}),
+        files: layer.bundle.files.map((file) => file.path),
+        dependencies: { ...layer.bundle.dependencies },
+        createdAt: layer.bundle.createdAt,
+        updatedAt: layer.bundle.updatedAt,
+        ...(index === failedIndex && this.state.error ? { error: this.state.error } : {}),
+      })),
+    ]
+  }
+
+  /** Old Life versions accepted arbitrary IDs, including IDs now used by native features.
+   * Route those saved layers through a stable alias without rewriting their portable bundle
+   * or compiling during startup. The original identity remains exportable for recovery. */
+  private routeLayers(layers: SourceLayer[]): Array<{ layer: SourceLayer; id: string }> {
+    const occupied = new Set([
+      ...this.builtinExtensions.list().map((extension) => extension.id),
+      ...layers.map((layer) => layer.bundle.id),
+    ])
+    return layers.map((layer) => {
+      if (!this.builtinExtensions.has(layer.bundle.id)) return { layer, id: layer.bundle.id }
+      let attempt = 0
+      let id: string
+      do {
+        id = `source-recovery-${this.hash(`${layer.bundle.id}:${attempt++}`).slice(0, 16)}`
+      } while (occupied.has(id))
+      occupied.add(id)
+      return { layer, id }
+    })
   }
 
   private async readEditable(root: string): Promise<Map<string, string>> {
@@ -803,7 +868,7 @@ export class SourceCodeStore {
         } else {
           if (current === undefined)
             throw new Error(
-              `Source extension “${layer.bundle.name}” conflicts in ${change.path}: its required source file is missing. Enable its prerequisite extension or adapt this extension with /life.`,
+              `Source extension “${layer.bundle.name}” conflicts in ${change.path}: its required source file is missing. Enable its prerequisite extension or adapt this extension in Life Studio.`,
             )
           try {
             content = mergeSource(
@@ -948,7 +1013,7 @@ export class SourceCodeStore {
         history,
         enabled: false,
         error: needsAdaptation
-          ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Ask /life to adapt those extensions to the current Life version.'
+          ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Open Life Studio to adapt those extensions to the current Life version.'
           : undefined,
       }
       await this.writeState(next)
@@ -1091,7 +1156,7 @@ export class SourceCodeStore {
         ...(baseChanged
           ? {
               error:
-                'This previous customization belongs to an older Life installation. Its extensions are preserved; ask /life to adapt them to the current source before enabling them.',
+                'This previous customization belongs to an older Life installation. Its extensions are preserved; open Life Studio to adapt them to the current source before enabling them.',
             }
           : {}),
       }

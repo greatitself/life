@@ -64,6 +64,59 @@ function commandChannel() {
 }
 
 describe('bounded SSH and SFTP requests', () => {
+  it.each(['realpath', 'stat', 'readdir'] as const)(
+    'bounds automatic restoration stalled in %s and ignores its late result without delaying machine access',
+    async (stage) => {
+      const { connection, sftp } = remote()
+      const input = {
+        ...connection.state.profile!,
+        auth: 'password' as const,
+        password: 'memory-only',
+      }
+      Object.assign(connection, {
+        reconnect: { input, workspace: '/project', attempts: 0 },
+      })
+      vi.spyOn(Client.prototype, 'connect').mockImplementation(function (this: Client) {
+        this.emit('ready')
+        return this
+      })
+      vi.spyOn(connection, 'exec').mockImplementation(async (command) =>
+        command.includes('CODEX=') ? 'CODEX=test\nCLAUDE=test\n' : '/home/test\n',
+      )
+      vi.spyOn(Client.prototype, 'sftp').mockImplementation(function (this: Client, done) {
+        done(undefined, sftp as unknown as SFTPWrapper)
+        return this
+      })
+      const original = sftp[stage].getMockImplementation()!
+      // The optional previous-project lookup precedes automatic restoration.
+      if (stage !== 'readdir')
+        sftp[stage].mockImplementationOnce((...args: unknown[]) => {
+          Reflect.apply(original, undefined, args)
+        })
+      let late: (() => void) | undefined
+      sftp[stage].mockImplementationOnce((...args: unknown[]) => {
+        late = () => Reflect.apply(original, undefined, args)
+      })
+      const states: string[] = []
+      connection.on('state', (state) => states.push(state.status))
+      const changed = vi.fn()
+      connection.on('workspace-changing', changed)
+      const connecting = connection.connect(input, true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(late).toBeDefined()
+      expect(connection.state.status).toBe('connecting')
+      await vi.advanceTimersByTimeAsync(5000)
+      await expect(connecting).resolves.toMatchObject({ status: 'connected', home: '/home/test' })
+      expect(connection.state.workspace).toBeUndefined()
+      expect(states.filter((state) => state === 'connected')).toHaveLength(1)
+      expect(changed).not.toHaveBeenCalled()
+      late!()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(connection.state.workspace).toBeUndefined()
+      expect(states.filter((state) => state === 'connected')).toHaveLength(1)
+    },
+  )
+
   it('settles connection setup immediately when cancelled before SSH readiness', async () => {
     const { connection } = remote()
     vi.spyOn(Client.prototype, 'connect').mockImplementation(function (this: Client) {

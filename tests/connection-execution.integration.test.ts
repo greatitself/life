@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm, symlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { executeConnectionCommand } from '../src/main/connection-execution'
@@ -286,4 +286,190 @@ describe('connected project command execution over real SSH', () => {
     expect(connection.listenerCount('workspace-changing')).toBe(0)
     expect(connection.listenerCount('disconnected')).toBe(0)
   })
+})
+
+describe('connected machine command execution over real SSH', () => {
+  it('requires a connection but does not require or select an Agents project', async () => {
+    const beforeConnect = fixture.commands.length
+    await expect(
+      executeConnectionCommand(connection, { scope: 'machine', command: 'printf unreachable' }),
+    ).rejects.toThrow(/connect to a machine/i)
+    expect(fixture.commands).toHaveLength(beforeConnect)
+
+    await connect(false)
+    await expect(
+      executeConnectionCommand(connection, { scope: 'machine', command: 'pwd' }),
+    ).resolves.toBe(fixture.root + '\n')
+    expect(connection.state.workspace).toBeUndefined()
+    expect(connection.listenerCount('workspace-changing')).toBe(0)
+    expect(connection.listenerCount('disconnected')).toBe(0)
+  })
+
+  it.each(['~', "~/workspace's project", "workspace's project", 'absolute', 'symlink'])(
+    'resolves an existing home-scoped directory without changing the selected project: %s',
+    async (requested) => {
+      await connect()
+      const link = join(fixture.root, 'machine-project-link-' + sequence)
+      if (requested === 'symlink') await symlink(fixture.workspace, link)
+      const workspace =
+        requested === 'absolute' ? fixture.workspace : requested === 'symlink' ? link : requested
+      await expect(
+        executeConnectionCommand(connection, { scope: 'machine', workspace, command: 'pwd -P' }),
+      ).resolves.toBe((requested === '~' ? fixture.root : fixture.workspace) + '\n')
+      expect(connection.state.workspace).toBe(fixture.workspace)
+      expect(connection.listenerCount('workspace-changing')).toBe(0)
+      expect(connection.listenerCount('disconnected')).toBe(0)
+    },
+  )
+
+  it.each(['absolute', 'relative', 'symlink', 'home-prefix-sibling'])(
+    'rejects an explicit directory outside canonical home before running the command: %s',
+    async (kind) => {
+      await connect(false)
+      const marker = join(fixture.root, 'unexpected-machine-command-' + sequence)
+      const sibling = fixture.root + '-sibling-' + sequence
+      const link = join(fixture.root, 'machine-home-escape-' + sequence)
+      if (kind === 'home-prefix-sibling') await mkdir(sibling)
+      if (kind === 'symlink') await symlink('/tmp', link)
+      const workspace =
+        kind === 'absolute'
+          ? '/tmp'
+          : kind === 'relative'
+            ? '..'
+            : kind === 'symlink'
+              ? link
+              : sibling
+      try {
+        await expect(
+          executeConnectionCommand(connection, {
+            scope: 'machine',
+            workspace,
+            command: `printf unexpected > ${shellQuote(marker)}`,
+          }),
+        ).rejects.toThrow(/within the connected home directory/i)
+        expect(existsSync(marker)).toBe(false)
+        expect(connection.state).toMatchObject({ status: 'connected', home: fixture.root })
+        expect(connection.state.workspace).toBeUndefined()
+      } finally {
+        if (kind === 'home-prefix-sibling') await rm(sibling, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it('keeps a machine command in its original directory during an Agents project switch', async () => {
+    await connect()
+    const filename = '.machine-project-switch-pid-' + sequence
+    const output = executeConnectionCommand(connection, {
+      scope: 'machine',
+      workspace: fixture.workspace,
+      command: `printf '%s' "$$" > ${filename}; sleep 0.5; pwd -P`,
+    })
+    await commandPid(filename)
+    expect(connection.listenerCount('workspace-changing')).toBe(0)
+    await connection.selectWorkspace(fixture.root)
+    await expect(output).resolves.toBe(fixture.workspace + '\n')
+    expect(connection.state.workspace).toBe(fixture.root)
+    expect(connection.listenerCount('disconnected')).toBe(0)
+  })
+
+  it('does not execute a machine command when its explicit directory is missing', async () => {
+    await connect(false)
+    const marker = join(fixture.root, 'unexpected-missing-machine-command-' + sequence)
+    await expect(
+      executeConnectionCommand(connection, {
+        scope: 'machine',
+        workspace: join(fixture.root, 'missing-machine-directory-' + sequence),
+        command: `printf unexpected > ${shellQuote(marker)}`,
+      }),
+    ).rejects.toThrow()
+    expect(existsSync(marker)).toBe(false)
+    expect(connection.state.workspace).toBeUndefined()
+  })
+
+  it('bounds machine commands by the same total deadline without selecting a project', async () => {
+    await connect(false)
+    const filename = '.machine-timeout-pid-' + sequence
+    const rejected = expect(
+      executeConnectionCommand(connection, {
+        scope: 'machine',
+        timeoutMs: 250,
+        command: `printf '%s' "$$" > ${shellQuote(join(fixture.workspace, filename))}; exec sleep 30`,
+      }),
+    ).rejects.toThrow(/timed out/i)
+    const pid = await commandPid(filename)
+    await rejected
+    await waitFor(() => !processExists(pid))
+    expect(connection.state.workspace).toBeUndefined()
+    expect(connection.listenerCount('disconnected')).toBe(0)
+    await expect(
+      executeConnectionCommand(connection, { scope: 'machine', command: 'printf after-timeout' }),
+    ).resolves.toBe('after-timeout')
+  })
+
+  it('bounds machine output without disconnecting or selecting a project', async () => {
+    await connect(false)
+    await expect(
+      executeConnectionCommand(connection, {
+        scope: 'machine',
+        command: `exec node -e 'process.stdout.write("é".repeat(500001))'`,
+      }),
+    ).rejects.toThrow(/output.*limit/i)
+    expect(connection.state.status).toBe('connected')
+    expect(connection.state.workspace).toBeUndefined()
+    expect(connection.listenerCount('disconnected')).toBe(0)
+    await expect(
+      executeConnectionCommand(connection, {
+        scope: 'machine',
+        command: 'printf after-output-limit',
+      }),
+    ).resolves.toBe('after-output-limit')
+  })
+
+  it('cancels machine commands when the renderer changes while preserving the connection', async () => {
+    await connect(false)
+    const filename = '.machine-renderer-replaced-pid-' + sequence
+    const rejected = expect(
+      executeConnectionCommand(connection, {
+        scope: 'machine',
+        command: `printf '%s' "$$" > ${shellQuote(join(fixture.workspace, filename))}; exec sleep 30`,
+      }),
+    ).rejects.toThrow(/Life interface changed/i)
+    const pid = await commandPid(filename)
+    await connection.cancelRendererRequests()
+    await rejected
+    await waitFor(() => !processExists(pid))
+    expect(connection.state).toMatchObject({ status: 'connected', home: fixture.root })
+    expect(connection.state.workspace).toBeUndefined()
+    expect(connection.listenerCount('disconnected')).toBe(0)
+    await expect(
+      executeConnectionCommand(connection, { scope: 'machine', command: 'printf recovered' }),
+    ).resolves.toBe('recovered')
+  })
+
+  it.each(['disconnect', 'machine-change'])(
+    'cancels machine commands promptly on %s and never adopts a replacement connection',
+    async (kind) => {
+      await connect(false)
+      const filename = '.machine-disconnected-pid-' + sequence
+      const rejected = expect(
+        executeConnectionCommand(connection, {
+          scope: 'machine',
+          command: `printf '%s' "$$" > ${shellQuote(join(fixture.workspace, filename))}; exec sleep 30`,
+        }),
+      ).rejects.toThrow(/SSH disconnected.*cancelled/i)
+      const pid = await commandPid(filename)
+      if (kind === 'disconnect') connection.disconnect()
+      else await connection.connect({ ...fixture.input(), id: 'replacement-machine' })
+      await rejected
+      await waitFor(() => !processExists(pid))
+      expect(connection.listenerCount('workspace-changing')).toBe(0)
+      expect(connection.listenerCount('disconnected')).toBe(0)
+      if (kind === 'machine-change') {
+        expect(connection.state.profile?.id).toBe('replacement-machine')
+        await expect(
+          executeConnectionCommand(connection, { scope: 'machine', command: 'pwd' }),
+        ).resolves.toBe(fixture.root + '\n')
+      } else expect(connection.state.status).toBe('disconnected')
+    },
+  )
 })

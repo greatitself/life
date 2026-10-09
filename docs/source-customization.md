@@ -1,63 +1,106 @@
-# Edit Life from its own conversation
+# Life Studio and source customization
 
-Life 0.6 can change its built-in React application from an ordinary Codex or Claude Code thread. Each source change becomes an independently managed extension over the installed application. Ask with `/life`, `@life`, or a request addressing Life itself. Follow-up questions and implementation work stay in that conversation and provider session. Use `/project` or the composer’s scope control to return to your connected project.
+Open **Life Studio** at the bottom of Life's left sidebar to change the application by prompting. Studio has its own conversations, saved history, provider controls, and proposal inspector. Agents and Research conversations keep their original purpose: Life does not interpret `/life`, `@life`, or an answer containing a Life proposal there as permission to modify the application.
 
-Examples:
+Examples to send in Studio:
 
-- `/life replace the model dropdown with a shadcn Select and keep the current keyboard behavior.`
-- `/life add a research-review page with sortable experiments and saved notes.`
-- `/life change the composer layout and add an advanced provider option.`
+- “Replace the model dropdown with a shadcn Select and keep its keyboard behavior.”
+- “Add a research-review page with sortable experiments and saved notes.”
+- “Change the composer layout and add an advanced provider option.”
+- “Adapt my existing customization to this Life version.”
 
-The installed composer includes the Radix menus from the incorporated workspace backup. Requests for other component libraries can add real React source and npm dependencies, which Life builds on your computer.
+## Start and manage a customization
 
-## How a change reaches the interface
+1. Open **Life Studio** and create a new customization conversation, or continue a saved one.
+2. Choose Codex or Claude Code, model, reasoning effort, and speed. The provider stays associated with that conversation once it starts.
+3. Describe the desired change normally. There is no slash-command prefix to add.
+4. Review progress and the **Details**, **Changes**, **Build**, and **Recovery** inspector tabs. Source proposals expose their file changes and dependencies; runtime proposals expose their code and capabilities; settings proposals expose their changed values.
+5. With **Apply valid changes automatically** enabled, Life applies a validated proposal after the provider completes. Turn it off to choose **Apply** or **Discard** yourself after reviewing a proposal.
 
-1. Life supplies a source index, the current revision, and relevant existing code to the connected agent. The agent can request exact additional files automatically.
-2. The agent returns a source proposal containing file contents or exact find/replace edits and, when needed, npm package versions. Settings and executable extensions have their own proposal formats.
-3. Life checks the revision and file paths, records the proposed change as a source extension, and composes enabled extensions over the immutable installed source. It stages the result, installs added dependencies, and runs its bundled esbuild compiler.
-4. A successful build commits the extension and becomes the active source revision. Life saves the conversation and reloads the interface while retaining its local data.
-5. Compiler or proposal errors return actual diagnostics and refreshed context to the same agent. The prior working build stays active. A request allows up to two automatic repair attempts and six automatic source-read round trips.
+Studio stores separate conversations, supports renaming and removal, and can export a conversation. Its inspector opens the existing extension manager, source inspector, and settings controls. No Agents project needs to be selected. A recognized local setting request, such as switching theme or changing font size, works without a machine connection. Source work and unfamiliar requests need an authenticated provider on the connected machine.
 
-Questions and explanations need no proposal. Concurrent changes cannot silently apply an older source revision over newer work. Compilation checks source syntax and import resolution; an agent still needs to preserve the application’s behavior.
+A plain answer, clarification question, or already-satisfied request stays a normal response. An empty settings proposal is a no-op rather than an invalid customization. Life reports a change as applied only after validation and, for source changes, a successful build.
 
-## Manage individual changes
+## Exact messages and separate instruction files
 
-Open **Live extensions** in the sidebar to open **Manage extensions**. Its **Installed** tab lists both source and runtime extensions. Source extensions contain file patches, additions or deletions, dependency specifications, and descriptive metadata. Enable or disable a change, **Edit code**, export it, or remove it using the delete action and **Remove** confirmation. The **Import** tab accepts portable extension files, JSON, or public Gist links. Life rebuilds enabled source layers in creation order against its installed base instead of copying one extension’s whole workspace over another.
+Life sends the text you submitted unchanged. It does not turn your request into a larger prompt containing source code, schemas, repair instructions, or a hidden preamble.
 
-Changes can depend on earlier layers. For example, a later extension may import a component created by an earlier one. Disabling or removing the earlier change can make the combined source fail to compile. Each extension should declare the npm packages its own feature needs, even when another extension currently supplies them. Overlapping edits can also conflict. When multiple enabled layers name the same npm package, the later layer supplies its version; the resulting code still needs to work with that dependency. An unsuccessful composition or build retains the prior working interface; review the error and ask `/life` to adapt the affected changes. Layers are not promised to work in every combination.
+For provider-backed Studio work, Life stages a private workspace at `~/.life/customization/<session-hash>` on the connected machine. Its `AGENTS.md` and `CLAUDE.md` contain the customization workflow and actual host contracts. Nine app-owned JSON files hold the data the provider needs:
 
-Existing 0.4 source edits and added dependencies migrate into one **Legacy customization** source extension. The original customization files remain available. This preserves the existing work while allowing subsequent changes to become separate layers.
+| File                            | Contents                                                          |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `.life/configuration.json`      | Active Life settings                                              |
+| `.life/source-context.json`     | Source index, selected complete files, revision, and dependencies |
+| `.life/extensions.json`         | Installed runtime extensions                                      |
+| `.life/bridge.json`             | Available bridge capabilities and method contracts                |
+| `.life/settings-schema.json`    | Valid settings proposal format                                    |
+| `.life/source-schema.json`      | Valid source proposal format                                      |
+| `.life/source-read-schema.json` | Valid additional-source request format                            |
+| `.life/extension-schema.json`   | Valid runtime extension format                                    |
+| `.life/diagnostics.json`        | Current source-read continuation or repair diagnostics            |
 
-The 27 workspace customizations incorporated into Life 0.6 are part of the installed source. On upgrade, exact matching bundles become exportable **Built into Life** archive records, so their old patches do not override the updated application. Matching requires the complete bundle contents, not just its ID or name. A modified bundle or unrelated extension stays preserved for adaptation. Removing an archive record removes that record; it does not remove the installed feature.
+These files are separate from the connected coding project. Life does not overwrite that project's instructions to implement a Studio change. Local native snapshot paths are removed from the source context. Context has a 3 MB total limit; an oversized context returns an explicit error rather than silently truncating code.
+
+When the agent requests another source file or needs a compiler repair, Life refreshes these context files and continues with the original user request unchanged. A request allows up to six automatic source-reading rounds and two automatic repair attempts. These bounds apply to the automatic continuation; a further user message can continue the discussion.
+
+Providers still load their own configured instruction files and account policies. Preserving the submitted user text does not disable the provider's normal instruction system.
+
+## How source changes reach the interface
+
+1. The provider reads the current source revision and relevant complete files from the Studio workspace. It can request additional exact files when needed.
+2. It returns a source proposal with file contents or exact find/replace edits, and explicit npm versions when required. Settings and runtime extensions have separate proposal formats.
+3. Life validates the revision and paths, records the change as a source extension, and composes enabled extensions over the installed source. It stages the result, installs added dependencies, and runs its bundled compiler.
+4. A successful build commits the extension and becomes the active source revision. Life saves Studio's conversation before reloading the interface and retains local workspace data.
+5. A failed proposal or build leaves the working interface active. Actual diagnostics and refreshed context become available to the same provider for bounded repair.
+
+Concurrent changes cannot silently apply a proposal based on stale source. Compilation checks syntax, imports, and build compatibility; the provider still needs to preserve the requested application behavior.
+
+Each successful change becomes its own extension layer. A request to add a real component library can add React source, dependencies, and styles. Changing CSS alone does not install shadcn or replace a control with that component.
+
+## Manage custom and built-in extensions
+
+Open **Life Studio → Manage extensions** to manage source and runtime extensions. Source extensions contain file changes, dependency specifications, and descriptive metadata. Enable or disable a change, edit its code, export it, or remove it. The Import tab accepts portable files, pasted JSON, or public Gist links. Enabled source layers compose in creation order against the installed base.
+
+Custom changes can depend on an earlier layer. Disabling or removing a component another layer imports can make the combined source fail to compile. Each extension should declare the dependencies its feature needs. Overlapping patches can conflict, and the later enabled layer supplies a shared package's version. An unsuccessful composition or build retains the prior working interface. Use Studio to adapt the affected layers; arbitrary combinations are not guaranteed to work.
+
+The **37 built-in extensions** appear in Installed with their original names and source IDs. Their controls persist enabled, disabled, or deleted choices without recompiling historical backup snapshots. Disabling a functional feature stops its optional controls and background work; appearance features use the corresponding simpler presentation. The manager explains each entry's effect.
+
+**Delete** records a removal choice and removes the Installed card. A private recovery copy of the built-in choices is saved first. Open **Deleted built-ins** and select **Restore** to bring an entry back. Deleting a built-in removes its active behavior and record; the shipped code remains in the installed baseline for recovery. Chats, attachments, projects, and Research files are retained. Model controls, steering, thread continuity, Studio, and native recovery remain available.
+
+Several historical extensions contribute to the same feature. A disabled or deleted contributor keeps that shared feature off until all its contributing controls are enabled. The manager lists those dependencies and explains when another contributor keeps a feature paused.
+
+Exact matching incorporated source bundles remain exportable **Built into Life** archives. Matching checks the entire bundle, not just an ID or name. Edited and unrelated bundles are preserved for adaptation. A built-in card can export or share its original source when that archive is present. Removing an archive deletes the saved archive record; built-in feature controls manage the installed behavior separately. Existing 0.4 source changes remain preserved as a **Legacy customization** layer.
 
 ## Editable source and dependencies
 
-The editable application includes `src/renderer/**` and `src/shared/**`. The recovery bootstrap and `index.html` remain protected. Native `src/main/**`, `src/preload/**`, and the packaged `package.json` are available as read-only reference so the agent can understand the host’s contracts.
+Live editable source includes `src/renderer/**` and `src/shared/**`. The recovery bootstrap and `index.html` remain protected. Native `src/main/**`, `src/preload/**`, and the packaged `package.json` are read-only reference so the provider can understand the host's contracts.
 
-Life ships its compiler, baseline dependencies, and npm tooling. Customization does not need a separate Node.js or npm installation. New packages come from the public npm registry and require a network connection. Proposals accept explicit semver versions with optional `^` or `~`; Git, file, and arbitrary download URLs are not dependency specifications.
+Life ships its compiler, baseline dependencies, and npm tooling. Local compilation inside an installed Life does not need a separate Node.js or npm installation. New packages require access to the public npm registry. Proposals accept explicit semver versions with optional `^` or `~`; Git, file, and arbitrary download URLs are not dependency specifications.
 
-Dependency installation runs with lifecycle scripts disabled. Browser-compatible packages and source components are supported; packages requiring native compilation or install scripts need additional packaging work. The compiler supports TypeScript/TSX, React imports, CSS, images, SVGs, and fonts. A component library’s styles must be included in the proposed source; adding its package name alone does not replace a control.
+Dependency installation disables lifecycle scripts. Browser-compatible packages and source components are supported; packages needing native compilation or install scripts require packaging work. The compiler supports TypeScript/TSX, React imports, CSS, images, SVGs, and fonts. A component library's styles must accompany its source.
 
-Tailwind v4 generation is available when a proposal adds `tailwindcss`, `@tailwindcss/postcss`, and `postcss` alongside stylesheet directives such as `@import "tailwindcss"`, `@theme`, or `@apply`. Life processes these styles in an isolated, cancellable compiler process before bundling, using its bundled Electron executable in Node mode. A native compiler crash returns an error while the working Life interface stays active. This supports actual shadcn component source with generated utilities; invalid utilities fail the candidate build and return diagnostics for repair. The default application does not add these dependencies or replace existing selects in advance.
+Tailwind v4 generation is available when the proposal includes `tailwindcss`, `@tailwindcss/postcss`, and `postcss` plus actual stylesheet directives such as `@import "tailwindcss"`, `@theme`, or `@apply`. Life processes these styles in an isolated, cancellable compiler process before bundling. A native compiler failure returns diagnostics while the working interface remains active. This supports actual shadcn component source with generated utilities.
 
-Backend extensions remain available for local files, commands, modules, and worker-based behavior. Advanced agent calls can pass validated `providerOptions`: Codex `thread`/`turn` fields or Claude `settings`/`args`. Reserved session, directory, permission and stream-format options remain managed by Life. The provider’s real CLI, account and model capabilities determine which additional options work.
+## Runtime extensions and native limits
+
+Runtime extensions can add views, change existing CSS, or replace the workspace. Renderer extensions run in isolated frames and use the declared Life bridge for connections, agents, files, settings, and their own backend. Backend extensions run in terminable Node workers with local user permissions and can use files, commands, and Node modules. They can be enabled, disabled, edited, reloaded, and rolled back without rebuilding the application.
+
+Advanced agent calls accept validated `providerOptions`: Codex thread/turn fields or Claude settings/arguments. Life retains control of session IDs, directory, permission handling, and streaming format. Actual availability follows the remote CLI, account, model, and policy.
+
+The installed native host, preload bridge, recovery loader, and Electron binaries stay unchanged during source customization. React features, supported components, settings, and backend-worker behavior can change live. Changes to native contracts, base Electron behavior, or installer signing require a packaged release.
 
 ## Export and public sharing
 
-Portable bundles carry one selected source or runtime extension: its code, required dependencies, and metadata. They do not include Life’s saved connection settings, conversation history, or unrelated local files. Source patches also include their original code context so another installation can validate and compose them. Review that context and the complete code for anything private before publishing.
+Portable bundles contain one selected source or runtime extension's code, dependencies, and metadata. They exclude Life's saved connections, conversations, and unrelated local files. Source patches include their original code context for composition, so review the complete bundle for information included in the extension itself.
 
-Choose **Share publicly** for an extension to open its full bundle preview. Enter a GitHub token with permission to create Gists, then explicitly choose **Publish publicly**. Life creates a public GitHub Gist containing `extension.life-extension.json` and a generated README. Anyone can read this code. The token is used for that publication only and is neither saved nor exported. Life does not automatically publish new customizations.
+Choose **Share publicly** to inspect a full bundle preview. Enter a GitHub token with permission to create Gists, then explicitly select **Publish publicly**. Life creates a public Gist containing `extension.life-extension.json` and a README. The token is used only for that publication and is not saved or exported. New customizations stay local unless you choose to publish them.
 
-To import a shared extension, open **Manage extensions → Import**, paste a public Gist link or ID, and choose **Preview public extension**. Inspect its file list, dependencies, and complete code. Fetching a preview does not install or execute it. Choose **Install extension** only after review; runtime extensions use manifest validation, while source extensions are composed and compiled before activation. Local extension files also open a preview; pasted JSON uses **Preview extension**. Importing public Gists needs no token. A portable bundle must be smaller than 8 MB; invalid or incompatible source keeps the previous working interface active.
+To import, use **Manage extensions → Import**, paste a public Gist link or ID, and select **Preview public extension**. Inspect the files, dependencies, and complete code before choosing **Install extension**. A preview does not execute code. Public Gist import needs no token. Portable bundles must be smaller than 8 MB; incompatible source keeps the previous working interface active.
 
 ## Inspect, restore, and recover
 
-Click **Source code** in the sidebar to open the **Life source** dialog. Browse the current files and revision, manually edit or add source files, **Compile & reload**, **Restore previous**, **Use built-in interface**, or **Open folder**. Local files live under Life’s data directory in `source-code`, with separate revision builds and a dependency cache.
+Studio's **Recovery** tab offers the previous source revision and the installed interface. The **Life source** inspector also supports manual editing, **Compile & reload**, **Restore previous**, **Use built-in interface**, and **Open folder**. Local source revisions live in Life's data directory under `source-code`, with separate build revisions and a dependency cache. Settings can be undone or reset independently; external edits to `life.config.json` reload.
 
-Press **Ctrl/Cmd + Shift + L** to restore the built-in interface through the native host. That shortcut and the recovery loader are separate from the editable React code. Startup failure recovery also restores the built-in interface and retains source files for inspection and repair. Automatic startup repair updates the failed source layer in place rather than stacking another change over broken code.
+**Ctrl/Cmd + Shift + L** invokes native recovery even if editable React code stops responding. Startup repair can restore the installed interface while retaining custom files for review. Emergency recovery opens one extension-review dialog and leaves SSH disconnected; normal thread selection can reconnect afterward.
 
-Installers preserve this local data directory and the application’s existing installation identity. If an update changes the built-in source baseline, Life disables the custom interface and retains its source extensions. Ask `/life update my customization for this Life version` to rebuild against the new installed source. The agent can read your modified files alongside the new originals. Source patches must still compose and compile; overlapping edits or changed host contracts can require repair. Life does not promise an automatic semantic merge across app versions.
-
-An unrelated request cannot silently overwrite a conflicting new app file. An upgrade repair can explicitly replace that file with adapted content; the existing conflicting extension then owns that adapted file. Keep separate new features in their own follow-up requests to preserve independent controls.
-
-The installed native host, preload bridge and Electron binaries stay intact during source customization. New React features, imported components and supported backend-worker behavior can change live. Changes to native binaries, base Electron behavior or installer signing belong in a packaged release.
+Installer updates preserve the existing data directory and installation identity. When an update changes the built-in source baseline, Life starts with the installed interface and preserves custom source layers. Open Studio and ask it to adapt the customization to the new version. Patches still need to compose and compile; Life does not promise automatic semantic merging across versions. An upgrade repair can explicitly adapt an existing layer's conflicting file. Keep unrelated new features in separate requests for independent controls.

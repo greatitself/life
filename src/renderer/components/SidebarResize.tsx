@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useBuiltinFeature } from '../builtin-extensions'
 import './workspace-surfaces.css'
 
 const storageKey = 'life.workspace.sidebar-widths.v1'
 type Side = 'left' | 'right'
 type Sizes = { left: number; right: number }
 export interface ResizeProps {
+  label?: string
+  controls?: string
   side: Side
   value: number
   min: number
@@ -46,6 +49,7 @@ export function usePanelSizes(
   sidebarOpen: boolean,
   collapsedWidth = 100,
 ) {
+  const enabled = useBuiltinFeature('sidebar-resizing')
   const [sizes, setSizes] = useState(() => readSizes(defaults(configuredLeft, configuredRight)))
   const current = useRef(sizes)
   current.current = sizes
@@ -68,10 +72,11 @@ export function usePanelSizes(
     current.current = next
     setSizes(next)
     try {
-      localStorage.setItem(storageKey, JSON.stringify(next))
+      if (enabled) localStorage.setItem(storageKey, JSON.stringify(next))
     } catch {}
-  }, [configuredLeft, configuredRight])
+  }, [enabled, configuredLeft, configuredRight])
   function change(side: Side, value: number, persist: boolean) {
+    if (!enabled) return
     const next = { ...current.current, [side]: value }
     current.current = next
     setSizes(next)
@@ -108,7 +113,18 @@ export function usePanelSizes(
     right: props('right', right, 260, rightMax),
   }
 }
-export function ResizeHandle({ side, value, min, max, reset, onChange, onCommit }: ResizeProps) {
+export function ResizeHandle({
+  side,
+  value,
+  min,
+  max,
+  reset,
+  onChange,
+  onCommit,
+  label,
+  controls,
+}: ResizeProps) {
+  const enabled = useBuiltinFeature('sidebar-resizing')
   const drag = useRef<{ pointer: number; x: number; start: number; next: number } | null>(null)
   const [dragging, setDragging] = useState(false)
   function finish(cancelled = false) {
@@ -117,17 +133,24 @@ export function ResizeHandle({ side, value, min, max, reset, onChange, onCommit 
     drag.current = null
     setDragging(false)
     if (cancelled) onChange(current.start)
-    else onCommit(current.next)
+    else if (enabled) onCommit(current.next)
   }
+  useEffect(() => {
+    if (!enabled && drag.current) {
+      drag.current = null
+      setDragging(false)
+    }
+  }, [enabled])
+  if (!enabled) return null
   return (
     <div
       className="sidebar-resize-handle"
       data-side={side}
       data-dragging={dragging}
       role="separator"
-      aria-label={`Resize ${side === 'left' ? 'projects sidebar' : 'workspace sidebar'}`}
+      aria-label={label || `Resize ${side === 'left' ? 'projects sidebar' : 'workspace sidebar'}`}
       aria-orientation="vertical"
-      aria-controls={side === 'left' ? 'life-sidebar' : 'life-workspace-surfaces'}
+      aria-controls={controls || (side === 'left' ? 'life-sidebar' : 'life-workspace-surfaces')}
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={Math.round(value)}

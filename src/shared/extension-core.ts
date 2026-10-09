@@ -17,6 +17,8 @@ export const extensionCapabilities = [
   'sshConfig.list',
   'sshConfig.resolve',
   'agent.start',
+  'agent.steer',
+  'agent.configure',
   'agent.stop',
   'agent.dispose',
   'agent.respond',

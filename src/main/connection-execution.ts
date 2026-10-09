@@ -1,4 +1,5 @@
 import type { ConnectionExecutionInput } from '../shared/types'
+import { posix } from 'node:path'
 import { connectionExecutionSchema, shellQuote } from '../shared/validation'
 import type { SSHConnection } from './ssh'
 
@@ -8,9 +9,15 @@ export async function executeConnectionCommand(
 ): Promise<string> {
   const options = connectionExecutionSchema.parse(input)
   if (connection.state.status !== 'connected') throw new Error('Connect to a machine first')
-  const workspace = connection.state.workspace
-  if (!workspace) throw new Error('Select a project first')
-  if (options.workspace && options.workspace !== workspace)
+  const machine = options.scope === 'machine'
+  const home = connection.state.home
+  const profileId = connection.state.profile?.id
+  const workspace = machine ? home : connection.state.workspace
+  if (!workspace)
+    throw new Error(
+      machine ? 'The connected machine has no home directory' : 'Select a project first',
+    )
+  if (!machine && options.workspace && options.workspace !== workspace)
     throw new Error(
       'The selected project changed. Select the expected project to run this command.',
     )
@@ -25,7 +32,7 @@ export async function executeConnectionCommand(
     cancellation = 'SSH disconnected. The remote command was cancelled.'
     controller.abort()
   }
-  connection.on('workspace-changing', projectChanged)
+  if (!machine) connection.on('workspace-changing', projectChanged)
   connection.on('disconnected', disconnected)
   // Bound channel setup too: an SSH server may never acknowledge an exec
   // request, before SSHConnection.exec's running-command timer can begin.
@@ -40,12 +47,16 @@ export async function executeConnectionCommand(
       timeoutMs: options.timeoutMs,
       // SSH exec requests have a packet-size limit. Stream the script through
       // stdin instead of embedding a potentially 100 KB script in that packet.
-      input: `cd ${shellQuote(workspace)} || exit\n${options.command}`,
+      input: machine
+        ? machineCommandInput(workspace, options.workspace, options.command)
+        : `cd ${shellQuote(workspace)} || exit\n${options.command}`,
     })
     if (cancellation) throw new Error(cancellation)
     if (connection.state.status !== 'connected')
       throw new Error('SSH disconnected. The remote command was cancelled.')
-    if (connection.state.workspace !== workspace)
+    if (connection.state.profile?.id !== profileId || connection.state.home !== home)
+      throw new Error('The connected machine changed. The remote command was cancelled.')
+    if (!machine && connection.state.workspace !== workspace)
       throw new Error('The selected project changed. The remote command was cancelled.')
     return output
   } catch (error) {
@@ -53,7 +64,32 @@ export async function executeConnectionCommand(
     throw error
   } finally {
     clearTimeout(timer)
-    connection.off('workspace-changing', projectChanged)
+    if (!machine) connection.off('workspace-changing', projectChanged)
     connection.off('disconnected', disconnected)
   }
+}
+
+function machineCommandInput(home: string, workspace: string | undefined, command: string): string {
+  if (workspace === undefined || workspace === '~')
+    return `cd ${shellQuote(home)} || exit\n${command}`
+  const requested = workspace.startsWith('~/')
+    ? posix.join(home, workspace.slice(2))
+    : posix.isAbsolute(workspace)
+      ? workspace
+      : posix.join(home, workspace)
+  // Resolve symlinks on the connected machine in the same bounded request as
+  // the command. This never selects or depends on the Agents project, and a
+  // directory outside the machine's home cannot become a machine workspace.
+  return `cd ${shellQuote(home)} || exit
+life_machine_command_home=$(pwd -P) || exit
+cd ${shellQuote(requested)} || exit
+life_machine_command_workspace=$(pwd -P) || exit
+if [ "$life_machine_command_home" != / ]; then
+  case "$life_machine_command_workspace" in
+    "$life_machine_command_home"|"$life_machine_command_home"/*) ;;
+    *) printf '%s\\n' 'Machine commands must run within the connected home directory.' >&2; exit 1 ;;
+  esac
+fi
+unset life_machine_command_home life_machine_command_workspace
+${command}`
 }

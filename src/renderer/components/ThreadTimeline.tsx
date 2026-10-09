@@ -5,31 +5,9 @@ import { reportedFileChanges, type ThreadFileChange } from '../thread-activity'
 import { MessageView } from './MessageView'
 import { ProviderIcon } from './Icons'
 import { ThreadActivityRows } from './ThreadActivityRows'
+import { groupThreadTurns, threadOutputSequence, type TurnGroup } from '../thread-presentation'
 import './thread-experience.css'
 
-interface TurnGroup {
-  key: string
-  turn: number
-  user?: Message
-  messages: Message[]
-}
-function groupTurns(messages: Message[]): TurnGroup[] {
-  const groups: TurnGroup[] = []
-  let current: TurnGroup | undefined
-  for (const message of messages) {
-    if (message.role === 'user') {
-      current = { key: message.id, turn: message.turn, user: message, messages: [] }
-      groups.push(current)
-    } else {
-      if (!current) {
-        current = { key: `history:${message.id}`, turn: message.turn, messages: [] }
-        groups.push(current)
-      }
-      current.messages.push(message)
-    }
-  }
-  return groups
-}
 function duration(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000))
   const hours = Math.floor(seconds / 3600)
@@ -59,16 +37,7 @@ function WorkActivity({
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [busy, started])
-  let finalIndex = -1
-  for (let index = group.messages.length - 1; index >= 0; index--)
-    if (group.messages[index].role === 'assistant') {
-      finalIndex = index
-      break
-    }
-  if (busy) finalIndex = -1
-  const activity = group.messages.filter(
-    (message, index) => index !== finalIndex && message.role !== 'error',
-  )
+  const activity = threadOutputSequence(group)
   const elapsed =
     started && (busy || ended)
       ? duration(Math.max(0, (busy ? Math.max(now, started) : ended!) - started))
@@ -84,12 +53,11 @@ function WorkActivity({
     () => reportedFileChanges(group.messages, group.user?.fileChanges),
     [group.messages, group.user?.fileChanges],
   )
-  const final = finalIndex >= 0 ? group.messages[finalIndex] : undefined
   return (
     <>
       {activity.length || elapsed || busy ? (
-        <details className="thread-work-activity" open>
-          <summary>
+        <section className="thread-work-activity" aria-label="Turn activity">
+          <div className="thread-work-heading">
             <span
               className="thread-work-provider"
               title={provider === 'codex' ? 'OpenAI · Codex' : 'Claude Code'}
@@ -97,11 +65,10 @@ function WorkActivity({
               <ProviderIcon provider={provider} brand size={16} />
             </span>
             <span>{label}</span>
-            <ChevronRight size={14} aria-hidden="true" />
             {group.user?.finishStatus === 'failed' || group.user?.finishStatus === 'interrupted' ? (
               <small>{group.user.finishStatus === 'failed' ? 'Failed' : 'Interrupted'}</small>
             ) : null}
-          </summary>
+          </div>
           <div className="thread-work-content">
             {activity.length ? (
               <ThreadActivityRows messages={activity} provider={provider} />
@@ -113,14 +80,8 @@ function WorkActivity({
               </p>
             )}
           </div>
-        </details>
+        </section>
       ) : null}
-      {final ? <MessageView message={final} provider={provider} /> : null}
-      {group.messages
-        .filter((message) => message.role === 'error')
-        .map((message) => (
-          <MessageView key={message.id} message={message} provider={provider} />
-        ))}
       {files.length ? (
         <ChangedFiles files={files} source={Boolean(group.user?.fileChanges?.length)} />
       ) : null}
@@ -240,7 +201,7 @@ const TimelineTurn = memo(
 )
 
 export function ThreadTimeline({ thread }: { thread: Thread }) {
-  const groups = useMemo(() => groupTurns(thread.messages), [thread.messages])
+  const groups = useMemo(() => groupThreadTurns(thread.messages), [thread.messages])
   return (
     <div className="thread-timeline">
       {groups.map((group) => (

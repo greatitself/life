@@ -22,20 +22,44 @@ export const incorporatedSourceExtensions: readonly IncorporatedSourceExtension[
     sha256: '29c70c06697ee76ef216f9ba627ce0ee4860dc49b3de48340b19d5fc913ae4ec',
   },
   {
+    id: 'source-12cfab44e306',
+    sha256: '38db6249d3e25865d16c62fdaa1bdf384dfa867c0694bfafd2f4d89d989313c7',
+  },
+  {
     id: 'source-1f744fc8d6d7',
     sha256: '0b0721eeb354692b06b8c00c5740fdab19d0850a6e480a8586d53f290c3f0339',
+  },
+  {
+    id: 'source-265a22e310cd',
+    sha256: '9679e74365b269f22fc115096438b591bc28fdaa1b5b4dc9fca82bd93ee61f5d',
   },
   {
     id: 'source-2846644351b9',
     sha256: '97d3123fe65c9df9de0abe0a7139d388c94c0e825d6e7d8acf4895c10ca9c668',
   },
   {
+    id: 'source-291e3f4359ea',
+    sha256: '34402117bdca54d335b715cac328576375883a208f8804c2d466a7ebab4feb6f',
+  },
+  {
+    id: 'source-2b3a5bff463a',
+    sha256: 'ef8e75a0baf6e7c6a14412ed0a2c0e717b9c8652d97120f65c74f6ebb227245f',
+  },
+  {
     id: 'source-2c5d2001c41c',
     sha256: '8f0f6aff2e796c1788180f142ad7cc40e0db9bf8cae4c70f03f7e7a7c7baf739',
   },
   {
+    id: 'source-2f6848a57686',
+    sha256: '01587ba30344153fcd49a742da28fb90a527f2dd7691b4f623f4c6b14e757b6b',
+  },
+  {
     id: 'source-38077381109d',
     sha256: 'eab799a62e71d165ee556731ab9b1251efdca3a3666d953e4c9a9dee54532da5',
+  },
+  {
+    id: 'source-3ed4505f113d',
+    sha256: 'f39a4b800cd81356fb2e8ace89660da1b03d414d5efe9344886f5e0e8fa319ac',
   },
   {
     id: 'source-5066db7ba3f3',
@@ -44,6 +68,10 @@ export const incorporatedSourceExtensions: readonly IncorporatedSourceExtension[
   {
     id: 'source-56303aa9af08',
     sha256: 'ed376cfe370210d348fddeee62ddfca04fcf2c2ec6ac73e5f7ae83e6c1a15975',
+  },
+  {
+    id: 'source-60cf7584c344',
+    sha256: '85a03a142a4f3825350acdb83a92b2a56eea1a9ec30276f63fbef2eda9caa188',
   },
   {
     id: 'source-73b7de289714',
@@ -78,6 +106,10 @@ export const incorporatedSourceExtensions: readonly IncorporatedSourceExtension[
     sha256: 'dbffdfe8e4b70d90f28b7515866ebbfc582da831f1b2e90bbc0f4a2cb68e4a89',
   },
   {
+    id: 'source-9d9f38a237da',
+    sha256: '74aaf29a4a53b0400037b9f7549f99dedaafc747727b6ec304a9d077db0054de',
+  },
+  {
     id: 'source-a80581604688',
     sha256: '8454db5eca03f2a6b342d885edc1d5cca7277f0c2f86db931a6efa863ae0ee1a',
   },
@@ -106,6 +138,10 @@ export const incorporatedSourceExtensions: readonly IncorporatedSourceExtension[
     sha256: 'c9a8517b63fa916d73647a66d730e6290280bcfbbe9bff8c4e78f3ebf95d2d9b',
   },
   {
+    id: 'source-deac6139f1b6',
+    sha256: 'a042cea90de4c3236530f3bbacdf2dd5b61282c8e65c4338cded01ee1d18218e',
+  },
+  {
     id: 'source-df30d8af2e48',
     sha256: 'b584536d68f3b32c1d10e303e2023651ec9d3e0411c40ed4259d89faedb95513',
   },
@@ -116,6 +152,10 @@ export const incorporatedSourceExtensions: readonly IncorporatedSourceExtension[
   {
     id: 'source-e29be4176e7b',
     sha256: '142bc9a63e9c5aeb2f13ee3116172f9c176193edf92b47e23c749943a213616a',
+  },
+  {
+    id: 'source-ee937ac6bc82',
+    sha256: '8435dea66dfdc1b0d6d732377b7b5331317fdba7ecf745ac8a3b3c4af6860221',
   },
   {
     id: 'source-f4c0f424ebf0',

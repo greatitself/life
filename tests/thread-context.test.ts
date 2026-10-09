@@ -46,6 +46,20 @@ function deferred<T>() {
 }
 
 describe('restoring a thread’s saved machine and project', () => {
+  it('opens Research on the saved machine without selecting its directory as an Agents project', async () => {
+    const { client } = fixture()
+    const research = {
+      ...thread,
+      purpose: 'research' as const,
+      workspace: '/home/researcher/.life/research/goal',
+    }
+    expect(await new ThreadContextController().restore(research, [profile], client)).toMatchObject({
+      kind: 'ready',
+      connection: { workspace: '/srv/other' },
+    })
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+  })
   it('selects its original folder without reconnecting the same machine or replacing its conversation', async () => {
     const { client } = fixture()
     const result = await new ThreadContextController().restore(thread, [profile], client)

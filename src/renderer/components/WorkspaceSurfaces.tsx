@@ -21,6 +21,7 @@ import { RemoteTerminal } from './RemoteTerminal'
 import { BrowserSurface } from './BrowserSurface'
 import { PullRequestSurface } from './PullRequestSurface'
 import { ResizeHandle, type ResizeProps } from './SidebarResize'
+import { useBuiltinFeature } from '../builtin-extensions'
 import './workspace-surfaces.css'
 
 type Surface =
@@ -63,26 +64,32 @@ interface Props {
   onTerminal: () => void
 }
 export function WorkspaceSurfaces(props: Props) {
+  const enabled = useBuiltinFeature('workspace-surfaces')
   const { connection, headerTarget, terminalOpen, onTerminalChange, theme, onClose, resize } = props
   const [tabs, setTabs] = useState<Surface[]>([])
   const [selected, setSelected] = useState<Surface>()
   const [picker, setPicker] = useState(true)
   const open = useCallback(
     (id: Surface) => {
+      if (!enabled) return
       setTabs((current) => (current.includes(id) ? current : [...current, id]))
       setSelected(id)
       setPicker(false)
       if (id === 'terminal') onTerminalChange(true)
     },
-    [onTerminalChange],
+    [enabled, onTerminalChange],
   )
   useEffect(() => {
+    if (!enabled) {
+      if (terminalOpen) onTerminalChange(false)
+      return
+    }
     if (terminalOpen) open('terminal')
     else {
       setTabs((current) => current.filter((id) => id !== 'terminal'))
       setSelected((current) => (current === 'terminal' ? undefined : current))
     }
-  }, [terminalOpen, open])
+  }, [enabled, terminalOpen, open, onTerminalChange])
   function close(id: Surface) {
     const remaining = tabs.filter((tab) => tab !== id)
     setTabs(remaining)
@@ -180,6 +187,7 @@ export function WorkspaceSurfaces(props: Props) {
         message.role === 'tool' &&
         /spawn|collab.*agent|(?:^|[\s_])(?:agent|task)(?:$|[\s_])/i.test(message.title || ''),
     ) || []
+  if (!enabled) return null
   return (
     <aside
       className="workspace-surfaces"

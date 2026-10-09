@@ -183,9 +183,9 @@ describe('Codex transport restart lifecycle', () => {
     })
     try {
       const starting = start()
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(channels[0].messages.some((message) => message.method === 'initialize')).toBe(true)
+      await vi.waitFor(() =>
+        expect(channels[0]?.messages.some((message) => message.method === 'initialize')).toBe(true),
+      )
       expect(vi.getTimerCount()).toBe(1)
       agents.close('Project changed')
       await starting
@@ -277,11 +277,11 @@ describe('Codex transport restart lifecycle', () => {
     const { channels, agents, start } = fixture()
     try {
       const starting = start({ provider: 'claude' })
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(
-        channels[0].messages.some((message) => message.request?.subtype === 'initialize'),
-      ).toBe(true)
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
       expect(vi.getTimerCount()).toBe(1)
       await agents.stop('local-thread')
       await starting

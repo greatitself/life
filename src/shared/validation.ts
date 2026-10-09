@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { lifeStudioContextSchema } from './life-studio'
 export const sshConfigAliasSchema = z
   .string()
   .trim()
@@ -44,6 +45,7 @@ export const connectSchema = profileSchema.extend({
 })
 export const connectionExecutionSchema = z
   .object({
+    scope: z.enum(['project', 'machine']).optional(),
     command: z
       .string()
       .min(1)
@@ -93,6 +95,9 @@ const reservedProtocolFields = new Set([
   'approvalPolicy',
   'sandbox',
   'sandboxPolicy',
+  'baseInstructions',
+  'developerInstructions',
+  'instructions',
 ])
 const reservedClaudeArguments = new Set([
   '-p',
@@ -119,6 +124,8 @@ const reservedClaudeArguments = new Set([
   '--no-session-persistence',
   '--fork-session',
   '--',
+  '--system-prompt',
+  '--append-system-prompt',
 ])
 export const agentProviderOptionsSchema = z
   .object({
@@ -159,18 +166,67 @@ export const agentProviderOptionsSchema = z
           message: `${argument.split('=')[0]} is managed by Life; use the corresponding agent.start field`,
         })
   })
-export const startSchema = z.object({
-  sessionId: z.string().min(1).max(100),
-  provider: z.enum(['codex', 'claude']),
-  remoteId: z.string().max(200).optional(),
-  prompt: z.string().trim().min(1).max(1000000),
-  model: z.string().max(200).optional(),
-  reasoningEffort: optionNameSchema.optional(),
-  serviceTier: optionNameSchema.optional(),
-  providerOptions: agentProviderOptionsSchema.optional(),
-  mode: z.enum(['review', 'edit', 'plan']),
-  workspace: remoteDirectorySchema.optional(),
-})
+export const agentAttachmentsSchema = z
+  .array(
+    z
+      .object({
+        remotePath: remoteDirectorySchema,
+        name: z.string().min(1).max(1024),
+        mimeType: z.string().max(200),
+      })
+      .strict(),
+  )
+  .max(20)
+export const startSchema = z
+  .object({
+    sessionId: z.string().min(1).max(100),
+    provider: z.enum(['codex', 'claude']),
+    remoteId: z.string().max(200).optional(),
+    prompt: z.string().max(1000000),
+    model: z.string().max(200).optional(),
+    reasoningEffort: optionNameSchema.optional(),
+    serviceTier: optionNameSchema.optional(),
+    providerOptions: agentProviderOptionsSchema.optional(),
+    mode: z.enum(['review', 'edit', 'plan']),
+    workspace: remoteDirectorySchema.optional(),
+    scope: z.enum(['life-customization', 'research']).optional(),
+    studioContext: lifeStudioContextSchema.optional(),
+    attachments: agentAttachmentsSchema.optional(),
+  })
+  .superRefine((value, context) => {
+    if (!value.prompt.trim() && !value.attachments?.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['prompt'],
+        message: 'Enter a message or attach a file.',
+      })
+    if (value.studioContext && value.scope !== 'life-customization')
+      context.addIssue({
+        code: 'custom',
+        path: ['studioContext'],
+        message: 'App instructions are available only in Life Studio.',
+      })
+  })
+export const agentSettingsSchema = z
+  .object({
+    sessionId: z.string().min(1).max(100),
+    model: optionNameSchema.optional(),
+    reasoningEffort: optionNameSchema.optional(),
+    serviceTier: optionNameSchema.optional(),
+    mode: z.enum(['review', 'edit', 'plan']).optional(),
+  })
+  .strict()
+export const agentSteerSchema = z
+  .object({
+    sessionId: z.string().min(1).max(100),
+    prompt: z.string().max(1000000),
+    attachments: agentAttachmentsSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (value) => Boolean(value.prompt.trim() || value.attachments?.length),
+    'Enter a message or attach a file.',
+  )
 export function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'"
 }

@@ -115,7 +115,10 @@ export function summarizeSourceChanges(
 export function isSubagentActivity(message: Message): boolean {
   return (
     message.role === 'tool' &&
-    /(?:collabAgent|spawn[_-]?agent|agent[_-]?spawn|^Agent$|^Task$)/i.test(message.title || '')
+    (message.kind === 'subagent' ||
+      /(?:collabAgent|(?:spawn|send|wait|close|resume|interrupt|followup)[_-]?(?:agent|message|task)|agent[_-]?spawn|^Agent$|^Task(?:Output|Stop)?$|^wait$)/i.test(
+        message.title || '',
+      ))
   )
 }
 export function isSubagentLaunch(message: Message): boolean {
@@ -125,9 +128,10 @@ export function isSubagentLaunch(message: Message): boolean {
   )
 }
 export function subagentTitle(message: Message): string {
+  if (message.agentName) return message.agentName
   try {
     const input = record(JSON.parse(message.input || 'null'))
-    const description = input.description || input.name || input.subagent_type
+    const description = input.task_name || input.description || input.name || input.subagent_type
     if (typeof description === 'string' && description.trim()) return description.slice(0, 180)
   } catch {
     /* Older or provider-specific events may have no structured input. */

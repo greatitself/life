@@ -28,11 +28,23 @@ export function ThreadRunStatus({ thread }: { thread: Thread }) {
     return () => window.clearInterval(timer)
   }, [thread.busy, started])
   const waiting = thread.pending.length > 0
+  const reconnecting = thread.turnStatus === 'reconnecting' || thread.agentStatus === 'reconnecting'
+  const label = waiting
+    ? 'Waiting for you'
+    : reconnecting
+      ? 'Reconnecting'
+      : thread.turnStatus === 'unknown'
+        ? 'Awaiting agent'
+        : 'Working'
   return (
-    <span className="thread-card-run-status" data-waiting={waiting || undefined}>
+    <span
+      className="thread-card-run-status"
+      data-waiting={waiting || reconnecting || undefined}
+      title={thread.statusText}
+    >
       <i className="thread-run-ring" aria-hidden="true" />
       <span>
-        {waiting ? 'Waiting' : 'Working'}
+        {label}
         {started ? ` ${elapsed(Math.max(now, started) - started)}` : ''}
       </span>
     </span>

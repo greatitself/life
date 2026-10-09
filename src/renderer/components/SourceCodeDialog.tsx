@@ -230,7 +230,7 @@ export function SourceCodeDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Life source"
-      description="Inspect the source behind your interface. Ask for changes in any ordinary agent thread."
+      description="Inspect the source behind your interface. Ask for changes in Life Studio at the bottom of the sidebar."
       className="source-code-modal"
     >
       {!api ? (

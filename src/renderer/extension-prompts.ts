@@ -201,6 +201,11 @@ export function buildExtensionPrompt(
 
 const maximumPromptLength = 900_000
 
+/** The Studio puts capability signatures in an instruction file, outside user text. */
+export function extensionCapabilityExamples(capabilities: readonly string[]) {
+  return extensionCallExamples.filter((example) => capabilities.includes(example.method))
+}
+
 const extensionCallExamples = [
   {
     method: 'forwarding.get',

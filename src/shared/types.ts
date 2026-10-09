@@ -3,6 +3,9 @@ import type { LifeUpdatesAPI } from './updates'
 import type { LifeExtensionManifest, LifeExtensionsSnapshot } from './extensions'
 import type { PortForwardingState } from './port-forwarding'
 import type { SourceExtensionBundle } from './source-extensions'
+import type { LifeStudioContext } from './life-studio'
+import type { HostHistoryAPI } from './agent-history'
+import type { ResearchDocumentsAPI } from './research-document'
 import type {
   LifePublishedExtension,
   LifePublicExtensionPreview,
@@ -76,6 +79,35 @@ export interface StartInput {
   providerOptions?: AgentProviderOptions
   mode: PermissionMode
   workspace?: string
+  /** Dedicated Life Studio only; ordinary agent chats never receive app instructions. */
+  scope?: 'life-customization' | 'research'
+  studioContext?: LifeStudioContext
+  attachments?: AgentAttachment[]
+}
+export interface AgentAttachment {
+  remotePath: string
+  name: string
+  mimeType: string
+}
+export interface AgentSettingsInput {
+  sessionId: string
+  model?: string
+  reasoningEffort?: string
+  serviceTier?: string
+  mode?: PermissionMode
+}
+export interface AgentConfigureResult {
+  applied: 'live' | 'next-request'
+  model?: string
+  reasoningEffort?: string
+  serviceTier?: string
+  note?: string
+  mode?: PermissionMode
+}
+export interface AgentSteerInput {
+  sessionId: string
+  prompt: string
+  attachments?: AgentAttachment[]
 }
 export interface AgentProviderOptions {
   /** Additional Codex thread/start or thread/resume parameters. */
@@ -94,6 +126,7 @@ export interface RemoteDirectoryList {
 }
 export interface ConnectionExecutionInput {
   command: string
+  scope?: 'project' | 'machine'
   workspace?: string
   timeoutMs?: number
 }
@@ -120,6 +153,11 @@ export interface AgentEvent {
     | 'error'
     | 'session'
     | 'status'
+    | 'title'
+    | 'settings'
+    | 'reasoning'
+    | 'plan'
+    | 'subagent'
   text?: string
   itemId?: string
   title?: string
@@ -127,6 +165,13 @@ export interface AgentEvent {
   remoteId?: string
   questions?: AgentQuestion[]
   status?: string
+  phase?: 'commentary' | 'final_answer'
+  input?: string
+  agentId?: string
+  agentName?: string
+  parentItemId?: string
+  provider?: Provider
+  details?: unknown
 }
 export interface AgentQuestion {
   id: string
@@ -150,6 +195,8 @@ export interface ModelOption {
 }
 export interface RelayAPI {
   platform: string
+  hostHistory?: HostHistoryAPI
+  researchDocuments?: ResearchDocumentsAPI
   forwarding: {
     get(): Promise<PortForwardingState>
     onState(callback: (state: PortForwardingState) => void): () => void
@@ -228,6 +275,8 @@ export interface RelayAPI {
   }
   agent: {
     start(input: StartInput): Promise<void>
+    steer(input: AgentSteerInput): Promise<void>
+    configure(input: AgentSettingsInput): Promise<AgentConfigureResult>
     stop(sessionId: string): Promise<void>
     dispose(sessionId: string): Promise<void>
     respond(

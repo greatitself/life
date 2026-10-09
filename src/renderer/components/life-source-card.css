@@ -1,0 +1,174 @@
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card {
+  margin: 10px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-heading > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-heading > strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.app-shell.life-desktop-layout
+  .main-workspace
+  .markdown
+  .life-source-card-status[data-status='applied'],
+.app-shell.life-desktop-layout
+  .main-workspace
+  .markdown
+  .life-source-card-status[data-status='failed'] {
+  color: var(--text);
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-description {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card details {
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+}
+
+.app-shell.life-desktop-layout
+  .main-workspace
+  .markdown
+  .life-source-card
+  summary::-webkit-details-marker {
+  display: none;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card summary:hover {
+  color: var(--text);
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.app-shell.life-desktop-layout
+  .main-workspace
+  .markdown
+  .life-source-card
+  details[open]
+  > summary
+  > svg {
+  transform: rotate(90deg);
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card summary > small {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card ul {
+  display: grid;
+  gap: 5px;
+  margin: 2px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card li > svg {
+  flex-shrink: 0;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card li > code {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card li > span {
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-revision,
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-raw > pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0 0 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.app-shell.life-desktop-layout .main-workspace .markdown .life-source-card-raw > pre > code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+}

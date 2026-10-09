@@ -10,6 +10,8 @@ import {
   remoteDirectorySchema,
   startSchema,
   connectionExecutionSchema,
+  agentSettingsSchema,
+  agentSteerSchema,
 } from '../shared/validation'
 import { z } from 'zod'
 import { CustomizationStore } from './customization'
@@ -25,10 +27,14 @@ import { extensionCoreArguments } from '../shared/extension-core'
 import { buildExtensionDocument, extensionDocumentCSP } from '../shared/extension-document'
 import { SourceCodeStore } from './source-code'
 import { executeConnectionCommand } from './connection-execution'
+import { AgentHistory } from './agent-history'
+import { builtinExtensionCatalog } from '../shared/builtin-extensions'
 import { parseLifeSourcePatch, parseLifeSourceRead } from '../shared/source-code'
 import { ExtensionSharing } from './extension-sharing'
 import { canonicalPublicGistURL } from '../shared/extension-sharing'
 import { RendererDocumentAdmission, RendererRecoveryBudget } from './renderer-recovery'
+import { ResearchDocuments } from './research-documents'
+import { isTrustedRendererSender } from './renderer-ipc'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
@@ -45,6 +51,7 @@ let customization: CustomizationStore
 let updates: UpdatesService
 let extensions: ExtensionStore
 let sourceCode: SourceCodeStore
+let hostHistory: AgentHistory | undefined
 let sourceStartupTimer: ReturnType<typeof setTimeout> | undefined
 let sourceReloadTimer: ReturnType<typeof setTimeout> | undefined
 let quitting = false
@@ -53,16 +60,19 @@ let cancelRendererSessions = () => {}
 const rendererRecoveryBudget = new RendererRecoveryBudget()
 const rendererAdmissions = new WeakMap<BrowserWindow, RendererDocumentAdmission>()
 const extensionRecoveryStartups = new WeakSet<BrowserWindow>()
+const researchDocuments = new ResearchDocuments()
 const assertRendererAdmission = (channel: string) => {
   if (!window || !rendererAdmissions.get(window)?.allows(channel))
     throw new Error('Life is restarting its interface. Try again when the workspace returns.')
 }
 async function cancelRendererWork() {
   if (window) rendererAdmissions.get(window)?.suspend()
+  researchDocuments.clear()
   // Invalidate selectors and commands synchronously before cancelling provider
   // sessions. Wait for owned profile persistence to settle before a new UI starts.
   const requests = ssh?.cancelRendererRequests()
   cancelRendererSessions()
+  hostHistory?.cancelAll()
   await requests
 }
 const ownsInstance = app.requestSingleInstanceLock()
@@ -157,6 +167,7 @@ async function init() {
   ssh = new SSHConnection(store)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
+  hostHistory = new AgentHistory(ssh)
   cancelRendererSessions = () =>
     agents.close('Life restarted its interface. Send a message to continue this thread.')
   const extensionSharing = new ExtensionSharing()
@@ -177,12 +188,7 @@ async function init() {
   const handle = (name: string, fn: (...args: unknown[]) => unknown) => {
     operations.set(name, fn)
     ipcMain.handle(name, (event, ...args: unknown[]) => {
-      if (
-        !window ||
-        event.sender !== window.webContents ||
-        event.senderFrame !== window.webContents.mainFrame
-      )
-        throw new Error('Untrusted IPC sender')
+      if (!isTrustedRendererSender(window, event)) throw new Error('Untrusted IPC sender')
       assertRendererAdmission(name)
       return fn(...args)
     })
@@ -250,6 +256,7 @@ async function init() {
     (id, event, data) => send('extensions:event', { id, type: 'event', event, data }),
   )
   sourceCode = new SourceCodeStore({
+    builtinExtensions: builtinExtensionCatalog,
     sourceDir: app.isPackaged ? join(process.resourcesPath, 'life-source') : app.getAppPath(),
     nodeModulesDir: app.isPackaged
       ? join(process.resourcesPath, 'app.asar.unpacked/node_modules')
@@ -453,6 +460,11 @@ async function init() {
     ssh.trust(z.string().parse(id), z.boolean().parse(accepted)),
   )
   handle('agent:start', (input) => agents.start(startSchema.parse(input)))
+  handle('agent-history:list', (input) => hostHistory!.list(input))
+  handle('agent-history:read', (input) => hostHistory!.read(input))
+  handle('agent-history:cancel', (id) => hostHistory!.cancel(z.string().min(1).max(100).parse(id)))
+  handle('agent:configure', (input) => agents.configure(agentSettingsSchema.parse(input)))
+  handle('agent:steer', (input) => agents.steer(agentSteerSchema.parse(input)))
   handle('agent:stop', (id) => agents.stop(z.string().parse(id)))
   handle('agent:dispose', (id) => agents.dispose(z.string().parse(id)))
   handle('agent:respond', (id, requestId, accepted, answers) =>
@@ -476,6 +488,8 @@ async function init() {
     })
     return result.canceled ? null : result.filePaths[0]
   })
+  handle('research-documents:register', (html) => researchDocuments.register(html))
+  handle('research-documents:revoke', (id) => researchDocuments.revoke(id))
   ipcMain.on('terminal:write', (e, data: unknown) => {
     if (
       window &&
@@ -505,7 +519,7 @@ async function init() {
       ssh.resizeTerminal(cols, rows)
   })
   ipcMain.on('window:action', (e, action) => {
-    if (e.sender !== window?.webContents) return
+    if (!isTrustedRendererSender(window, e)) return
     if (action === 'minimize') window?.minimize()
     if (action === 'maximize') window?.isMaximized() ? window.unmaximize() : window?.maximize()
     if (action === 'close') window?.close()
@@ -544,6 +558,7 @@ async function init() {
   protocol.handle('life-extension', (request) => {
     try {
       const url = new URL(request.url)
+      if (url.hostname === 'research') return researchDocuments.respond(request)
       if (url.hostname !== 'runtime' || !url.pathname.startsWith('/view/'))
         return new Response('Not found', { status: 404 })
       const id = extensionIdSchema.parse(decodeURIComponent(url.pathname.slice('/view/'.length)))
@@ -764,6 +779,7 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
   window.on('closed', () => {
     recoveryPrompt?.controller.abort()
     if (window === owner) {
+      researchDocuments.clear()
       ssh?.disconnect()
       window = null
     }
@@ -786,6 +802,7 @@ app.on('activate', () => {
 app.on('before-quit', (event) => {
   if (quitting) return
   if (window) rendererAdmissions.get(window)?.suspend()
+  researchDocuments.clear()
   ssh?.disconnect()
   const rendererRequests = ssh?.cancelRendererRequests()
   customization?.close()

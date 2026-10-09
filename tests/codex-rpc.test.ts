@@ -146,3 +146,123 @@ describe('Codex RPC response and recovery lifecycle', () => {
     expect(channel.signals).toEqual([])
   })
 })
+
+describe('Codex RPC durable transport suspension', () => {
+  it('preserves the remaining response deadline while a saved conversation is offline', async () => {
+    vi.useFakeTimers()
+    const { channel, rpc } = fixture()
+    const pending = rpc.request('thread/resume', { threadId: 'saved-conversation' }, 1000)
+    const rejected = expect(pending).rejects.toThrow(/saved conversation is unchanged/)
+
+    await vi.advanceTimersByTimeAsync(300)
+    channel.emit('suspended')
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(rpc.closed).toBe(false)
+    expect(channel.messages).toHaveLength(1)
+
+    channel.emit('resumed')
+    await vi.advanceTimersByTimeAsync(699)
+    expect(rpc.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await rejected
+    expect(channel.messages).toEqual([
+      { id: 1, method: 'thread/resume', params: { threadId: 'saved-conversation' } },
+    ])
+    expect(channel.signals).toEqual(['TERM'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('starts an offline request deadline only after reconnecting without sending the prompt twice', async () => {
+    vi.useFakeTimers()
+    const channel = Object.assign(new Channel(), { transportState: 'suspended' })
+    const rpc = new CodexRPC(channel as unknown as ClientChannel, vi.fn())
+    const params = {
+      threadId: 'saved-conversation',
+      input: [{ text: 'Keep this prompt unchanged.' }],
+    }
+    const pending = rpc.request('turn/start', params, 1000)
+
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(rpc.closed).toBe(false)
+    expect(channel.messages).toEqual([{ id: 1, method: 'turn/start', params }])
+
+    channel.emit('resumed')
+    expect(vi.getTimerCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(999)
+    channel.reply({ id: 1, result: { turn: { id: 'turn-after-reconnect' } } })
+    await expect(pending).resolves.toEqual({ turn: { id: 'turn-after-reconnect' } })
+    expect(channel.messages).toEqual([{ id: 1, method: 'turn/start', params }])
+    expect(channel.signals).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps duplicate suspended and resumed events from shortening or resetting the remaining deadline', async () => {
+    vi.useFakeTimers()
+    const { channel, rpc } = fixture()
+    const pending = rpc.request('thread/resume', { threadId: 'saved-conversation' }, 1000)
+    const rejected = expect(pending).rejects.toThrow(/saved conversation is unchanged/)
+
+    await vi.advanceTimersByTimeAsync(200)
+    channel.emit('suspended')
+    await vi.advanceTimersByTimeAsync(120_000)
+    channel.emit('suspended')
+    expect(vi.getTimerCount()).toBe(0)
+
+    channel.emit('resumed')
+    await vi.advanceTimersByTimeAsync(100)
+    channel.emit('resumed')
+    expect(vi.getTimerCount()).toBe(1)
+    channel.emit('suspended')
+    await vi.advanceTimersByTimeAsync(120_000)
+    channel.emit('suspended')
+    expect(vi.getTimerCount()).toBe(0)
+
+    channel.emit('resumed')
+    channel.emit('resumed')
+    expect(vi.getTimerCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(699)
+    expect(rpc.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await rejected
+    expect(channel.messages).toHaveLength(1)
+    expect(channel.signals).toEqual(['TERM'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels a suspended request without reviving its timer or accepting a late response after reconnect', async () => {
+    vi.useFakeTimers()
+    const { channel, rpc, receive } = fixture()
+    const controller = new AbortController()
+    const pending = rpc.request(
+      'thread/resume',
+      { threadId: 'saved-conversation' },
+      1000,
+      controller.signal,
+    )
+    const rejected = expect(pending).rejects.toThrow(/cancelled/)
+
+    await vi.advanceTimersByTimeAsync(350)
+    channel.emit('suspended')
+    controller.abort()
+    await rejected
+    expect(vi.getTimerCount()).toBe(0)
+    channel.reply({ id: 1, result: { thread: { id: 'saved-conversation' } } })
+    channel.emit('resumed')
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(receive).not.toHaveBeenCalled()
+    expect(rpc.closed).toBe(false)
+    expect(channel.signals).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+
+    const next = rpc.request('model/list')
+    channel.reply({ id: 2, result: { data: [] } })
+    await expect(next).resolves.toEqual({ data: [] })
+    expect(channel.messages.map((message) => message.method)).toEqual([
+      'thread/resume',
+      'model/list',
+    ])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})

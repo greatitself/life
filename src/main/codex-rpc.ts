@@ -21,6 +21,7 @@ export class CodexRPC {
   private failure?: Error
   private stderr = ''
   private startupOutput = ''
+  private suspended = false
   private pending = new Map<
     number,
     {
@@ -28,6 +29,10 @@ export class CodexRPC {
       resolve: (value: Wire) => void
       reject: (error: Error) => void
       cleanup: () => void
+      timer?: NodeJS.Timeout
+      remaining: number
+      started: number
+      expire: () => void
     }
   >()
   constructor(
@@ -35,6 +40,25 @@ export class CodexRPC {
     receive: (message: Wire) => void,
     private onFailure: (error: Error) => void = () => {},
   ) {
+    this.suspended =
+      (channel as ClientChannel & { transportState?: string }).transportState === 'suspended'
+    channel.on('suspended', () => {
+      if (this.suspended) return
+      this.suspended = true
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer)
+        pending.timer = undefined
+        pending.remaining = Math.max(1, pending.remaining - (Date.now() - pending.started))
+      }
+    })
+    channel.on('resumed', () => {
+      if (!this.suspended || this.failure) return
+      this.suspended = false
+      for (const pending of this.pending.values()) {
+        pending.started = Date.now()
+        pending.timer = setTimeout(pending.expire, pending.remaining)
+      }
+    })
     const lines = new JsonLines(
       (message) => {
         if (this.failure) return
@@ -100,7 +124,7 @@ export class CodexRPC {
         cleanup()
         reject(new Error('Codex request cancelled'))
       }
-      const timer = setTimeout(() => {
+      const expire = () => {
         this.pending.delete(id)
         cleanup()
         const error = new CodexRequestError(
@@ -122,12 +146,22 @@ export class CodexRPC {
         // stream or replay a user prompt against an uncertain thread state.
         if (['initialize', 'thread/start', 'thread/resume', 'turn/start'].includes(method))
           this.close(error)
-      }, timeout)
+      }
       const cleanup = () => {
-        clearTimeout(timer)
+        clearTimeout(pending.timer)
         signal?.removeEventListener('abort', cancel)
       }
-      this.pending.set(id, { method, resolve, reject, cleanup })
+      const pending = {
+        method,
+        resolve,
+        reject,
+        cleanup,
+        remaining: timeout,
+        started: Date.now(),
+        expire,
+        timer: this.suspended ? undefined : setTimeout(expire, timeout),
+      }
+      this.pending.set(id, pending)
       signal?.addEventListener('abort', cancel, { once: true })
       try {
         this.send({ id, method, params })

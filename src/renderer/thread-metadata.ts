@@ -1,5 +1,5 @@
 import { useEffect, type Dispatch, type SetStateAction } from 'react'
-import type { ConnectionState } from '../shared/types'
+import type { ConnectionState, Provider } from '../shared/types'
 import type { Thread } from './state'
 import { api } from './api'
 
@@ -9,6 +9,30 @@ export interface ThreadMetadata {
   gitObservedAt?: number
   pullRequest?: { number: number; title: string; url: string }
 }
+/** Provider output annotations stay separate from the user's literal message. */
+export interface MessageMetadata {
+  phase?: 'commentary' | 'final_answer'
+  kind?: 'reasoning' | 'plan' | 'subagent' | 'status' | 'attachment' | 'event'
+  agentId?: string
+  agentName?: string
+  parentItemId?: string
+  turnId?: string
+  parentAgentId?: string
+  provider?: Provider
+  details?: Record<string, unknown>
+  submission?: 'message' | 'steering'
+}
+export interface ResearchThreadContext {
+  scopeKey: string
+  goalId: string
+  problemId?: string
+}
+export interface ImportedThreadHistory {
+  provider: Provider
+  remoteId: string
+  importedAt: number
+  nextCursor?: string
+}
 function clean(value: unknown, limit: number): string | undefined {
   return typeof value === 'string' &&
     value.trim() &&
@@ -16,6 +40,54 @@ function clean(value: unknown, limit: number): string | undefined {
     !/[\x00-\x1f\x7f]/.test(value)
     ? value
     : undefined
+}
+export function normalizeMessageMetadata(value: unknown): MessageMetadata {
+  if (!value || typeof value !== 'object') return {}
+  const item = value as Record<string, unknown>
+  const metadata: MessageMetadata = {}
+  if (item.phase === 'commentary' || item.phase === 'final_answer') metadata.phase = item.phase
+  if (
+    ['reasoning', 'plan', 'subagent', 'status', 'attachment', 'event'].includes(String(item.kind))
+  )
+    metadata.kind = item.kind as MessageMetadata['kind']
+  for (const key of ['agentId', 'agentName', 'parentItemId', 'turnId', 'parentAgentId'] as const) {
+    const result = clean(item[key], 2000)
+    if (result) metadata[key] = result
+  }
+  if (item.provider === 'codex' || item.provider === 'claude') metadata.provider = item.provider
+  if (item.details && typeof item.details === 'object' && !Array.isArray(item.details))
+    metadata.details = item.details as Record<string, unknown>
+  if (item.submission === 'message' || item.submission === 'steering')
+    metadata.submission = item.submission
+  return metadata
+}
+export function normalizeImportedThreadHistory(value: unknown): ImportedThreadHistory | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const item = value as Record<string, unknown>
+  const remoteId = clean(item.remoteId, 2000)
+  if (
+    (item.provider !== 'codex' && item.provider !== 'claude') ||
+    !remoteId ||
+    typeof item.importedAt !== 'number' ||
+    !Number.isFinite(item.importedAt) ||
+    item.importedAt <= 0
+  )
+    return undefined
+  const nextCursor = clean(item.nextCursor, 16000)
+  return {
+    provider: item.provider,
+    remoteId,
+    importedAt: item.importedAt,
+    ...(nextCursor ? { nextCursor } : {}),
+  }
+}
+export function normalizeResearchThreadContext(value: unknown): ResearchThreadContext | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const item = value as Record<string, unknown>
+  const scopeKey = clean(item.scopeKey, 4096)
+  const goalId = clean(item.goalId, 2000)
+  const problemId = clean(item.problemId, 2000)
+  return scopeKey && goalId ? { scopeKey, goalId, ...(problemId ? { problemId } : {}) } : undefined
 }
 export function normalizeThreadMetadata(value: unknown): ThreadMetadata {
   if (!value || typeof value !== 'object') return {}
@@ -52,12 +124,13 @@ export function useThreadMetadata(
   refreshKey: number,
   threadCount: number,
   onThreads: Dispatch<SetStateAction<Thread[]>>,
+  enabled = true,
 ) {
   useEffect(() => {
     const client = api
     const profile = connection.profile
     const workspace = connection.workspace
-    if (!client || connection.status !== 'connected' || !profile || !workspace) return
+    if (!enabled || !client || connection.status !== 'connected' || !profile || !workspace) return
     let disposed = false
     let reading = false
     const matches = (state: ConnectionState) =>
@@ -129,5 +202,6 @@ export function useThreadMetadata(
     refreshKey,
     threadCount,
     onThreads,
+    enabled,
   ])
 }

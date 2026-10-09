@@ -1,9 +1,11 @@
 import type { ReactNode, Ref } from 'react'
 import { createPortal } from 'react-dom'
-import { MessageSquare, Moon, Network, Sun } from 'lucide-react'
+import { FlaskConical, MessageSquare, Moon, Network, Sun } from 'lucide-react'
 import { api } from '../api'
 import { RelayMark } from './Icons'
+import { ActiveEnvironment, type ActiveEnvironmentProps } from './ActiveEnvironment'
 import './sidebar-navigation.css'
+import './header-view-switch.css'
 
 type TitleBarProps = {
   theme: 'dark' | 'light'
@@ -15,11 +17,12 @@ type TitleBarProps = {
   workspaceTitle?: string
   sidebarOpen?: boolean
   onSidebarToggle?: () => void
-  view?: 'research' | 'workspace' | 'extension'
-  onViewChange?: (view: 'research' | 'workspace') => void
+  view?: 'research' | 'workspace' | 'investigation' | 'extension' | 'customization'
+  onViewChange?: (view: 'research' | 'workspace' | 'investigation') => void
   contentRef?: Ref<HTMLDivElement>
   surfaceContentRef?: Ref<HTMLDivElement>
   leadingActionsRef?: Ref<HTMLDivElement>
+  environment?: ActiveEnvironmentProps
 }
 
 function WindowGlyph({ action }: { action: 'minimize' | 'maximize' | 'restore' | 'close' }) {
@@ -77,6 +80,7 @@ export function TitleBar({
   contentRef,
   surfaceContentRef,
   leadingActionsRef,
+  environment,
   researchTitle = 'Map',
   workspaceTitle = 'Agents',
 }: TitleBarProps) {
@@ -85,6 +89,8 @@ export function TitleBar({
     <div
       className={`titlebar life-titlebar life-unified-titlebar ${isMac ? 'titlebar-mac' : 'titlebar-windows'}`}
       onDoubleClick={(event) => {
+        // Dialog content is portaled out of the chrome but still bubbles through React.
+        if (!event.currentTarget.contains(event.target as Node)) return
         if (!isMac && !(event.target as HTMLElement).closest('button, input, select, textarea, a'))
           api?.window.maximize()
       }}
@@ -93,8 +99,11 @@ export function TitleBar({
         <div className="titlebar-sidebar-row">
           {isMac ? <span className="native-traffic-light-space" aria-hidden="true" /> : null}
           {sidebarOpen || !onSidebarToggle ? <LifeBrand /> : null}
-          {onViewChange && sidebarOpen ? (
-            <nav className="titlebar-view-switch" aria-label="Workspace views">
+          {onViewChange ? (
+            <nav
+              className="titlebar-view-switch life-header-view-switch"
+              aria-label="Workspace views"
+            >
               <button
                 type="button"
                 className="icon-button"
@@ -104,6 +113,9 @@ export function TitleBar({
                 onClick={() => onViewChange('research')}
               >
                 <Network size={16} />
+                <span className="life-header-view-label" aria-hidden="true">
+                  {researchTitle}
+                </span>
               </button>
               <button
                 type="button"
@@ -114,12 +126,29 @@ export function TitleBar({
                 onClick={() => onViewChange('workspace')}
               >
                 <MessageSquare size={16} />
+                <span className="life-header-view-label" aria-hidden="true">
+                  {workspaceTitle}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Research"
+                title="Research"
+                aria-pressed={view === 'investigation'}
+                onClick={() => onViewChange('investigation')}
+              >
+                <FlaskConical size={16} />
+                <span className="life-header-view-label" aria-hidden="true">
+                  Research
+                </span>
               </button>
             </nav>
           ) : null}
         </div>
       </div>
       <div className="titlebar-content" ref={contentRef} />
+      <ActiveEnvironment {...(environment || { connection: { status: 'disconnected' } })} />
       <div className="titlebar-right">
         <div className="titlebar-surface-content" ref={surfaceContentRef} />
         <div className="titlebar-tools">

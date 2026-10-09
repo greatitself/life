@@ -10,6 +10,8 @@ const { chromium } = require('playwright')
 
 async function run() {
   const directory = await mkdtemp(join(tmpdir(), 'life-renderer-recovery-'))
+  const browserErrors = []
+  const intentionalBrowserErrors = []
   let browser
   let server
   try {
@@ -86,6 +88,8 @@ async function run() {
       bundle: true,
       format: 'esm',
       outfile: join(directory, 'bootstrap.js'),
+      // Match the desktop loader instead of bundling the browser-only preview and its fonts.
+      define: { 'import.meta.env.VITE_LIFE_WEB_PREVIEW': '"false"' },
       logLevel: 'silent',
       plugins: [
         {
@@ -122,6 +126,11 @@ async function run() {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     browser = await chromium.launch({ headless: true })
     const page = await browser.newPage()
+    page.on('pageerror', (error) => {
+      if (error.message === 'Ordinary post-start network failure')
+        intentionalBrowserErrors.push(error.message)
+      else browserErrors.push(error.message)
+    })
     const savedThread = JSON.stringify({
       id: 'existing-thread',
       title: 'Saved research',
@@ -333,6 +342,12 @@ async function run() {
       [],
       'An old window cannot roll back a newer source revision',
     )
+    assert.deepEqual(browserErrors, [], 'Recovery produces no unexpected browser errors')
+    assert.equal(
+      intentionalBrowserErrors.length,
+      1,
+      'The intentional late rejection reached the browser',
+    )
     console.log(
       JSON.stringify({
         lateRenderCrashRecovered: true,
@@ -346,6 +361,8 @@ async function run() {
         currentRevisionGuard: true,
         desktopNativeRestart: true,
         browserOnlyLocalRetry: true,
+        browserErrors,
+        intentionalBrowserErrors,
       }),
     )
   } finally {

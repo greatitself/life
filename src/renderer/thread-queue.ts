@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import type { ConnectionState } from '../shared/types'
+import { researchOperations, type ResearchOperation } from '../shared/research-method'
 import type { Thread } from './state'
 import { errorText } from './api'
 import {
@@ -19,6 +20,8 @@ export interface QueuedMessage {
   attachments: ThreadAttachment[]
   paused?: boolean
   error?: string
+  /** Snapshot the user's selected method when queued, independently of later UI selection. */
+  researchOperation?: ResearchOperation
 }
 export interface QueuedSubmission {
   threadId: string
@@ -34,16 +37,22 @@ export function normalizeQueuedMessages(value: unknown): QueuedMessage[] {
     const item = raw as Partial<QueuedMessage>
     if (typeof item.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(item.id) || ids.has(item.id))
       continue
-    if (typeof item.text !== 'string' || !item.text.trim() || item.text.length > 1_000_000) continue
+    if (typeof item.text !== 'string' || item.text.length > 1_000_000) continue
+    const attachments = normalizeThreadAttachments(item.attachments)
+    if (!item.text.trim() && !attachments.length) continue
     ids.add(item.id)
     result.push({
       id: item.id,
       text: item.text,
       createdAt:
         typeof item.createdAt === 'number' && Number.isFinite(item.createdAt) ? item.createdAt : 0,
-      attachments: normalizeThreadAttachments(item.attachments),
+      attachments,
       // Restoring history must not replay pending work against a new connection.
       paused: true,
+      ...(typeof item.researchOperation === 'string' &&
+      researchOperations.includes(item.researchOperation)
+        ? { researchOperation: item.researchOperation }
+        : {}),
       ...(typeof item.error === 'string' ? { error: item.error.slice(0, 2000) } : {}),
     })
   }
@@ -52,13 +61,72 @@ export function normalizeQueuedMessages(value: unknown): QueuedMessage[] {
 export function pauseQueuedMessages(messages: QueuedMessage[] = []): QueuedMessage[] {
   return messages.map((message) => ({ ...message, paused: true }))
 }
+function researchEnvironmentMatches(thread: Thread, connection: ConnectionState): boolean {
+  const home = connection.home?.startsWith('/')
+    ? connection.home.replace(/\/+$/, '') || '/'
+    : undefined
+  const scopeKey = thread.researchContext?.scopeKey
+  if (scopeKey) {
+    try {
+      const scope: unknown = JSON.parse(scopeKey)
+      if (Array.isArray(scope) && scope[0] === 'research')
+        return (
+          scope.length === 3 &&
+          scope[1] === thread.profileId &&
+          typeof scope[2] === 'string' &&
+          scope[2].startsWith('/') &&
+          Boolean(home) &&
+          (scope[2].replace(/\/+$/, '') || '/') === home
+        )
+    } catch {
+      // Older research histories did not record the machine's home in their scope key.
+    }
+  }
+  if (home) {
+    const base = home === '/' ? '' : home
+    return ['/.life/research', '/.research'].some((directory) => {
+      const root = base + directory
+      return thread.workspace === root || thread.workspace?.startsWith(root + '/')
+    })
+  }
+  // Legacy machine context can only be proven by the folder currently selected on that machine.
+  return thread.workspace === connection.workspace
+}
 export function queueConnectionMatches(thread: Thread, connection: ConnectionState): boolean {
   return (
     connection.status === 'connected' &&
-    Boolean(connection.workspace) &&
     thread.profileId === connection.profile?.id &&
-    thread.workspace === connection.workspace
+    Boolean(thread.workspace?.startsWith('/')) &&
+    (thread.purpose === 'research'
+      ? researchEnvironmentMatches(thread, connection)
+      : thread.workspace === connection.workspace)
   )
+}
+/** Only the provider's completed turn releases an automatic follow-up. */
+export function canAutoSendQueuedMessage(
+  thread: Thread,
+  connection: ConnectionState,
+  blocked = false,
+): boolean {
+  const message = thread.queue?.[0]
+  if (
+    !message ||
+    message.paused ||
+    message.error ||
+    thread.busy ||
+    thread.pending.length ||
+    blocked ||
+    !queueConnectionMatches(thread, connection)
+  )
+    return false
+  if (thread.turnStatus) return thread.turnStatus === 'completed'
+  if (thread.turn === 0) return true
+  // A legacy idle flag on its own does not prove that the preceding turn finished.
+  for (let index = thread.messages.length - 1; index >= 0; index--) {
+    const previous = thread.messages[index]
+    if (previous.role === 'user') return previous.finishStatus === 'completed'
+  }
+  return false
 }
 export function threadAttachmentIds(thread: Thread): string[] {
   return [
@@ -70,13 +138,31 @@ export function threadAttachmentIds(thread: Thread): string[] {
     ),
   ]
 }
+async function loadQueuedAttachmentFiles(message: QueuedMessage): Promise<DraftAttachment[]> {
+  return Promise.all(
+    message.attachments.map(async (attachment) => {
+      const blob = await getAttachmentFile(attachment.id)
+      if (!blob)
+        throw new Error(
+          `The attachment ${attachment.name} is unavailable. Remove this message and attach it again.`,
+        )
+      return {
+        ...attachment,
+        file: new File([blob], attachment.name, { type: attachment.mime }),
+      }
+    }),
+  )
+}
 interface QueueOptions {
   threads: Thread[]
   connection: ConnectionState
   onThreads: Dispatch<SetStateAction<Thread[]>>
   onError: (message: string) => void
   send: (submission: QueuedSubmission) => Promise<boolean | undefined>
-  stop: (thread: Thread) => Promise<void>
+  /** Native in-turn input; accepting steering never interrupts or starts a replacement turn. */
+  steer?: (submission: QueuedSubmission) => Promise<boolean | undefined>
+  /** Older bridges may provide stop, but queue dispatch never calls it. */
+  stop?: (thread: Thread) => Promise<void>
   isBlocked: (threadId: string) => boolean
 }
 export function useThreadQueue(options: QueueOptions) {
@@ -85,7 +171,7 @@ export function useThreadQueue(options: QueueOptions) {
   const mounted = useRef(true)
   const saving = useRef(false)
   const pumping = useRef(false)
-  const stopping = useRef(false)
+  const dispatching = useRef(false)
   const cancelled = useRef(new Set<string>())
   const [preparing, setPreparing] = useState(false)
   const [operation, setOperation] = useState<{ threadId: string; id: string }>()
@@ -124,12 +210,25 @@ export function useThreadQueue(options: QueueOptions) {
     )
   }, [])
   const enqueue = useCallback(
-    async (thread: Thread, text: string, files: DraftAttachment[]): Promise<string | undefined> => {
+    async (
+      thread: Thread,
+      text: string,
+      files: DraftAttachment[],
+      researchOperation?: ResearchOperation,
+    ): Promise<string | undefined> => {
       if (saving.current) return undefined
       const current = context.current.threads.find((item) => item.id === thread.id)
       if (!current) return undefined
-      if (!text.trim() || text.length > 1_000_000) {
-        context.current.onError('Enter a message of up to one million characters.')
+      if (researchOperation !== undefined && !researchOperations.includes(researchOperation)) {
+        context.current.onError(
+          'Choose a supported research operation before queueing this message.',
+        )
+        return undefined
+      }
+      if ((!text.trim() && !files.length) || text.length > 1_000_000) {
+        context.current.onError(
+          'Enter a message or attach files, with up to one million characters.',
+        )
         return undefined
       }
       if ((current.queue?.length || 0) + (pumping.current ? 1 : 0) >= 32) {
@@ -148,11 +247,20 @@ export function useThreadQueue(options: QueueOptions) {
           text,
           createdAt: Date.now(),
           attachments: files.map(attachmentMetadata),
-          paused: stopping.current || !queueConnectionMatches(current, context.current.connection),
+          paused: !queueConnectionMatches(current, context.current.connection),
+          ...(researchOperation ? { researchOperation } : {}),
         }
         context.current.onThreads((previous) =>
           previous.map((item) =>
-            item.id === current.id ? { ...item, queue: [...(item.queue || []), message] } : item,
+            item.id === current.id
+              ? {
+                  ...item,
+                  ...(item.busy && item.turnStatus !== 'reconnecting'
+                    ? { turnStatus: 'running' as const }
+                    : {}),
+                  queue: [...(item.queue || []), message],
+                }
+              : item,
           ),
         )
         return message.id
@@ -203,7 +311,7 @@ export function useThreadQueue(options: QueueOptions) {
   )
   const sendNow = useCallback(
     async (threadId: string, messageId: string) => {
-      if (pumping.current || stopping.current || saving.current) return
+      if (pumping.current || dispatching.current || saving.current) return
       const current = context.current
       const thread = current.threads.find((item) => item.id === threadId)
       const selected = thread?.queue?.find((item) => item.id === messageId)
@@ -213,86 +321,98 @@ export function useThreadQueue(options: QueueOptions) {
         return
       }
       if (current.isBlocked(threadId)) return
-      const previousStatus = new Map((thread.queue || []).map((item) => [item.id, item.paused]))
-      stopping.current = true
+      dispatching.current = true
       setOperation({ threadId, id: messageId })
       try {
-        // The bridge resumes the existing provider conversation after interruption.
-        await current.stop(thread)
+        const files = await loadQueuedAttachmentFiles(selected)
         if (!mounted.current || cancelled.current.has(messageId)) return
-        if (!queueConnectionMatches(thread, context.current.connection))
+        const latest = context.current
+        const target = latest.threads.find((item) => item.id === threadId)
+        if (!target?.queue?.some((item) => item.id === messageId)) return
+        if (!queueConnectionMatches(target, latest.connection) || latest.isBlocked(threadId))
           throw new Error('The connection or project changed. The queued message is paused.')
-        context.current.onThreads((previous) =>
+        const submission = { threadId, messageId, files }
+        if (!target.busy) {
+          // Explicit sending of a paused follow-up is allowed; automatic sending remains gated.
+          const sent = await latest.send(submission)
+          if (sent !== true)
+            restore(threadId, selected, 'Message was not sent. Use Send now to retry.')
+          return
+        }
+        if (!latest.steer)
+          throw new Error(
+            'This provider connection cannot accept steering. The message remains queued.',
+          )
+        const turn = target.turn
+        const insertionIndex = target.messages.length
+        const sentAt = Date.now()
+        const accepted = await latest.steer(submission)
+        if (accepted !== true) {
+          restore(
+            threadId,
+            selected,
+            'Steering was not accepted. The message remains paused; retry when ready.',
+          )
+          return
+        }
+        if (!mounted.current) return
+        latest.onThreads((previous) =>
           previous.map((item) => {
             if (item.id !== threadId) return item
-            const queue = item.queue || []
-            const next = queue.find((entry) => entry.id === messageId)
-            if (!next) return item
+            const steeringId = `steering:${selected.id}`
+            if (item.messages.some((message) => message.id === steeringId)) return item
+            const messages = [...item.messages]
+            // Insert before output that arrived while the provider acknowledged this input.
+            messages.splice(Math.min(insertionIndex, messages.length), 0, {
+              id: steeringId,
+              role: 'user',
+              text: selected.text,
+              turn,
+              createdAt: sentAt,
+              submission: 'steering',
+              attachments: selected.attachments,
+              ...(!item.busy && item.turn === turn && item.turnStatus
+                ? { finishedAt: Date.now(), finishStatus: item.turnStatus }
+                : {}),
+            })
             return {
               ...item,
-              queue: [
-                { ...next, paused: false, error: undefined },
-                ...queue
-                  .filter((entry) => entry.id !== messageId)
-                  .map((entry) => ({
-                    ...entry,
-                    paused: previousStatus.has(entry.id) ? previousStatus.get(entry.id) : true,
-                  })),
-              ],
+              messages,
+              queue: (item.queue || []).filter((entry) => entry.id !== messageId),
+              updatedAt: sentAt,
             }
           }),
         )
       } catch (error) {
-        pause(threadId)
         restore(threadId, selected, errorText(error))
         context.current.onError(errorText(error))
       } finally {
-        stopping.current = false
+        dispatching.current = false
         if (mounted.current) setOperation(undefined)
         wake()
       }
     },
-    [pause, restore, wake],
+    [restore, wake],
   )
 
   useEffect(() => {
-    if (!mounted.current || saving.current || pumping.current || stopping.current) return
-    const candidate = options.threads.find((thread) => {
-      const message = thread.queue?.[0]
-      return (
-        message &&
-        !message.paused &&
-        !message.error &&
-        !thread.busy &&
-        !thread.pending.length &&
-        queueConnectionMatches(thread, options.connection) &&
-        !options.isBlocked(thread.id)
-      )
-    })
+    if (!mounted.current || saving.current || pumping.current || dispatching.current) return
+    const candidate = options.threads.find((thread) =>
+      canAutoSendQueuedMessage(thread, options.connection, options.isBlocked(thread.id)),
+    )
     const message = candidate?.queue?.[0]
     if (!candidate || !message) return
     pumping.current = true
     setOperation({ threadId: candidate.id, id: message.id })
     void (async () => {
       try {
-        const files = await Promise.all(
-          message.attachments.map(async (attachment): Promise<DraftAttachment> => {
-            const blob = await getAttachmentFile(attachment.id)
-            if (!blob)
-              throw new Error(
-                `The attachment ${attachment.name} is unavailable. Remove this message and attach it again.`,
-              )
-            return {
-              ...attachment,
-              file: new File([blob], attachment.name, { type: attachment.mime }),
-            }
-          }),
-        )
+        const files = await loadQueuedAttachmentFiles(message)
         if (!mounted.current || cancelled.current.has(message.id)) return
         const latest = context.current
         const thread = latest.threads.find((item) => item.id === candidate.id)
         if (!thread?.queue?.some((item) => item.id === message.id)) return
-        if (!queueConnectionMatches(thread, latest.connection) || latest.isBlocked(thread.id))
+        if (thread.queue[0]?.id !== message.id) return
+        if (!canAutoSendQueuedMessage(thread, latest.connection, latest.isBlocked(thread.id)))
           throw new Error('The thread is not ready to send. Use Send now to resume this message.')
         const sent = await latest.send({ threadId: thread.id, messageId: message.id, files })
         if (sent !== true)

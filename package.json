@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -25,7 +25,9 @@
     "dist": "npm run build && electron-builder",
     "dist:dir": "npm run build && electron-builder --dir",
     "test:desktop": "node tests/desktop-smoke.cjs",
-    "test:recovery": "node tests/renderer-recovery-smoke.cjs"
+    "test:recovery": "node tests/renderer-recovery-smoke.cjs",
+    "build:web": "vite build --config vite.web.config.ts",
+    "test:web-preview": "node tests/web-preview-smoke.cjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.2.8",

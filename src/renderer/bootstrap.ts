@@ -1,7 +1,11 @@
 /** This loader stays bundled so editable React code cannot remove Life's recovery route. */
-import { api } from './api'
-
 async function boot() {
+  if (import.meta.env?.VITE_LIFE_WEB_PREVIEW === 'true') {
+    const { bootWebPreview } = await import('./web-preview')
+    await bootWebPreview()
+    return
+  }
+  const { api } = await import('./api')
   const state = await api?.sourceCode?.get()
   if (!state?.enabled || !state.active) {
     await import('./main')

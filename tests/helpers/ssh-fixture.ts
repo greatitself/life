@@ -214,7 +214,35 @@ export class SSHFixture {
       .filter(Boolean)
       .map((line) => JSON.parse(line) as LogEntry)
   }
+  /** Cut the real SSH transport while leaving detached remote services alive. */
+  dropConnections() {
+    for (const socket of this.sockets) socket.destroy()
+  }
   async close() {
+    // Provider brokers intentionally outlive an SSH socket. They are owned by
+    // this disposable remote HOME and must also be stopped during fixture
+    // teardown, including when a test disconnected before closing its agent.
+    const sessionDirectory = join(this.root, '.life', 'agent-sessions')
+    try {
+      for (const session of readdirSync(sessionDirectory)) {
+        try {
+          const state = JSON.parse(
+            readFileSync(join(sessionDirectory, session, 'state.json'), 'utf8'),
+          ) as { pid?: number; brokerPid?: number }
+          if (state.pid && Number.isSafeInteger(state.pid) && state.pid > 1)
+            try {
+              process.kill(-state.pid, 'SIGKILL')
+            } catch {}
+          if (state.brokerPid && Number.isSafeInteger(state.brokerPid) && state.brokerPid > 1)
+            try {
+              process.kill(state.brokerPid, 'SIGTERM')
+            } catch {}
+        } catch {}
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    } catch {
+      // Most fixture tests never create an agent broker.
+    }
     const childrenClosed = [...this.processes].map(
       (child) =>
         new Promise<void>((resolve) => {

@@ -1,0 +1,80 @@
+.app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+  .main-workspace
+  .thread-attachment.life-square-image-attachment {
+  width: 72px;
+  flex-basis: 72px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+    .main-workspace
+    .draft-attachments
+    .life-square-image-attachment
+    .thread-attachment-remove {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+    .main-workspace
+    .draft-attachments
+    .life-square-image-attachment:hover
+    .thread-attachment-remove,
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+    .main-workspace
+    .draft-attachments
+    .life-square-image-attachment:focus-within
+    .thread-attachment-remove {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.app-shell.life-polished-layout .main-workspace .life-image-upload-failure {
+  justify-content: flex-end;
+  height: 100%;
+  gap: 2px;
+  padding: 0;
+}
+
+.app-shell.life-polished-layout
+  .main-workspace
+  .life-image-upload-failure
+  .life-image-upload-label {
+  display: none;
+}
+
+.app-shell.life-polished-layout
+  .main-workspace
+  .life-image-upload-overlay:has(.life-image-upload-failure) {
+  padding: 4px;
+}
+
+.app-shell.life-polished-layout
+  .main-workspace
+  .life-image-upload-failure
+  .life-image-upload-retry {
+  min-height: 24px;
+}
+
+@media (hover: none) {
+  .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
+    .main-workspace
+    .thread-attachment.life-square-image-attachment {
+    width: 96px;
+    flex-basis: 96px;
+  }
+
+  .app-shell.life-polished-layout
+    .main-workspace
+    .life-image-upload-overlay:has(.life-image-upload-failure) {
+    padding: 2px;
+  }
+
+  .app-shell.life-polished-layout
+    .main-workspace
+    .life-image-upload-failure
+    .life-image-upload-retry {
+    min-height: 44px;
+  }
+}

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import * as Select from '@radix-ui/react-select'
 import { BrainCircuit, Check, ChevronDown, ChevronUp, Gauge } from 'lucide-react'
 import type { ModelOption, Provider } from '../../shared/types'
+import { parsePrefixedSelection } from '../selector-values'
 import { ProviderIcon } from './Icons'
 import './thread-controls.css'
 
@@ -36,7 +37,13 @@ function ChoiceMenu({
     })
   const selected = options.find((item) => item.value === value)!
   return (
-    <Select.Root value={`choice:${value}`} onValueChange={(next) => onChange(next.slice(7))}>
+    <Select.Root
+      value={`choice:${value}`}
+      onValueChange={(next) => {
+        const selected = parsePrefixedSelection(next)
+        if (selected !== undefined) onChange(selected)
+      }}
+    >
       <Select.Trigger
         className="life-choice-trigger"
         aria-label={`${label}: ${selected.label}`}

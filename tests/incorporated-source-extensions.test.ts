@@ -103,14 +103,31 @@ afterEach(async () => {
 })
 
 describe('exact built-in source extension migration', () => {
-  it('ships only 27 random IDs and SHA256 identities, without source or backup data', () => {
-    expect(incorporatedSourceExtensions).toHaveLength(27)
-    expect(new Set(incorporatedSourceExtensions.map(({ id }) => id)).size).toBe(27)
+  it('retains all 37 historical bundle identities without source or backup data', () => {
+    expect(incorporatedSourceExtensions).toHaveLength(37)
+    expect(new Set(incorporatedSourceExtensions.map(({ id }) => id)).size).toBe(37)
     for (const entry of incorporatedSourceExtensions) {
       expect(Object.keys(entry).sort()).toEqual(['id', 'sha256'])
       expect(entry.id).toMatch(/^source-[a-f0-9]{12}$/)
       expect(entry.sha256).toMatch(/^[a-f0-9]{64}$/)
     }
+    // The October 9 export no longer included the older export-all archive.
+    // Earlier installations must still recognize it without replaying old code.
+    expect(incorporatedSourceExtensions.some(({ id }) => id === 'source-9bb3ffbcce4d')).toBe(true)
+    expect(incorporatedSourceExtensions.map(({ id }) => id)).toEqual(
+      expect.arrayContaining([
+        'source-291e3f4359ea',
+        'source-265a22e310cd',
+        'source-ee937ac6bc82',
+        'source-12cfab44e306',
+        'source-2b3a5bff463a',
+        'source-2f6848a57686',
+        'source-deac6139f1b6',
+        'source-9d9f38a237da',
+        'source-60cf7584c344',
+        'source-3ed4505f113d',
+      ]),
+    )
   })
 
   it('matches every bundle field independently of object key order and rejects edited identities', async () => {

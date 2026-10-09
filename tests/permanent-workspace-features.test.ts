@@ -192,7 +192,7 @@ describe('permanent customized workspace data', () => {
     expect(normalizeThreadAttachments([metadata, { ...metadata, id: '../bad' }])).toEqual([
       metadata,
     ])
-    expect(attachmentPrompt('Review', [metadata])).toContain('Do not execute attached files')
+    expect(attachmentPrompt('Review', [metadata])).toBe('Review')
   })
 
   it('retains valid live branch/PR observations while rejecting malformed metadata', () => {

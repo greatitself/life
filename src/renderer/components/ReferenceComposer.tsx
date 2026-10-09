@@ -15,7 +15,9 @@ import {
 import type { ConnectionState, ModelOption, PermissionMode, Provider } from '../../shared/types'
 import type { Thread } from '../state'
 import { fallbackModelCatalog } from '../model-catalog'
+import { parseModelSelection, parsePrefixedSelection } from '../selector-values'
 import { ProviderIcon } from './Icons'
+import { useBuiltinFeature } from '../builtin-extensions'
 import './reference-composer.css'
 
 const effortName = (value: string) =>
@@ -108,7 +110,9 @@ export function ReferenceComposerControls({
       <Select.Root
         value={JSON.stringify([provider, model])}
         onValueChange={(value) => {
-          const [agent, id] = JSON.parse(value) as [Provider, string]
+          const selection = parseModelSelection(value)
+          if (!selection) return
+          const [agent, id] = selection
           if (agent !== provider) onProviderChange(agent, id)
           else onChange({ model: id })
         }}
@@ -197,7 +201,10 @@ export function ReferenceComposerControls({
             </DropdownMenu.Label>
             <DropdownMenu.RadioGroup
               value={`choice:${reasoningEffort}`}
-              onValueChange={(value) => onChange({ reasoningEffort: value.slice(7) })}
+              onValueChange={(value) => {
+                const selection = parsePrefixedSelection(value)
+                if (selection !== undefined) onChange({ reasoningEffort: selection })
+              }}
             >
               <DropdownMenu.RadioItem className="reference-radio-item" value="choice:">
                 Default
@@ -238,7 +245,10 @@ export function ReferenceComposerControls({
             </DropdownMenu.Label>
             <DropdownMenu.RadioGroup
               value={`choice:${serviceTier}`}
-              onValueChange={(value) => onChange({ serviceTier: value.slice(7) })}
+              onValueChange={(value) => {
+                const selection = parsePrefixedSelection(value)
+                if (selection !== undefined) onChange({ serviceTier: selection })
+              }}
             >
               <DropdownMenu.RadioItem className="reference-radio-item" value="choice:">
                 Default
@@ -279,7 +289,10 @@ export function ReferenceComposerControls({
       <Select.Root
         value={mode}
         disabled={modeDisabled}
-        onValueChange={(value) => onChange({ mode: value as PermissionMode })}
+        onValueChange={(value) => {
+          if (permissionChoices.some((choice) => choice.id === value))
+            onChange({ mode: value as PermissionMode })
+        }}
       >
         <Select.Trigger
           className="reference-control reference-permission-control"
@@ -346,6 +359,7 @@ export function ReferenceComposerDetails({
   onNotify: (message: string) => void
 }) {
   const element = useRef<HTMLSpanElement>(null)
+  const metadataEnabled = useBuiltinFeature('thread-git-metadata')
   const ready = connection.status === 'connected' && Boolean(connection.workspace)
   const matches =
     ready &&
@@ -372,56 +386,60 @@ export function ReferenceComposerDetails({
   }, [])
   return (
     <span className="reference-composer-details" ref={element}>
-      {pullRequest ? (
-        <span
-          className="reference-pull-request"
-          title={pullRequest.title}
-          aria-label={`Pull request ${pullRequest.number}: ${pullRequest.title}`}
-        >
-          <GitPullRequest size={14} />#{pullRequest.number}
-        </span>
-      ) : null}
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger
-          className="reference-branch-control"
-          disabled={!ready}
-          aria-label={branch ? `Current branch: ${branch}` : 'Workspace branch details'}
-          title={branch || 'Git branch has not been loaded'}
-        >
-          <GitBranch size={14} />
-          <span>{branch || 'Branch unavailable'}</span>
-          <ChevronDown size={12} />
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content
-            className="reference-run-menu"
-            side="top"
-            align="end"
-            sideOffset={10}
-            collisionPadding={12}
-          >
-            <DropdownMenu.Label className="reference-menu-heading">
-              {branch || 'Workspace'}
-            </DropdownMenu.Label>
-            <DropdownMenu.Item
-              className="reference-radio-item"
-              disabled={!branch}
-              onSelect={() => {
-                if (branch)
-                  void navigator.clipboard
-                    .writeText(branch)
-                    .then(() => onNotify('Branch name copied.'))
-                    .catch(() => onNotify('Could not copy the branch name.'))
-              }}
+      {metadataEnabled ? (
+        <>
+          {pullRequest ? (
+            <span
+              className="reference-pull-request"
+              title={pullRequest.title}
+              aria-label={`Pull request ${pullRequest.number}: ${pullRequest.title}`}
             >
-              Copy branch name
-            </DropdownMenu.Item>
-            <DropdownMenu.Item className="reference-radio-item" onSelect={onWorkspace}>
-              Open workspace sidebar
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+              <GitPullRequest size={14} />#{pullRequest.number}
+            </span>
+          ) : null}
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger
+              className="reference-branch-control"
+              disabled={!ready}
+              aria-label={branch ? `Current branch: ${branch}` : 'Workspace branch details'}
+              title={branch || 'Git branch has not been loaded'}
+            >
+              <GitBranch size={14} />
+              <span>{branch || 'Branch unavailable'}</span>
+              <ChevronDown size={12} />
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className="reference-run-menu"
+                side="top"
+                align="end"
+                sideOffset={10}
+                collisionPadding={12}
+              >
+                <DropdownMenu.Label className="reference-menu-heading">
+                  {branch || 'Workspace'}
+                </DropdownMenu.Label>
+                <DropdownMenu.Item
+                  className="reference-radio-item"
+                  disabled={!branch}
+                  onSelect={() => {
+                    if (branch)
+                      void navigator.clipboard
+                        .writeText(branch)
+                        .then(() => onNotify('Branch name copied.'))
+                        .catch(() => onNotify('Could not copy the branch name.'))
+                  }}
+                >
+                  Copy branch name
+                </DropdownMenu.Item>
+                <DropdownMenu.Item className="reference-radio-item" onSelect={onWorkspace}>
+                  Open workspace sidebar
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </>
+      ) : null}
     </span>
   )
 }

@@ -98,6 +98,9 @@ export interface LifeSourceSnapshot {
   /** Ordered, independently managed changes layered over the installed source. */
   extensions: SourceExtensionSummary[]
   revision: number
+  /** Feature choices have their own revision and never invalidate source proposals. */
+  builtInRevision?: number
+  builtInError?: string
   enabled: boolean
   active?: LifeSourceAsset
   canRollback: boolean

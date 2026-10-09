@@ -1,0 +1,424 @@
+/* Appearance fallbacks are opt-in. Functional features are disabled in React
+   and their effects; these classes never remove project or conversation data.
+   Explicit priorities override the historical extensions' layered selectors. */
+
+:root.life-builtin-off-header-minimal .titlebar-workspace-label {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+:root.life-builtin-off-compact-branding .app-shell .titlebar-brand {
+  gap: 10px !important;
+}
+:root.life-builtin-off-compact-branding .app-shell .titlebar-brand > svg {
+  width: 24px !important;
+  height: 24px !important;
+}
+:root.life-builtin-off-compact-branding .app-shell .titlebar-brand strong {
+  font-size: 20px !important;
+  letter-spacing: 0 !important;
+  text-transform: capitalize;
+}
+:root.life-builtin-off-compact-branding .life-brand-dot {
+  color: var(--text-strong) !important;
+  animation: none !important;
+}
+
+:root.life-builtin-off-surface-layout .surface-picker {
+  padding: 24px 20px !important;
+}
+:root.life-builtin-off-surface-layout .surface-picker > div {
+  width: min(300px, 100%) !important;
+  gap: 8px !important;
+}
+:root.life-builtin-off-surface-layout .surface-picker button {
+  min-height: 42px !important;
+  padding: 10px 12px !important;
+  border: 1px solid var(--border);
+  border-radius: 6px !important;
+  background: var(--surface);
+}
+:root.life-builtin-off-surface-layout .app-shell .surface-controls,
+:root.life-builtin-off-surface-layout .app-shell .surface-collapse-row {
+  padding-inline: 12px !important;
+  background: var(--surface) !important;
+}
+
+:root.life-builtin-off-compact-workspace .app-shell {
+  --life-chrome-row-height: 52px;
+}
+:root.life-builtin-off-compact-workspace .app-shell .surface-collapse-row,
+:root.life-builtin-off-compact-workspace .app-shell .surface-controls {
+  min-height: 52px !important;
+}
+:root.life-builtin-off-compact-workspace .app-shell .titlebar-sidebar-row {
+  min-height: 52px !important;
+}
+
+:root.life-builtin-off-sidebar-spacing .app-shell:not(.sidebar-hidden) .sidebar {
+  padding-inline: 16px !important;
+}
+:root.life-builtin-off-sidebar-spacing .app-shell .sidebar-navigation-toolbar {
+  gap: 10px !important;
+  padding-block: 12px !important;
+}
+:root.life-builtin-off-sidebar-spacing .app-shell .sidebar-inline-search {
+  padding: 6px 10px !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface) !important;
+}
+:root.life-builtin-off-sidebar-spacing .app-shell .project-heading,
+:root.life-builtin-off-sidebar-spacing .app-shell .sidebar-project-thread-heading {
+  padding-block: 10px !important;
+}
+
+:root.life-builtin-off-compact-badges .app-shell .thread-project-badge,
+:root.life-builtin-off-compact-badges .app-shell .header-project-badge {
+  flex-basis: 24px !important;
+  width: 24px !important;
+  min-width: 24px !important;
+  max-width: 24px !important;
+  height: 24px !important;
+  border-radius: 5px !important;
+  font-size: 11px !important;
+  line-height: 24px !important;
+}
+:root.life-builtin-off-compact-badges .app-shell .thread-project-initials {
+  height: 24px !important;
+  line-height: 24px !important;
+}
+:root.life-builtin-off-centered-badges .app-shell .thread-card-project,
+:root.life-builtin-off-centered-badges .app-shell .header-project-badge {
+  align-items: flex-start !important;
+}
+:root.life-builtin-off-centered-badges .app-shell .thread-project-badge {
+  align-self: flex-start !important;
+  margin-top: 2px !important;
+}
+
+:root.life-builtin-off-sidebar-footer .app-shell:not(.sidebar-hidden) .sidebar-bottom {
+  padding-block: 12px !important;
+  border-top: 1px solid var(--border) !important;
+}
+:root.life-builtin-off-sidebar-footer .app-shell .sidebar-tool-row,
+:root.life-builtin-off-sidebar-footer .app-shell .sidebar-tool-actions {
+  gap: 8px !important;
+}
+:root.life-builtin-off-sidebar-footer .app-shell .sidebar-arrangement-footer {
+  margin-bottom: 12px !important;
+  scrollbar-width: thin !important;
+}
+
+:root.life-builtin-off-chrome-polish .app-shell .titlebar-theme,
+:root.life-builtin-off-chrome-polish .app-shell .surface-collapse-control,
+:root.life-builtin-off-chrome-polish .app-shell .titlebar-action-slot > .icon-button,
+:root.life-builtin-off-chrome-polish .app-shell .sidebar-tool-actions > button {
+  width: 32px !important;
+  min-width: 32px !important;
+  height: 32px !important;
+  flex-basis: 32px !important;
+  border-radius: 4px !important;
+}
+:root.life-builtin-off-chrome-polish .app-shell .main-workspace .conversation {
+  scrollbar-width: thin !important;
+}
+:root.life-builtin-off-chrome-polish .app-shell .main-workspace .conversation::-webkit-scrollbar {
+  display: block !important;
+  width: 8px;
+}
+
+/* The header brand and version are rendered by their corresponding React gates. */
+:root.life-builtin-off-collapsed-branding .app-shell.sidebar-hidden .titlebar-brand {
+  gap: 8px !important;
+}
+:root.life-builtin-off-hide-version .app-shell .titlebar-tools .version {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+:root.life-builtin-off-header-action-spacing .app-shell .thread-header-actions,
+:root.life-builtin-off-header-action-spacing .app-shell .titlebar-tools,
+:root.life-builtin-off-header-action-spacing .app-shell .titlebar-action-slot {
+  gap: 10px !important;
+  padding-inline: 6px !important;
+}
+
+:root.life-builtin-off-individual-arrange-controls .app-shell .life-thread-actions {
+  gap: 1px !important;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+}
+:root.life-builtin-off-individual-arrange-controls .app-shell .life-thread-action-icon:hover,
+:root.life-builtin-off-individual-arrange-controls .app-shell .life-thread-settle:hover {
+  background: transparent !important;
+  color: var(--text-strong) !important;
+}
+
+:root.life-builtin-off-composer-shape .app-shell .life-reference-composer .composer {
+  min-height: 120px !important;
+  padding: 14px !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 8px !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .life-reference-composer textarea {
+  min-height: 64px !important;
+  margin-bottom: 12px !important;
+  line-height: 1.5 !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .life-reference-composer .composer:focus-within {
+  border-color: var(--text-strong) !important;
+  outline: 1px solid var(--text-strong);
+  outline-offset: 2px;
+}
+:root.life-builtin-off-composer-shape .app-shell .life-reference-composer .composer-toolbar {
+  gap: 10px !important;
+  min-height: 36px !important;
+}
+:root.life-builtin-off-composer-shape .reference-run-controls {
+  flex-wrap: wrap;
+  gap: 8px !important;
+}
+:root.life-builtin-off-composer-shape .reference-control {
+  min-height: 32px !important;
+  padding: 5px 8px !important;
+  margin-inline: 0 !important;
+  border: 1px solid var(--border);
+  border-radius: 5px !important;
+  font-size: 12px !important;
+}
+:root.life-builtin-off-composer-shape .reference-select-content,
+:root.life-builtin-off-composer-shape .reference-run-menu {
+  border-radius: 6px !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .life-reference-composer .composer-worktree-strip {
+  margin: 8px 0 0 !important;
+  padding: 8px 10px !important;
+  border: 1px solid var(--border);
+  border-radius: 6px !important;
+  background: var(--surface) !important;
+}
+:root.life-builtin-off-composer-shape .composer-project-control,
+:root.life-builtin-off-composer-shape .reference-branch-control {
+  min-height: 28px !important;
+  border-radius: 4px !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .composer-machine-status,
+:root.life-builtin-off-composer-shape .app-shell .reference-composer-details {
+  order: 0 !important;
+  max-width: none !important;
+  padding-right: 0 !important;
+  border-right: 0 !important;
+  gap: 8px !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .composer-worktree-strip {
+  flex-wrap: wrap;
+  min-height: 40px !important;
+  gap: 10px !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .composer-worktree-strip > span:first-child {
+  max-width: none !important;
+}
+:root.life-builtin-off-composer-shape .app-shell .composer-worktree-strip .status-dot {
+  display: inline-block !important;
+}
+
+:root.life-builtin-off-composer-action-style .app-shell .life-reference-composer .send-button,
+:root.life-builtin-off-composer-action-style
+  .app-shell
+  .life-reference-composer
+  .attachment-picker {
+  width: 36px !important;
+  min-width: 36px !important;
+  height: 36px !important;
+  flex-basis: 36px !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 6px !important;
+  background: var(--surface-raised) !important;
+  color: var(--text-strong) !important;
+}
+:root.life-builtin-off-composer-action-style
+  .app-shell
+  .life-reference-composer
+  .send-button:hover:not(:disabled),
+:root.life-builtin-off-composer-action-style
+  .app-shell
+  .life-reference-composer
+  .attachment-picker:hover:not(:disabled) {
+  background: var(--hover) !important;
+}
+:root.life-builtin-off-composer-spacing .app-shell .life-reference-composer {
+  margin-block: 12px !important;
+  padding-bottom: 16px !important;
+}
+:root.life-builtin-off-composer-spacing .app-shell .composer-worktree-strip {
+  margin-top: 12px !important;
+}
+:root.life-builtin-off-composer-compact .app-shell .life-reference-composer .composer {
+  padding: 20px !important;
+}
+:root.life-builtin-off-composer-compact .app-shell .life-reference-composer .composer-toolbar,
+:root.life-builtin-off-composer-compact .app-shell .life-reference-composer .composer-send-actions {
+  gap: 12px !important;
+}
+
+/* Navigation names are actual labels, changed through React rather than generated text. */
+
+:root.life-builtin-off-compact-attachments .app-shell .message.user.life-compact-user-message {
+  padding: 16px !important;
+}
+:root.life-builtin-off-compact-attachments
+  .app-shell
+  .message.user.life-compact-user-message
+  > .message-label {
+  display: flex !important;
+  position: static !important;
+  height: auto !important;
+  min-height: 24px !important;
+  margin-bottom: 12px !important;
+}
+:root.life-builtin-off-compact-attachments
+  .app-shell
+  .message.user.life-compact-user-message
+  .copy-message {
+  position: static !important;
+  margin-left: auto !important;
+}
+:root.life-builtin-off-compact-attachments
+  .app-shell
+  .thread-attachment.life-square-image-attachment {
+  width: 144px !important;
+  flex-basis: 144px !important;
+}
+:root.life-builtin-off-compact-attachments .app-shell .thread-attachment-thumbnail {
+  object-fit: contain !important;
+}
+:root.life-builtin-off-compact-attachments
+  .app-shell
+  .life-square-image-attachment
+  .thread-attachment-remove {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+:root.life-builtin-off-compact-attachments
+  .app-shell
+  .life-image-upload-failure
+  .life-image-upload-label {
+  display: inline-grid !important;
+}
+
+:root.life-builtin-off-compact-source-cards .app-shell .life-source-card {
+  padding: 20px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  line-height: 1.65 !important;
+  overflow: visible !important;
+}
+:root.life-builtin-off-compact-source-cards
+  .app-shell
+  .life-source-card
+  :is(summary, li, code, small),
+:root.life-builtin-off-compact-source-cards .app-shell .life-source-card-description,
+:root.life-builtin-off-compact-source-cards .app-shell .life-source-card-heading > strong {
+  font-size: 13px !important;
+}
+:root.life-builtin-off-compact-source-cards .app-shell .life-source-card-raw > pre {
+  max-height: none !important;
+  padding: 14px !important;
+  font-size: 12px !important;
+}
+
+:root.life-builtin-off-project-colors .app-shell .thread-project-badge {
+  background: var(--surface-raised) !important;
+  color: var(--text-strong) !important;
+  border: 1px solid var(--border-strong);
+  box-shadow: none !important;
+}
+
+:root.life-builtin-off-header-view-layout .app-shell .life-header-view-switch {
+  gap: 8px !important;
+}
+:root.life-builtin-off-header-view-layout .app-shell .life-header-view-switch > button {
+  padding-inline: 10px !important;
+  width: auto !important;
+  max-width: none !important;
+  flex: 0 1 auto !important;
+}
+:root.life-builtin-off-header-view-layout
+  .app-shell
+  .life-header-view-switch
+  .life-header-view-label {
+  display: block !important;
+}
+:root.life-builtin-off-claude-brand-color .provider-icon[data-provider='claude'] path {
+  fill: currentColor !important;
+}
+
+:root.life-builtin-off-research-fullheight .app-shell .research-split-layout {
+  padding: 12px !important;
+  gap: 12px;
+}
+:root.life-builtin-off-research-fullheight .app-shell .research-agent-sidebar {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+}
+:root.life-builtin-off-research-fullheight .app-shell > .research-agent-resize-full-height {
+  top: calc(var(--titlebar-height, 40px) + 12px) !important;
+  bottom: 12px !important;
+}
+:root.life-builtin-off-research-goal-controls .app-shell .research-goals-heading {
+  padding: 8px !important;
+  margin-block: 8px !important;
+  gap: 12px !important;
+}
+:root.life-builtin-off-research-goal-controls
+  .app-shell[data-view='investigation']
+  .sidebar-navigation-toolbar {
+  padding-block: 10px !important;
+  gap: 10px !important;
+}
+:root.life-builtin-off-research-goal-controls
+  .app-shell
+  .sidebar-navigation-actions[aria-label='Research actions']
+  > button {
+  min-width: 36px !important;
+  min-height: 36px !important;
+}
+
+@media (max-width: 600px) {
+  :root.life-builtin-off-header-view-layout .app-shell .life-header-view-switch {
+    gap: 4px !important;
+  }
+  :root.life-builtin-off-header-view-layout .app-shell .life-header-view-switch > button {
+    padding-inline: 5px !important;
+  }
+  :root.life-builtin-off-header-action-spacing .app-shell .thread-header-actions,
+  :root.life-builtin-off-header-action-spacing .app-shell .titlebar-tools,
+  :root.life-builtin-off-header-action-spacing .app-shell .titlebar-action-slot {
+    gap: 4px !important;
+    padding-inline: 2px !important;
+  }
+  :root.life-builtin-off-compact-attachments
+    .app-shell
+    .thread-attachment.life-square-image-attachment {
+    width: 120px !important;
+    flex-basis: 120px !important;
+  }
+}
+
+@media (hover: none) {
+  :root.life-builtin-off-composer-action-style .app-shell .life-reference-composer .send-button,
+  :root.life-builtin-off-composer-action-style
+    .app-shell
+    .life-reference-composer
+    .attachment-picker {
+    width: 44px !important;
+    min-width: 44px !important;
+    height: 44px !important;
+    flex-basis: 44px !important;
+  }
+}

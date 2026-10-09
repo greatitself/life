@@ -53,9 +53,10 @@ export function CustomizationDialog({
       <div className="customization-scope">
         <MessageSquare size={17} />
         <p>
-          Change Life from any thread. Start your message with <code>/life</code>, then describe
-          what you want—for example, <code>/life add a research counter</code>. Your agent can
-          update settings, add features, and change the interface without leaving the conversation.
+          Open <strong>Life Studio</strong> at the bottom of the sidebar to describe a change. Its
+          dedicated conversations can update settings, build features, and change the interface,
+          with source details, build output, and recovery controls. Project chats and Research
+          remain separate.
         </p>
       </div>
       <div className="customization-current" aria-label="Current settings">

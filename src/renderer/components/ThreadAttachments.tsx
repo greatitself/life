@@ -109,58 +109,120 @@ function AttachmentCard({
     }
   }
 
+  const uploadPercent = Math.min(100, Math.max(0, Math.round(uploadState?.percent || 0)))
+  const uploadStatusText = uploadState
+    ? {
+        waiting: 'Waiting for this thread’s connection and project',
+        queued: 'Queued for upload',
+        uploading: 'Uploading',
+        ready: 'Uploaded · ready to send',
+        error: uploadState.error ? 'Upload failed: ' + uploadState.error : 'Upload failed',
+      }[uploadState.state]
+    : ''
+
   return (
-    <div className={`thread-attachment ${image ? 'thread-attachment-image' : ''}`}>
-      <button
-        type="button"
-        className="thread-attachment-open"
-        title={attachment.name}
-        aria-label={`${image ? 'Preview' : 'Download'} ${attachment.name}`}
-        disabled={downloading || (image && !url)}
-        onClick={() => (image ? setOpen(true) : void download())}
-      >
-        {image && url ? (
-          <img
-            src={url}
-            alt=""
-            className="thread-attachment-thumbnail"
-            onError={() => setError('Image preview unavailable. You can still download this file.')}
-          />
-        ) : (
-          <File size={23} aria-hidden="true" />
-        )}
-        <span className="thread-attachment-info">
-          <strong>{attachment.name}</strong>
-          <small>{attachmentSize(attachment.size)}</small>
+    <div
+      className={`thread-attachment ${image ? 'thread-attachment-image life-square-image-attachment' : ''}`}
+    >
+      <div className={image ? 'life-image-attachment-frame' : 'life-file-attachment-row'}>
+        <button
+          type="button"
+          className="thread-attachment-open"
+          title={`${attachment.name} · ${attachmentSize(attachment.size)}${uploadState ? ` · ${uploadStatusText}` : ''}`}
+          aria-label={`${image ? 'Preview' : 'Download'} ${attachment.name}`}
+          disabled={downloading || (image && !url)}
+          onClick={() => (image ? setOpen(true) : void download())}
+        >
+          {image && url ? (
+            <img
+              src={url}
+              alt=""
+              className="thread-attachment-thumbnail"
+              onError={() =>
+                setError('Image preview unavailable. You can still download this file.')
+              }
+            />
+          ) : (
+            <File size={23} aria-hidden="true" />
+          )}
+          <span className="thread-attachment-info">
+            <strong>{attachment.name}</strong>
+            <small>{attachmentSize(attachment.size)}</small>
+          </span>
+          {image ? (
+            <ImageIcon size={14} aria-hidden="true" />
+          ) : (
+            <Download size={14} aria-hidden="true" />
+          )}
+        </button>
+        {onRemove ? (
+          <button
+            type="button"
+            className="icon-button thread-attachment-remove"
+            aria-label={`Remove ${attachment.name}`}
+            disabled={disabled}
+            onClick={() => onRemove(attachment.id)}
+          >
+            <X size={14} />
+          </button>
+        ) : image ? (
+          <button
+            type="button"
+            className="icon-button thread-attachment-remove"
+            aria-label={`Download ${attachment.name}`}
+            disabled={downloading}
+            onClick={() => void download()}
+          >
+            <Download size={14} />
+          </button>
+        ) : null}
+        {image && uploadState && uploadState.state !== 'ready' ? (
+          <div className="life-image-upload-overlay">
+            {uploadState.state === 'uploading' ? (
+              <span
+                className="life-image-upload-percent"
+                role="progressbar"
+                aria-label={`Uploading ${attachment.name}`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={uploadPercent}
+                aria-valuetext={`${uploadPercent}% uploaded`}
+              >
+                {uploadPercent}%
+              </span>
+            ) : uploadState.state === 'error' ? (
+              <div className="life-image-upload-failure">
+                <span className="life-image-upload-label">Failed</span>
+                {onRetry ? (
+                  <button
+                    type="button"
+                    className="life-image-upload-retry"
+                    aria-label={`Retry upload of ${attachment.name}`}
+                    title={uploadStatusText}
+                    disabled={disabled}
+                    onClick={() => onRetry(attachment.id)}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <span className="life-image-upload-label" title={uploadStatusText}>
+                {uploadState.state === 'queued' ? 'Queued' : 'Waiting'}
+              </span>
+            )}
+          </div>
+        ) : null}
+      </div>
+      {image && uploadState ? (
+        <span
+          className="life-attachment-status-only"
+          role={uploadState.state === 'error' ? 'alert' : 'status'}
+        >
+          {attachment.name}: {uploadStatusText}
         </span>
-        {image ? (
-          <ImageIcon size={14} aria-hidden="true" />
-        ) : (
-          <Download size={14} aria-hidden="true" />
-        )}
-      </button>
-      {onRemove ? (
-        <button
-          type="button"
-          className="icon-button thread-attachment-remove"
-          aria-label={`Remove ${attachment.name}`}
-          disabled={disabled}
-          onClick={() => onRemove(attachment.id)}
-        >
-          <X size={14} />
-        </button>
-      ) : image ? (
-        <button
-          type="button"
-          className="icon-button thread-attachment-remove"
-          aria-label={`Download ${attachment.name}`}
-          disabled={downloading}
-          onClick={() => void download()}
-        >
-          <Download size={14} />
-        </button>
       ) : null}
-      {uploadState ? (
+      {uploadState && !image ? (
         <div className="life-attachment-transfer" aria-live="polite">
           <span>
             {uploadState.state === 'ready'

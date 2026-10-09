@@ -23,6 +23,7 @@ import { shellQuote, profileSchema, remoteDirectorySchema } from '../shared/vali
 import { Store } from './store'
 import { openProxyJump, resolveSSHConfig, sshConfigTransportOptions } from './ssh-config'
 import { PortForwarding } from './port-forwarding'
+import { DurableRemoteChannel } from './durable-remote-channel'
 
 export function remoteCommand(command: string) {
   return `exec "$SHELL" -lc ${shellQuote('export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:$PATH"; ' + command)}`
@@ -44,6 +45,12 @@ export class SSHConnection extends EventEmitter {
   private workspaceGeneration = 0
   private workspaceSelection?: AbortController
   private rendererGeneration = 0
+  private reconnect?: {
+    input: ConnectInput
+    workspace?: string
+    attempts: number
+    timer?: NodeJS.Timeout
+  }
   private pendingRemoteRequests = new Map<
     (error: Error) => void,
     { project: boolean; renderer: boolean }
@@ -157,9 +164,10 @@ export class SSHConnection extends EventEmitter {
     this.workspaceSelection = undefined
     await this.store.settled()
   }
-  async connect(input: ConnectInput): Promise<ConnectionState> {
+  async connect(input: ConnectInput, resume = false): Promise<ConnectionState> {
     if (this.state.status === 'connecting') throw new Error('A connection is already in progress')
-    this.disconnect()
+    const resumeWorkspace = resume ? this.reconnect?.workspace : undefined
+    this.disconnect(resume)
     let profile = profileSchema.parse(input)
     this.update({ status: 'connecting', profile })
     const client = new Client()
@@ -259,6 +267,7 @@ export class SSHConnection extends EventEmitter {
           client.once('close', () => {
             done(new Error('SSH connection closed'))
             if (this.client === client) {
+              const previous = this.state
               this.forwarding.stop()
               this.cancelRemoteRequests(new Error('SSH connection closed'))
               this.workspaceGeneration++
@@ -270,14 +279,25 @@ export class SSHConnection extends EventEmitter {
               this.sftp = undefined
               this.terminal = undefined
               this.update({
+                ...previous,
                 status: 'disconnected',
-                profile: this.state.profile,
+                profile: previous.profile,
                 error:
-                  this.state.status === 'connected'
-                    ? 'The SSH connection closed. Reconnect to continue.'
-                    : this.state.error,
+                  previous.status === 'connected'
+                    ? 'The SSH connection closed. Life is reconnecting; remote agents keep running.'
+                    : previous.error,
               })
               this.emit('disconnected')
+              if (previous.status === 'connected') {
+                // Credentials remain in this process only. Saved connection
+                // profiles and logs never receive passwords or passphrases.
+                this.reconnect = {
+                  input: { ...input },
+                  workspace: previous.workspace,
+                  attempts: 0,
+                }
+                this.scheduleReconnect()
+              }
             }
           })
           client.connect({
@@ -396,12 +416,52 @@ export class SSHConnection extends EventEmitter {
       } finally {
         clearTimeout(previousLookupTimer)
       }
+      let workspace: string | undefined
+      if (resumeWorkspace) {
+        const restoration = new AbortController()
+        const restorationDeadline = setTimeout(() => restoration.abort(), 5000)
+        try {
+          // Automatic recovery restores the retained context before publishing
+          // connected. Publishing an intermediate no-project state would make
+          // the renderer open its picker or start a competing restoration.
+          const canonical = await this.remoteRequest<string>(
+            'Restoring the active project',
+            (done) => sftp.realpath(resumeWorkspace, done),
+            { signal: restoration.signal },
+          )
+          if (this.client !== client) throw new Error('SSH connection cancelled')
+          if (!posix.isAbsolute(canonical))
+            throw new Error('The active project did not resolve to an absolute POSIX path')
+          const stat = await this.remoteRequest<import('ssh2').Stats>(
+            'Checking the restored project',
+            (done) => sftp.stat(canonical, done),
+            { signal: restoration.signal },
+          )
+          if (this.client !== client) throw new Error('SSH connection cancelled')
+          if (!stat.isDirectory()) throw new Error('The active project is no longer a directory')
+          await this.remoteRequest<import('ssh2').FileEntryWithStats[]>(
+            'Opening the restored project',
+            (done) => sftp.readdir(canonical, done),
+            { signal: restoration.signal },
+          )
+          if (this.client !== client) throw new Error('SSH connection cancelled')
+          workspace = canonical
+        } catch (error) {
+          if (this.client !== client) throw error
+          // A moved, removed, or unreadable project cannot prevent reconnecting
+          // to the machine or to providers that still own their remote cwd.
+          this.emit('diagnostic', (error as Error).message)
+        } finally {
+          clearTimeout(restorationDeadline)
+        }
+      }
       if (this.client !== client) throw new Error('SSH connection cancelled')
       this.update({
         status: 'connected',
         profile,
         home,
         lastWorkspace,
+        ...(workspace ? { workspace } : {}),
         codex: version('CODEX'),
         claude: version('CLAUDE'),
       })
@@ -414,17 +474,40 @@ export class SSHConnection extends EventEmitter {
         : (error as Error).message || 'SSH connection cancelled'
       if (this.client !== client) throw new Error(failureMessage)
       const message = this.state.error || failureMessage
-      this.disconnect()
+      this.disconnect(resume)
       this.update({ status: 'disconnected', profile, error: message })
       throw new Error(message)
     }
+  }
+  private scheduleReconnect() {
+    const reconnect = this.reconnect
+    if (!reconnect || reconnect.timer) return
+    const delay = Math.min(15000, 1000 * 2 ** Math.min(reconnect.attempts++, 4))
+    reconnect.timer = setTimeout(() => {
+      reconnect.timer = undefined
+      if (this.reconnect !== reconnect) return
+      void this.connect(reconnect.input, true).then(
+        () => {
+          if (this.reconnect !== reconnect) return
+          reconnect.attempts = 0
+        },
+        () => {
+          if (this.reconnect === reconnect) this.scheduleReconnect()
+        },
+      )
+    }, delay)
+    reconnect.timer.unref()
   }
   trust(id: string, accepted: boolean) {
     const reply = this.pendingTrust.get(id)
     if (!reply) throw new Error('This host key request expired')
     reply(accepted)
   }
-  disconnect() {
+  disconnect(preserveReconnect = false) {
+    if (!preserveReconnect) {
+      if (this.reconnect?.timer) clearTimeout(this.reconnect.timer)
+      this.reconnect = undefined
+    }
     this.forwarding.stop()
     this.cancelRemoteRequests(new Error('SSH connection cancelled'))
     this.workspaceGeneration++
@@ -581,6 +664,9 @@ export class SSHConnection extends EventEmitter {
         ),
       { signal, timeoutMs, rendererOwned, discard: (channel) => channel.close() },
     )
+  }
+  async durableChannel(command: string): Promise<ClientChannel> {
+    return (await DurableRemoteChannel.open(this, command)) as unknown as ClientChannel
   }
   async exec(
     command: string,

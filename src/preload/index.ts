@@ -9,6 +9,15 @@ const subscribe = <T>(channel: string, callback: (data: T) => void) => {
 }
 const api: RelayAPI = {
   platform: process.platform,
+  hostHistory: {
+    list: (input) => ipcRenderer.invoke('agent-history:list', input),
+    read: (input) => ipcRenderer.invoke('agent-history:read', input),
+    cancel: (id) => ipcRenderer.invoke('agent-history:cancel', id),
+  },
+  researchDocuments: {
+    register: (html) => ipcRenderer.invoke('research-documents:register', html),
+    revoke: (id) => ipcRenderer.invoke('research-documents:revoke', id),
+  },
   forwarding: {
     get: () => ipcRenderer.invoke('forwarding:get'),
     onState: (callback) => subscribe('forwarding:state', callback),
@@ -86,6 +95,8 @@ const api: RelayAPI = {
   },
   agent: {
     start: (input) => ipcRenderer.invoke('agent:start', input),
+    steer: (input) => ipcRenderer.invoke('agent:steer', input),
+    configure: (input) => ipcRenderer.invoke('agent:configure', input),
     stop: (id) => ipcRenderer.invoke('agent:stop', id),
     dispose: (id) => ipcRenderer.invoke('agent:dispose', id),
     respond: (id, requestId, accepted, answers) =>

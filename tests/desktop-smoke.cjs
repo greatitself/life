@@ -974,6 +974,19 @@ export function activityLabel(activity: ThreadActivity): string {
         await send('native-subagent-probe')
         await waitForSend()
         assert.equal(await page.locator('.thread-subagent-card').count(), 0)
+        await waitUntil(async () => {
+          const saved = await ordinaryThread(exactPrompt, provider)
+          return (
+            saved.messages.some(
+              (message) =>
+                message.kind === 'subagent' &&
+                (message.agentId || message.agentName || message.parentItemId),
+            ) &&
+            JSON.stringify(saved.messages).includes(
+              'Subagent inspected every visible output block.',
+            )
+          )
+        }, `${provider} retains native subagent output arriving after parent completion`)
         const delegatedThread = await ordinaryThread(exactPrompt, provider)
         assert.ok(
           delegatedThread.messages.some(

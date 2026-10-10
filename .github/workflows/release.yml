@@ -124,6 +124,17 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify native installer process and policy guards
+        if: matrix.platform == 'windows-x64' && hashFiles('tests/windows-installer-process.ps1') != ''
+        shell: pwsh
+        run: ./tests/windows-installer-process.ps1
+      - name: Save native installer process proof
+        if: always() && matrix.platform == 'windows-x64' && hashFiles('output/windows-installer-process-proof.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-x64-installer-process-proof
+          path: output/windows-installer-process-proof.json
+          if-no-files-found: error
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
       - name: Verify native installer payload integrity and guarded deployment

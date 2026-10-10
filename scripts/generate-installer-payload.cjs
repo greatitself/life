@@ -301,10 +301,7 @@ function renderVerifier(entries, arch, archiveSha256) {
       `    IntCmp $3 -1 ${failure}`,
       '    IntOp $3 $3 & 0x410',
       `    IntCmp $3 0 0 ${failure} ${failure}`,
-      '    Push "SHA2-256"',
-      `    Push "$0\\${relative}"`,
-      '    StdUtils::HashFile /NOUNLOAD',
-      '    Pop $3',
+      `    !insertmacro LifeHashFile "$0\\${relative}" $3`,
       `    StrCmp $3 "${entry.sha256}" 0 ${failure}`,
     )
   }

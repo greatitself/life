@@ -3,10 +3,12 @@
 ; Verify the mirrored upstream routines before either NSIS executable is built.
 !system 'node "${PROJECT_DIR}/scripts/verify-nsis-trace.cjs"' = 0
 
-; A custom check suppresses these declarations in the upstream include, even
-; though this wrapper still invokes the complete upstream check.
+; A custom check suppresses these declarations in the upstream include. Retain
+; them for the unchanged uninstaller and the installer's complete stock fallback.
 !include "getProcessInfo.nsh"
 !include "installer-payload.nsh"
+!include "installer-hash.nsh"
+!include "installer-process.nsh"
 Var pid
 
 !macro LifeInstallerTrace PHASE
@@ -17,6 +19,8 @@ Var pid
 !macro customHeader
   !ifndef BUILD_UNINSTALLER
     Var /GLOBAL lifePayloadVerified
+    !insertmacro LifeDefineHashFile
+    !insertmacro LifeDefineProcessCheck
     !insertmacro LifeDefineEmptyPayloadDirectory
     !ifdef APP_64
       !system 'node "${PROJECT_DIR}/scripts/generate-installer-payload.cjs" --archive "${APP_64}" --arch 64 --output "${APP_64}.life-payload.nsh"' = 0
@@ -105,8 +109,12 @@ Var pid
     !endif
     !insertmacro LifeInstallerTrace "process-check-start"
   !endif
-  !insertmacro IS_POWERSHELL_AVAILABLE
-  !insertmacro _CHECK_APP_RUNNING
+  !ifdef BUILD_UNINSTALLER
+    !insertmacro IS_POWERSHELL_AVAILABLE
+    !insertmacro _CHECK_APP_RUNNING
+  !else
+    !insertmacro LifeCheckAppRunning
+  !endif
   !ifndef BUILD_UNINSTALLER
     !insertmacro LifeInstallerTrace "process-check-complete"
   !endif

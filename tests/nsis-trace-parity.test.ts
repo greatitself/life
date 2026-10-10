@@ -5,7 +5,7 @@ const require = createRequire(import.meta.url)
 const { assertStockStatements, macroBody, verify } = require('../scripts/verify-nsis-trace.cjs')
 
 describe('NSIS installer upstream fallback parity', () => {
-  it('retains the resolved extraction and uninstall-result routines', () => {
+  it('retains resolved extraction, process fallback and uninstall routines', () => {
     expect(() => verify()).not.toThrow()
   })
 

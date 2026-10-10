@@ -1078,6 +1078,9 @@ Var fixtureArchive
 Var fixtureHandle
 Var fixtureHandleCount
 Var fixtureLock
+Var fixtureHashCount
+Var fixtureHashKind
+Var fixtureHashLockBuffer
 
 !macro FixtureBegin
   ${initialize}
@@ -1086,7 +1089,7 @@ Var fixtureLock
 !macroend
 
 !macro FixtureCheck
-  StrCmp $fixtureResult $fixtureExpected 0 fixture_failed
+  StrCmpS $fixtureResult $fixtureExpected 0 fixture_failed
   Pop $fixtureScratch
   StrCmp $fixtureScratch "stack-top" 0 fixture_failed
   Pop $fixtureScratch
@@ -1120,8 +1123,30 @@ Var fixtureLock
   !insertmacro FixtureCheck
 !macroend
 
+!macro FixtureHash HASHER
+  !insertmacro FixtureBegin
+  !insertmacro ${'${HASHER}'} "$INSTDIR" $fixtureResult
+  !insertmacro FixtureCheck
+!macroend
+
+!macro FixtureStockHash
+  !insertmacro FixtureBegin
+  Push "SHA2-256"
+  Push "$INSTDIR"
+  StdUtils::HashFile /NOUNLOAD
+  Pop $fixtureResult
+  ; StdUtils may format hexadecimal in uppercase. Compare that established
+  ; digest case-insensitively; raw/public CNG results remain exact lowercase.
+  StrCmp $fixtureResult $fixtureExpected 0 fixture_failed
+  StrCpy $fixtureResult $fixtureExpected
+  !insertmacro FixtureCheck
+!macroend
+
 Section
   InitPluginsDir
+  ; The process helper has its own native fixture; retain its definition under
+  ; warnings-as-errors without running unrelated process queries in this proof.
+  GetFunctionAddress $fixtureScratch LifeNoScopedProcess
   ReadEnvStr $fixtureMode "LIFE_NSIS_PAYLOAD_FIXTURE_MODE"
   ReadEnvStr $INSTDIR "LIFE_NSIS_PAYLOAD_FIXTURE_TARGET"
   ReadEnvStr $fixtureExpected "LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED"
@@ -1131,6 +1156,8 @@ Section
   ; Warm persistent plug-in loads before checking for enumeration/hash handle leaks.
   ${'${GetProcessInfo}'} 0 $pid $1 $2 $3 $4
   ${'${StdUtils.HashFile}'} $fixtureScratch "SHA2-256" "$fixtureArchive"
+  !insertmacro LifeNativeHashFile "$fixtureArchive" $fixtureScratch
+  !insertmacro LifeHashFile "$fixtureArchive" $fixtureScratch
   System::Call 'kernel32::GetCurrentProcess() p .r0'
   System::Call 'kernel32::GetProcessHandleCount(p r0, *i .r1) i .r2'
   StrCmp $2 "0" fixture_failed
@@ -1140,6 +1167,11 @@ Section
   StrCmp $fixtureMode "required" fixture_required
   StrCmp $fixtureMode "exact" fixture_exact
   StrCmp $fixtureMode "preflight" fixture_preflight
+  StrCmp $fixtureMode "hash-native" fixture_hash_native
+  StrCmp $fixtureMode "hash-wrapper" fixture_hash_wrapper
+  StrCmp $fixtureMode "hash-stock" fixture_hash_stock
+  StrCmp $fixtureMode "hash-native-locked" fixture_hash_native_locked
+  StrCmp $fixtureMode "hash-wrapper-locked" fixture_hash_wrapper_locked
   StrCmp $fixtureMode "extract" fixture_extract
   StrCmp $fixtureMode "extract-locked" fixture_extract_locked fixture_failed
 
@@ -1181,6 +1213,81 @@ Section
     !insertmacro FixturePreflight
     IfErrors +2 0
     Goto fixture_failed
+    Goto fixture_check_handles
+
+  fixture_hash_native_locked:
+    StrCpy $fixtureHashKind "native"
+    Goto fixture_hash_lock
+  fixture_hash_wrapper_locked:
+    StrCpy $fixtureHashKind "wrapper"
+  fixture_hash_lock:
+    ; A caller-owned writer prevents the helper's readonly sharing contract.
+    System::Call 'kernel32::CreateFileW(w "$INSTDIR", i 0xC0000000, i 7, p 0, i 3, i 0, p 0) p .r0'
+    StrCmp $0 "-1" fixture_failed
+    StrCpy $fixtureLock $0
+    System::Call 'kernel32::CreateFileW(w "$INSTDIR", i 0x80000000, i 1, p 0, i 3, i 0x00200000, p 0) p .r0 ?re'
+    Pop $1
+    Pop $2
+    StrCmp $2 "ok" 0 fixture_failed
+    StrCmp $0 "-1" 0 fixture_failed
+    StrCmp $1 "32" 0 fixture_failed
+    StrCmp $fixtureHashKind "native" fixture_hash_native fixture_hash_wrapper
+
+  fixture_hash_native:
+    StrCpy $fixtureHashCount 8
+  fixture_hash_native_repeat:
+    ClearErrors
+    !insertmacro FixtureHash LifeNativeHashFile
+    IfErrors fixture_failed
+    SetErrors
+    !insertmacro FixtureHash LifeNativeHashFile
+    IfErrors +2 0
+    Goto fixture_failed
+    IntOp $fixtureHashCount $fixtureHashCount - 1
+    StrCmp $fixtureHashCount 0 fixture_hash_complete fixture_hash_native_repeat
+
+  fixture_hash_wrapper:
+    StrCpy $fixtureHashCount 8
+  fixture_hash_wrapper_repeat:
+    ClearErrors
+    !insertmacro FixtureHash LifeHashFile
+    IfErrors fixture_failed
+    SetErrors
+    !insertmacro FixtureHash LifeHashFile
+    IfErrors +2 0
+    Goto fixture_failed
+    IntOp $fixtureHashCount $fixtureHashCount - 1
+    StrCmp $fixtureHashCount 0 fixture_hash_complete fixture_hash_wrapper_repeat
+
+  fixture_hash_stock:
+    ClearErrors
+    !insertmacro FixtureStockHash
+    IfErrors fixture_failed
+    SetErrors
+    !insertmacro FixtureStockHash
+    IfErrors +2 0
+    Goto fixture_failed
+    Goto fixture_hash_complete
+
+  fixture_hash_complete:
+    StrCmp $fixtureLock "" fixture_check_handles
+    ; Re-read and write back the exact first byte through the caller's handle.
+    ; Native hashing failures must leave that independent handle usable.
+    System::Alloc 1
+    Pop $fixtureHashLockBuffer
+    StrCmp $fixtureHashLockBuffer 0 fixture_failed
+    System::Call 'kernel32::ReadFile(p $fixtureLock, p $fixtureHashLockBuffer, i 1, *i .r1, p 0) i .r2'
+    StrCmp $2 0 fixture_failed
+    StrCmp $1 1 0 fixture_failed
+    System::Call 'kernel32::SetFilePointer(p $fixtureLock, i 0, p 0, i 0) i .r0'
+    StrCmp $0 0 0 fixture_failed
+    System::Call 'kernel32::WriteFile(p $fixtureLock, p $fixtureHashLockBuffer, i 1, *i .r1, p 0) i .r2'
+    StrCmp $2 0 fixture_failed
+    StrCmp $1 1 0 fixture_failed
+    System::Free $fixtureHashLockBuffer
+    System::Call 'kernel32::CloseHandle(p $fixtureLock) i .r0'
+    StrCmp $0 0 fixture_failed
+    StrCpy $fixtureLock ""
     Goto fixture_check_handles
 
   fixture_extract_locked:
@@ -1306,9 +1413,27 @@ SectionEnd
     requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', largeSource], {
       env: { ...process.env, ...binary.env },
     })
+    const unavailableExecutable = path.join(scratch, 'hash-unavailable-fixture.exe')
+    const unavailableSource = path.join(scratch, 'hash-unavailable-fixture.nsi')
+    fs.writeFileSync(
+      unavailableSource,
+      fs
+        .readFileSync(source, 'utf8')
+        .replace(
+          'Unicode true',
+          'Unicode true\n!define LIFE_INSTALLER_HASH_FIXTURE\n!define LIFE_NATIVE_HASH_FIXTURE_UNAVAILABLE',
+        )
+        .replace(
+          `OutFile "${nsisString(executable)}"`,
+          () => `OutFile "${nsisString(unavailableExecutable)}"`,
+        ),
+    )
+    requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', unavailableSource], {
+      env: { ...process.env, ...binary.env },
+    })
     if (process.platform !== 'win32') {
       console.log(
-        'Real NSIS payload, unchanged stock-control and large-interruption fixtures compiled; CRC and truncated archives rejected. Native runtime assertions require Windows.',
+        'Real NSIS payload, unchanged stock-control, large-interruption and forced-unavailable hash fixtures compiled; CRC and truncated archives rejected. Native runtime assertions require Windows.',
       )
       return
     }
@@ -1398,6 +1523,120 @@ SectionEnd
       else fs.mkdirSync(target)
       return target
     }
+
+    const hashVectors = directory('native-hash-vectors')
+    const multichunkBytes = Buffer.alloc(2 * 1024 * 1024 + 133)
+    for (let index = 0; index < multichunkBytes.length; index++) {
+      multichunkBytes[index] = bytes[index % bytes.length]
+    }
+    const vectors = [
+      ['empty', 'empty.bin', Buffer.alloc(0)],
+      ['tiny', 'tiny-abc.txt', Buffer.from('abc')],
+      ['multichunk', 'multichunk.bin', multichunkBytes],
+      ['truncated-stable', 'truncated-stable.bin', multichunkBytes.subarray(0, -1)],
+      ['unicode-literals', "研究$-'quote-`tick.txt", Buffer.from('Life payload fixture\n')],
+    ]
+    const knownVectorHashes = new Map()
+    for (const [name, filename, data] of vectors) {
+      const target = path.join(hashVectors, filename)
+      fs.writeFileSync(target, data)
+      const expected = createHash('sha256').update(data).digest('hex')
+      knownVectorHashes.set(name, { target, expected })
+      if (name === 'empty') {
+        assert.equal(expected, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+      } else if (name === 'tiny') {
+        assert.equal(expected, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+      }
+      execute(`hash-native-${name}`, 'hash-native', target, expected)
+      execute(`hash-wrapper-${name}`, 'hash-wrapper', target, expected)
+      execute(`hash-stock-${name}`, 'hash-stock', target, expected)
+      execute(
+        `hash-unavailable-raw-${name}`,
+        'hash-native',
+        target,
+        'unavailable',
+        good,
+        true,
+        unavailableExecutable,
+      )
+      execute(
+        `hash-unavailable-wrapper-${name}`,
+        'hash-wrapper',
+        target,
+        expected,
+        good,
+        true,
+        unavailableExecutable,
+      )
+      assert.equal(sha256(target), expected, 'Hashing must leave known vector bytes unchanged')
+    }
+    assert.notEqual(
+      knownVectorHashes.get('truncated-stable').expected,
+      knownVectorHashes.get('multichunk').expected,
+      'A stable truncated file must hash its actual shorter content',
+    )
+    const hashVectorsBefore = inventory(hashVectors)
+    function hashRejected(name, target) {
+      for (const [label, nativeExecutable] of [
+        ['native', executable],
+        ['provider-unavailable', unavailableExecutable],
+      ]) {
+        execute(
+          `hash-reject-${label}-raw-${name}`,
+          'hash-native',
+          target,
+          'error',
+          good,
+          true,
+          nativeExecutable,
+        )
+        execute(
+          `hash-reject-${label}-wrapper-${name}`,
+          'hash-wrapper',
+          target,
+          'error',
+          good,
+          true,
+          nativeExecutable,
+        )
+      }
+    }
+    hashRejected('missing', path.join(hashVectors, 'missing.bin'))
+    hashRejected('directory', hashVectors)
+    const writerTarget = knownVectorHashes.get('multichunk').target
+    for (const [label, nativeExecutable] of [
+      ['native', executable],
+      ['provider-unavailable', unavailableExecutable],
+    ]) {
+      execute(
+        `hash-held-writer-${label}-raw`,
+        'hash-native-locked',
+        writerTarget,
+        'error',
+        good,
+        true,
+        nativeExecutable,
+      )
+      execute(
+        `hash-held-writer-${label}-wrapper`,
+        'hash-wrapper-locked',
+        writerTarget,
+        'error',
+        good,
+        true,
+        nativeExecutable,
+      )
+    }
+    assert.deepEqual(inventory(hashVectors), hashVectorsBefore)
+    execute(
+      'hash-after-writer-closed',
+      'hash-native',
+      writerTarget,
+      knownVectorHashes.get('multichunk').expected,
+    )
+    console.log(
+      'Native CNG hash vectors passed: empty, abc, multichunk, stable shorter content and Unicode/dollar/quote/backtick filenames; exact stock and forced provider fallback parity, unsafe rejection, actual held-writer error 32, caller handle usability, 16 repetitions with all registers/stack/error states and no handle leaks.',
+    )
 
     const metadataSource = path.join(scratch, 'metadata.ps1')
     fs.writeFileSync(metadataSource, '\ufeff' + metadataScript)
@@ -1698,6 +1937,24 @@ try {
       0,
       0,
     )
+    const shortenedPayloadFile = path.join(
+      verificationCases.find((item) => item.name === 'short').target,
+      'payload.bin',
+    )
+    const shortenedPayloadHash = createHash('sha256').update(bytes.subarray(0, -1)).digest('hex')
+    assert.notEqual(shortenedPayloadHash, sha256(path.join(payload, 'payload.bin')))
+    execute(
+      'hash-shorter-trusted-payload-raw',
+      'hash-native',
+      shortenedPayloadFile,
+      shortenedPayloadHash,
+    )
+    execute(
+      'hash-shorter-trusted-payload-wrapper',
+      'hash-wrapper',
+      shortenedPayloadFile,
+      shortenedPayloadHash,
+    )
     verificationCase(
       'extra-file',
       (target) => fs.writeFileSync(path.join(target, 'extra.txt'), 'retained\n'),
@@ -1756,6 +2013,7 @@ try {
     fs.symlinkSync(path.join(fileSymlinkOutside, 'payload.bin'), expectedFileSymlink, 'file')
     assert.ok(fs.lstatSync(expectedFileSymlink).isSymbolicLink())
     assert.equal(sha256(expectedFileSymlink), sha256(path.join(payload, 'payload.bin')))
+    hashRejected('expected-file-symlink', expectedFileSymlink)
     verificationCases.push({
       name: 'file-symlink',
       target: fileSymlinkTarget,
@@ -1976,6 +2234,7 @@ try {
       execute('required-native-access-denied', 'required', deniedTarget, 0)
       execute('exact-native-access-denied', 'exact', deniedTarget, 0)
       execute('preflight-native-access-denied', 'preflight', deniedTarget, 0)
+      hashRejected('native-access-denied', deniedFile)
       assert.deepEqual(
         execute('extract-native-access-denied', 'extract', deniedTarget, 0, good, false),
         [],

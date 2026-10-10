@@ -2,6 +2,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const { createHash } = require('node:crypto')
 
 function macroBody(source, name) {
   const lines = source.replaceAll('\r\n', '\n').split('\n')
@@ -89,6 +90,42 @@ function verify(root = path.join(__dirname, '..')) {
     stockResult,
     'uninstall result handler',
   )
+
+  // The successful fast probe depends on these exact upstream availability,
+  // policy and path-scope semantics. Dependency updates require a fresh review.
+  const processSource = fs.readFileSync(
+    path.join(upstream, 'allowOnlyOneInstallerInstance.nsh'),
+    'utf8',
+  )
+  const reviewedProcess = [
+    'IS_POWERSHELL_AVAILABLE',
+    'FIND_PROCESS',
+    'KILL_PROCESS',
+    '_CHECK_APP_RUNNING',
+  ]
+    .map((name) => macroBody(processSource, name).trim())
+    .join('\n\n')
+  if (
+    createHash('sha256').update(reviewedProcess).digest('hex') !==
+    '36a3247a5ca7964eb01c1d058dc1f1011a82c4fe7de9aaf8740e292ff9c71d68'
+  ) {
+    throw new Error(
+      'The upstream process checks changed. Review the complete probe and fallback before building.',
+    )
+  }
+  const process = fs.readFileSync(path.join(root, 'build', 'installer-process.nsh'), 'utf8')
+  assertStockStatements(
+    macroBody(process, 'LifeStockCheckAppRunning'),
+    '!insertmacro IS_POWERSHELL_AVAILABLE\n!insertmacro _CHECK_APP_RUNNING',
+    'process fallback',
+  )
+  if (
+    !/!ifdef BUILD_UNINSTALLER\s+!insertmacro IS_POWERSHELL_AVAILABLE\s+!insertmacro _CHECK_APP_RUNNING\s+!else\s+!insertmacro LifeCheckAppRunning\s+!endif/.test(
+      macroBody(include, 'customCheckAppRunning'),
+    )
+  ) {
+    throw new Error('The uninstaller must retain its original complete process checks.')
+  }
 }
 
 module.exports = { assertStockStatements, macroBody, verify }

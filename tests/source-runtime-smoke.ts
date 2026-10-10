@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto'
 import { existsSync, writeSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { SourceCodeStore } from '../src/main/source-code'
 import { PackagedDependencies } from '../src/main/packaged-dependencies'
+import { observeCompilerProcesses } from './helpers/compiler-proof-processes'
 
 let currentStage = 'starting verification'
 let failedStage: string | undefined
@@ -48,11 +50,16 @@ async function run() {
     manifestPath: join(resources, 'life-dependencies.json'),
     cacheDirectory: compilerCache,
   })
+  const compilerProcesses = observeCompilerProcesses(compilerCache)
+  let preparedNodeModules: string | undefined
   const options = {
     sourceDir,
     nodeModulesDir,
     directory,
-    prepareNodeModules: (signal: AbortSignal) => packagedDependencies.ensure(signal),
+    prepareNodeModules: async (signal: AbortSignal) => {
+      preparedNodeModules = await packagedDependencies.ensure(signal)
+      return preparedNodeModules
+    },
     compilerTimeoutMs: 90_000,
     installTimeoutMs: 180_000,
   }
@@ -117,6 +124,7 @@ export function RuntimeProof() {
       ],
     })
     stage('export compiled source extension')
+    assert(compilerProcesses.count > 0, 'The proof did not observe its native esbuild service')
     assert.equal(
       existsSync(compilerCache),
       true,
@@ -229,9 +237,21 @@ export function RuntimeProof() {
     throw error
   } finally {
     stage('close source extension store for cleanup')
-    await store.close()
-    stage('remove isolated source extension store')
-    await rm(directory, { recursive: true, force: true })
+    try {
+      await store.close()
+    } finally {
+      stage('stop isolated compiler service before removing its executable')
+      await compilerProcesses.stop(async () => {
+        if (!preparedNodeModules || !compilerProcesses.count) return
+        const compilerRequire = createRequire(join(preparedNodeModules, 'esbuild', 'package.json'))
+        const compiler = compilerRequire(
+          join(preparedNodeModules, 'esbuild', 'lib', 'main.js'),
+        ) as typeof import('esbuild')
+        await compiler.stop()
+      })
+      stage('remove isolated source extension store')
+      await rm(directory, { recursive: true, force: true })
+    }
   }
   const proof = {
     ok: true,

@@ -473,7 +473,7 @@ async function main(argv = process.argv.slice(2)) {
     definition = path.join(stage, 'fixture.def')
     await fs.writeFile(
       definition,
-      'LIBRARY LifeInstallerLauncher\nEXPORTS\n  Launch=_Launch\n  LaunchFixture=_LaunchFixture\n',
+      'LIBRARY LifeInstallerLauncher\nEXPORTS\n  Launch\n  LaunchFixture\n',
     )
   }
   const compilerFlags = [

@@ -7,7 +7,7 @@ $errors = $null
 $syntax = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $SourcePath).Path, [ref]$tokens, [ref]$errors)
 if ($errors.Count -ne 0) { throw "Windows upgrade script has syntax errors: $errors" }
 # Parse and import only pure validation functions; never invoke an installer or cleanup.
-foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance', 'Read-InstallerTrace')) {
+foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance', 'Get-InstallerProfilingValidation', 'Read-InstallerTrace')) {
     $definition = $syntax.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) |
         Where-Object { $_.Name -eq $name } | Select-Object -First 1
     if (-not $definition) { throw "Missing validation function $name." }
@@ -49,6 +49,35 @@ Assert-Throws { Get-UpgradePerformance @() 10000 } 'Missing complete trial'
 $failed = New-Trial 1000
 $failed.timings.targetUpgrade.ok = $false
 Assert-Throws { Get-UpgradePerformance @($failed) 10000 } 'Failed installer cannot pass the time gate'
+function New-ProfileTrial {
+    $pair = New-Trial 1000
+    foreach ($operation in @('targetUpgrade', 'targetFreshInstall')) {
+        $tick = 100
+        $phases = @('installer-init', 'process-check-start', 'process-check-complete',
+            'old-uninstaller-complete', 'extract-start', 'extract-complete',
+            'payload-copy-start', 'payload-copy-complete', 'payload-complete',
+            'cache-registration-shortcuts-complete')
+        $records = @($phases | ForEach-Object { [pscustomobject]@{ phase = $_; uptimeMilliseconds = $tick++ } })
+        $pair.timings[$operation] = [pscustomobject]@{
+            kind = 'nsis'; ok = $true; elapsedMilliseconds = 1000
+            installerTrace = [pscustomobject]@{
+                emitted = $true; errors = @(); records = $records
+                outerProcessUptime = @{ beforeLaunchMilliseconds = 99; afterExitMilliseconds = 200 }
+            }
+        }
+    }
+    return $pair
+}
+$profile = New-ProfileTrial
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $true 'Complete native phase trace'
+$profile.timings.targetUpgrade.installerTrace.records = @($profile.timings.targetUpgrade.installerTrace.records[-1])
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Overwritten earlier rows fail profiling validation'
+$profile = New-ProfileTrial
+$profile.timings.targetFreshInstall.installerTrace.records[1].uptimeMilliseconds = 98
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Nonmonotonic markers fail profiling validation'
+$profile = New-ProfileTrial
+$profile.timings.targetUpgrade.installerTrace.errors = @('Unrecognized raw marker')
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Trace parser errors fail profiling validation'
 $traceDirectory = Join-Path ([IO.Path]::GetTempPath()) ('life-nsis-trace-parser-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $traceDirectory
 try {

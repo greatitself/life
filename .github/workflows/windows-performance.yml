@@ -43,6 +43,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx electron-builder --win --x64 --publish never
+      - name: Verify native NSIS marker append and register preservation
+        run: node scripts/verify-nsis-trace-fixture.cjs
       - name: Verify actual packaged Windows compiler and source customization
         shell: pwsh
         run: ./tests/windows-source-runtime.ps1

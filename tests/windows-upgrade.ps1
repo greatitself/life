@@ -87,6 +87,51 @@ function Get-UpgradePerformance([object[]]$Pairs, [double]$MaximumMilliseconds) 
     }
 }
 
+function Get-InstallerProfilingValidation([object[]]$Pairs) {
+    $trials = [Collections.Generic.List[object]]::new()
+    $required = @('installer-init', 'process-check-start', 'process-check-complete',
+        'extract-start', 'extract-complete', 'payload-copy-start', 'payload-copy-complete',
+        'payload-complete', 'cache-registration-shortcuts-complete')
+    foreach ($pair in $Pairs) {
+        foreach ($operation in @('targetUpgrade', 'targetFreshInstall')) {
+            $trace = $pair.timings.$operation.installerTrace
+            $errors = [Collections.Generic.List[string]]::new()
+            foreach ($errorMessage in $trace.errors) { $errors.Add($errorMessage) }
+            $records = @($trace.records)
+            $names = @($records | ForEach-Object { $_.phase })
+            foreach ($phase in $required) {
+                if ($phase -notin $names) { $errors.Add("Missing required marker: $phase") }
+            }
+            if ($operation -eq 'targetUpgrade' -and
+                'old-uninstaller-complete' -notin $names -and 'old-user-uninstaller-complete' -notin $names) {
+                $errors.Add('Missing previous-version uninstaller completion marker.')
+            }
+            if (-not $trace.emitted) { $errors.Add('The target installer emitted no trace file.') }
+            if ($records.Count -gt 0 -and $records[0].phase -ne 'installer-init') {
+                $errors.Add('The first retained marker must be installer-init.')
+            }
+            $previous = $trace.outerProcessUptime.beforeLaunchMilliseconds
+            foreach ($record in $records) {
+                if ($record.uptimeMilliseconds -lt $previous -or
+                    $record.uptimeMilliseconds -gt $trace.outerProcessUptime.afterExitMilliseconds) {
+                    $errors.Add("Marker outside monotonic outer uptime interval: $($record.phase)")
+                }
+                $previous = $record.uptimeMilliseconds
+            }
+            $trials.Add([pscustomobject]@{
+                baselineVersion = $pair.baselineVersion; targetVersion = $pair.targetVersion
+                operation = $operation; passed = $errors.Count -eq 0
+                requiredMarkers = $required; errors = $errors.ToArray()
+            })
+        }
+    }
+    return [pscustomobject]@{
+        passed = $trials.Count -gt 0 -and @($trials | Where-Object { -not $_.passed }).Count -eq 0
+        trials = $trials.ToArray()
+        scope = 'Target marker completeness and monotonic native uptime; full raw installer timing and functional checks are unchanged.'
+    }
+}
+
 $BaselineVersions = @(Get-ValidatedBaselineVersions $BaselineVersions $ExpectedVersion)
 
 # electron-builder UUID v5 for appId dev.life.desktop, namespace
@@ -576,6 +621,7 @@ $startedAt = [DateTime]::UtcNow.ToString('o')
 $succeeded = $false
 $functionalValidationPassed = $false
 $performanceGate = $null
+$profilingValidation = $null
 $failure = $null
 try {
     foreach ($baselineVersion in $BaselineVersions) {
@@ -589,6 +635,13 @@ try {
     if ($pairs.Count -ne $BaselineVersions.Count) { throw 'Not every requested baseline produced an upgrade proof.' }
     $functionalValidationPassed = $true
     $performanceGate = Get-UpgradePerformance $pairs.ToArray() $MaxUpgradeMilliseconds
+    if ($CaptureInstallerTrace) {
+        $profilingValidation = Get-InstallerProfilingValidation $pairs.ToArray()
+        if (-not $profilingValidation.passed) {
+            $traceFailures = ($profilingValidation.trials | ForEach-Object { "$($_.operation): $($_.errors -join '; ')" }) -join ', '
+            throw "NSIS profiling validation failed: $traceFailures. Complete raw installer timing and functional proof are retained."
+        }
+    }
     if ($null -ne $performanceGate -and -not $performanceGate.passed) {
         $rawDurations = ($performanceGate.trials | ForEach-Object { "$($_.baselineVersion)->$($_.targetVersion): $($_.elapsedMilliseconds)ms" }) -join ', '
         throw "Windows upgrade must finish strictly below ${MaxUpgradeMilliseconds}ms; raw trial: $rawDurations. All installation identity and saved-data checks passed."
@@ -601,6 +654,7 @@ try {
     $proof = [pscustomobject]@{
         ok = $succeeded; failure = $failure
         functionalValidationPassed = $functionalValidationPassed; performanceGate = $performanceGate
+        profilingValidation = $profilingValidation
         targetVersion = $ExpectedVersion; baselineVersions = $BaselineVersions
         installerSHA256 = (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash
         startedAt = $startedAt; completedAt = [DateTime]::UtcNow.ToString('o')

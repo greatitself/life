@@ -29,12 +29,18 @@ Var pid
       trace_no_error:
         StrCpy $4 "0"
       trace_begin:
+        ; Work with a clean local flag; restore the caller's flag on every exit.
+        ClearErrors
         ReadEnvStr $1 "LIFE_NSIS_TRACE_FILE"
         StrCmp $1 "" trace_restore
         System::Call 'kernel32::GetTickCount64() l .r2'
         FileOpen $3 "$1" a
         IfErrors trace_restore
+        ; NSIS append mode opens at the beginning; seek explicitly on every call.
+        FileSeek $3 0 END
+        IfErrors trace_close
         FileWrite $3 "$0$\t$2$\r$\n"
+      trace_close:
         FileClose $3
       trace_restore:
         StrCmp $4 "1" trace_restore_error

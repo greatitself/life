@@ -216,11 +216,9 @@ $json = ConvertTo-Json -InputObject @($records | Sort-Object Relative) -Depth 12
 
 const accessDeniedScript = String.raw`$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$fixtureRoot = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_ROOT).TrimEnd([char]'\')
-$fixtureFile = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_FILE)
-$fixtureParent = [IO.Path]::GetDirectoryName($fixtureFile)
-$scratchRoot = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_SCRATCH).TrimEnd([char]'\')
-if (-not $fixtureRoot.StartsWith(($scratchRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or -not $fixtureFile.StartsWith(($fixtureRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or $fixtureParent.Equals($fixtureRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Access denial must be confined to a nested, fixture-owned payload path.' }
+$rawRoot = $env:LIFE_ACL_FIXTURE_ROOT
+$rawFile = $env:LIFE_ACL_FIXTURE_FILE
+$rawScratch = $env:LIFE_ACL_FIXTURE_SCRATCH
 $sections = [Security.AccessControl.AccessControlSections]::Access
 $identitySections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Group
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -230,12 +228,15 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 public static class LifeFixtureAttributes {
   public sealed class Result { public long Attributes; public int Error; }
   public sealed class FileRead { public long Length; public string Sha256; }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   private static extern uint GetFileAttributesW(string path);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+  private static extern uint GetFullPathNameW(string path, uint size, StringBuilder buffer, IntPtr filePart);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
@@ -251,6 +252,20 @@ public static class LifeFixtureAttributes {
   private static extern uint SetNamedSecurityInfoW(string path, int objectType, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
   [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
   private static extern IntPtr LocalFree(IntPtr memory);
+  public static string NormalizePath(string path) {
+    if (String.IsNullOrEmpty(path) || path.Length >= 32768 || path.Length < 3 || !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) || path[1] != ':' || (path[2] != '\\' && path[2] != '/') || path.IndexOf('\0') >= 0 || path.IndexOf(':', 2) >= 0) throw new ArgumentException("ACL fixture paths must be bounded absolute drive paths");
+    foreach (char value in path) {
+      if (value < 32 || value == '"' || value == '<' || value == '>' || value == '|' || value == '*' || value == '?') throw new ArgumentException("ACL fixture paths contain unsupported characters");
+    }
+    StringBuilder buffer = new StringBuilder(32768);
+    uint count = GetFullPathNameW(path, (uint)buffer.Capacity, buffer, IntPtr.Zero);
+    int error = Marshal.GetLastWin32Error();
+    if (count == 0) throw new Win32Exception(error, "Native fixture path normalization failed");
+    if (count >= buffer.Capacity || buffer.Length != count) throw new InvalidOperationException("Native fixture path normalization exceeds bounds");
+    string result = buffer.ToString();
+    if (result.Length < 3 || result[1] != ':' || result[2] != '\\') throw new InvalidOperationException("Normalized fixture path is not drive-absolute");
+    return result;
+  }
   public static Result Read(string path) {
     uint attributes = GetFileAttributesW(path);
     int error = Marshal.GetLastWin32Error();
@@ -320,7 +335,30 @@ public static class LifeFixtureAttributes {
   }
 }
 '@
-if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
+$fixtureRoot = [LifeFixtureAttributes]::NormalizePath($rawRoot).TrimEnd([char]'\')
+$fixtureFile = [LifeFixtureAttributes]::NormalizePath($rawFile)
+$fixtureParent = $fixtureFile.Substring(0, $fixtureFile.LastIndexOf([char]'\'))
+$scratchRoot = [LifeFixtureAttributes]::NormalizePath($rawScratch).TrimEnd([char]'\')
+$fixturePaths = [ordered]@{ Root = $fixtureRoot; File = $fixtureFile; Parent = $fixtureParent; Scratch = $scratchRoot }
+[Console]::Error.WriteLine('Fixture ACL scope before containment: ' + (ConvertTo-Json -InputObject ([ordered]@{ RawRoot = $rawRoot; RawFile = $rawFile; RawScratch = $rawScratch; Normalized = $fixturePaths }) -Compress))
+if ($scratchRoot.Length -le 3 -or $fixtureRoot.Length -le 3 -or -not $fixtureRoot.StartsWith(($scratchRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or -not $fixtureFile.StartsWith(($fixtureRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or $fixtureParent.Equals($fixtureRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Access denial must be confined to a nested, fixture-owned payload path.' }
+function Assert-FixturePathNormalization([String]$phase) {
+  $againFile = [LifeFixtureAttributes]::NormalizePath($rawFile)
+  $again = [ordered]@{
+    Root = [LifeFixtureAttributes]::NormalizePath($rawRoot).TrimEnd([char]'\')
+    File = $againFile
+    Parent = $againFile.Substring(0, $againFile.LastIndexOf([char]'\'))
+    Scratch = [LifeFixtureAttributes]::NormalizePath($rawScratch).TrimEnd([char]'\')
+  }
+  foreach ($key in @('Root', 'File', 'Parent', 'Scratch')) {
+    if ($again[$key] -cne $fixturePaths[$key]) { throw ('Native fixture path normalization changed during ' + $phase) }
+  }
+  [Console]::Error.WriteLine('Fixture ACL native normalization ' + $phase + ': ' + (ConvertTo-Json -InputObject $again -Compress))
+}
+if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
+  Assert-FixturePathNormalization 'path-only probe'
+  $result = [PSCustomObject]@{ Paths = $fixturePaths; PathNormalizationStable = $true }
+} elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
   foreach ($ordinary in @($fixtureRoot, $fixtureParent)) {
     $attributes = [LifeFixtureAttributes]::Read($ordinary)
     if ($attributes.Attributes -eq -1 -or ($attributes.Attributes -band 0x10) -eq 0 -or ($attributes.Attributes -band 0x400) -ne 0) { throw 'Access denial requires ordinary fixture directories.' }
@@ -347,6 +385,7 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
   [LifeFixtureAttributes]::ValidateAccess($backup.ParentAccess)
   [LifeFixtureAttributes]::ValidateAccess($backup.FileAccess)
   [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_BACKUP, (ConvertTo-Json -InputObject $backup -Compress), [Text.UTF8Encoding]::new($false))
+  Assert-FixturePathNormalization 'before access denial'
   # NTFS also exposes a child's attributes through parent directory listing.
   # Deny both independent rights, without denying traversal or WRITE_DAC.
   $parentAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentSid, [Security.AccessControl.FileSystemRights]::ListDirectory, [Security.AccessControl.InheritanceFlags]::None, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Deny))
@@ -355,7 +394,8 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
   [IO.Directory]::SetAccessControl($fixtureParent, $parentAcl)
   $denied = [LifeFixtureAttributes]::Read($fixtureFile)
   if ($denied.Attributes -ne -1 -or $denied.Error -ne 5) { throw ('Expected actual native GetFileAttributesW access denial, got attributes=' + $denied.Attributes + ', error=' + $denied.Error) }
-  $result = [PSCustomObject]@{ Attributes = $denied.Attributes; Error = $denied.Error; Sid = $currentSid.Value }
+  Assert-FixturePathNormalization 'after actual native access denial'
+  $result = [PSCustomObject]@{ Attributes = $denied.Attributes; Error = $denied.Error; Sid = $currentSid.Value; Paths = $fixturePaths; PathNormalizationStable = $true }
 } elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'restore') {
   $backup = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($env:LIFE_ACL_FIXTURE_BACKUP))
   if ($backup.Parent -cne $fixtureParent -or $backup.File -cne $fixtureFile -or $backup.Sid -cne $currentSid.Value) { throw 'ACL backup paths or identity do not match this owned fixture.' }
@@ -387,7 +427,8 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
   if ($restoredEntries.Count -ne @($backup.ParentEntries).Count -or [String]::Join([char]0, [String[]]$restoredEntries) -cne [String]::Join([char]0, [String[]]$backup.ParentEntries)) { throw 'Access denial cleanup did not restore exact directory enumeration.' }
   $restoredRead = [LifeFixtureAttributes]::ReadFile($fixtureFile)
   if ($restoredRead.Length -ne $backup.FileLength -or $restoredRead.Sha256 -cne $backup.FileSha256) { throw 'Access denial cleanup did not restore exact native file read/hash.' }
-  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; ParentAttributes = $restoredParentAttributes.Attributes; Sid = $currentSid.Value; DirectoryEntries = $restoredEntries; FileLength = $restoredRead.Length; FileSha256 = $restoredRead.Sha256 }
+  Assert-FixturePathNormalization 'after exact ACL restoration'
+  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; ParentAttributes = $restoredParentAttributes.Attributes; Sid = $currentSid.Value; DirectoryEntries = $restoredEntries; FileLength = $restoredRead.Length; FileSha256 = $restoredRead.Sha256; Paths = $fixturePaths; PathNormalizationStable = $true }
 } else { throw 'Unsupported access denial fixture action.' }
 [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_OUTPUT, (ConvertTo-Json -InputObject $result -Compress), [Text.UTF8Encoding]::new($false))`
 
@@ -1657,9 +1698,21 @@ try {
     const deniedSource = path.join(scratch, 'native-access-denied.ps1')
     const deniedBackup = path.join(scratch, 'native-access-denied.backup.json')
     fs.writeFileSync(deniedSource, '\ufeff' + accessDeniedScript)
-    function deniedAcl(action) {
-      const output = path.join(scratch, `native-access-denied.${action}.json`)
-      const child = requireSuccess(
+    const expectedDeniedPaths = {
+      Root: deniedTarget,
+      File: deniedFile,
+      Parent: path.dirname(deniedFile),
+      Scratch: scratch,
+    }
+    function deniedAcl(
+      action,
+      scopeEnvironment = {},
+      succeeds = true,
+      name = action,
+      rejection = 'Access denial must be confined to a nested, fixture-owned payload path.',
+    ) {
+      const output = path.join(scratch, `native-access-denied.${name}.json`)
+      const child = run(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', deniedSource],
         {
@@ -1673,17 +1726,95 @@ try {
             LIFE_ACL_FIXTURE_BACKUP: deniedBackup,
             LIFE_ACL_FIXTURE_OUTPUT: output,
             LIFE_ACL_FIXTURE_ACTION: action,
+            ...scopeEnvironment,
           }),
         },
       )
+      if (!succeeds) {
+        assert.notEqual(child.status, 0, `${name}: outside fixture paths must be rejected`)
+        assert.ok(
+          (child.stdout + child.stderr).includes(rejection),
+          `${name}: rejection must come from the actual checked normalization or containment guard`,
+        )
+        assert.equal(
+          fs.existsSync(output),
+          false,
+          `${name}: rejected paths must not produce a result`,
+        )
+        assert.equal(
+          fs.existsSync(deniedBackup),
+          false,
+          `${name}: rejected paths must not create an ACL backup`,
+        )
+        return undefined
+      }
+      assert.equal(child.status, 0, `powershell.exe failed:\n${child.stdout}\n${child.stderr}`)
       if (child.stderr.trim()) console.log(child.stderr.trim())
       return JSON.parse(fs.readFileSync(output, 'utf8'))
     }
+    const beforeDeniedPaths = deniedAcl('probe-path', {}, true, 'paths-before-denial')
+    assert.equal(beforeDeniedPaths.PathNormalizationStable, true)
+    assert.deepEqual(beforeDeniedPaths.Paths, expectedDeniedPaths)
+    assert.equal(
+      fs.existsSync(deniedBackup),
+      false,
+      'Path-only probe must not prepare or modify ACLs',
+    )
+    deniedAcl(
+      'probe-path',
+      { LIFE_ACL_FIXTURE_FILE: path.join(fileSymlinkOutside, 'payload.bin') },
+      false,
+      'paths-outside-root',
+    )
+    deniedAcl(
+      'probe-path',
+      { LIFE_ACL_FIXTURE_FILE: path.join(`${deniedTarget}-sibling`, 'nested', 'payload.bin') },
+      false,
+      'paths-sibling-prefix',
+    )
+    const invalidAbsolutePath = 'ACL fixture paths must be bounded absolute drive paths'
+    for (const [name, scopeEnvironment, rejection] of [
+      [
+        'paths-dotdot',
+        { LIFE_ACL_FIXTURE_FILE: `${deniedTarget}\\..\\file-symlink-outside\\payload.bin` },
+      ],
+      [
+        'paths-outside-scratch',
+        {
+          LIFE_ACL_FIXTURE_ROOT: `${scratch}-sibling`,
+          LIFE_ACL_FIXTURE_FILE: path.join(`${scratch}-sibling`, 'nested', 'payload.bin'),
+        },
+      ],
+      [
+        'paths-relative',
+        { LIFE_ACL_FIXTURE_FILE: path.relative(scratch, deniedFile) },
+        invalidAbsolutePath,
+      ],
+      ['paths-device', { LIFE_ACL_FIXTURE_FILE: `\\\\.\\${deniedFile}` }, invalidAbsolutePath],
+      ['paths-ads', { LIFE_ACL_FIXTURE_FILE: `${deniedFile}:fixture-scope` }, invalidAbsolutePath],
+      [
+        'paths-control',
+        { LIFE_ACL_FIXTURE_FILE: `${deniedFile}\u0001` },
+        'ACL fixture paths contain unsupported characters',
+      ],
+    ]) {
+      deniedAcl('probe-path', scopeEnvironment, false, name, rejection)
+    }
+    assert.deepEqual(inventory(deniedTarget), deniedBefore)
+    assert.deepEqual(inventory(fileSymlinkOutside), deniedOutsideBefore)
     let deniedPrimaryFailure
     try {
       const denied = deniedAcl('apply')
       assert.equal(denied.Attributes, -1, 'Access denial must come from actual GetFileAttributesW')
       assert.equal(denied.Error, 5, 'Access denial must report actual ERROR_ACCESS_DENIED')
+      assert.equal(denied.PathNormalizationStable, true)
+      assert.deepEqual(denied.Paths, expectedDeniedPaths)
+      const afterDeniedPaths = deniedAcl('probe-path', {}, true, 'paths-under-actual-denial')
+      assert.deepEqual(
+        afterDeniedPaths,
+        beforeDeniedPaths,
+        'Actual access denial must preserve the same native-normalized owned paths',
+      )
       execute('guard-native-access-denied', 'guard', deniedTarget, 0)
       execute('required-native-access-denied', 'required', deniedTarget, 0)
       execute('exact-native-access-denied', 'exact', deniedTarget, 0)
@@ -1710,6 +1841,8 @@ try {
           if (fs.existsSync(deniedBackup)) {
             const restored = deniedAcl('restore')
             assert.equal(restored.Restored, true)
+            assert.equal(restored.PathNormalizationStable, true)
+            assert.deepEqual(restored.Paths, expectedDeniedPaths)
             assert.deepEqual(restored.DirectoryEntries, deniedParentEntries)
             assert.equal(restored.FileLength, deniedFileLength)
             assert.equal(restored.FileSha256, deniedFileHash)

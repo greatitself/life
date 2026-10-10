@@ -18,7 +18,16 @@ import type {
   LifeSourceSnapshot,
 } from './source-code'
 export type Provider = 'codex' | 'claude'
-export type PermissionMode = 'review' | 'edit' | 'plan'
+export type PermissionMode =
+  | 'review'
+  | 'edit'
+  | 'plan'
+  | 'ask-for-approval'
+  | 'read-only'
+  | 'full-access'
+  | 'auto-review'
+  | 'auto'
+  | 'dontAsk'
 export interface SSHConfigSource {
   alias: string
   path: string
@@ -195,6 +204,10 @@ export interface ModelOption {
 }
 export interface RelayAPI {
   platform: string
+  conversations?: {
+    load(): Promise<unknown[]>
+    save(threads: unknown[]): Promise<void>
+  }
   hostHistory?: HostHistoryAPI
   researchDocuments?: ResearchDocumentsAPI
   forwarding: {

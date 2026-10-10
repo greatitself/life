@@ -1,11 +1,7 @@
 import { researchCommand } from '../shared/research-command'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import {
-  researchOperationCatalog,
-  researchOperations,
-  type ResearchOperation,
-} from '../shared/research-method'
-import { researchMethodGuide, researchMethodSchema } from '../shared/research-method-protocol'
+import { researchOperations, type ResearchOperation } from '../shared/research-method'
+import { researchMethodSchema } from '../shared/research-method-protocol'
 import type { ConnectionState } from '../shared/types'
 import { api, errorText } from './api'
 import {
@@ -15,16 +11,15 @@ import {
   type ResearchTarget,
 } from './workbench'
 import { collectLegacyResearch, researchLinkedThreadIds } from './research-legacy'
+import { researchInvocationGuidance, researchWorkspaceGuidance } from './research-guidance'
+import { webInterface } from './web-interface'
 
 import {
   makeResearchScope as makeScope,
   researchScopeMatches as matches,
+  shouldUseResearchConnection,
   researchDirectory,
   researchReadme as readme,
-  researchInstructions,
-  legacyResearchInstructions,
-  legacyResearchConversationInstructions,
-  researchConversationInstructions,
   researchStorageName,
   researchFileWorker as worker,
   type ResearchScope,
@@ -471,7 +466,8 @@ export function useResearchFiles(
     return true
   }
   useLayoutEffect(() => {
-    if (enabled && !session.scope && makeScope(connection)) useWorkspace(connection)
+    if (enabled && shouldUseResearchConnection(session.scope, connection, webInterface))
+      useWorkspace(connection)
   }, [enabled, session, connection.status, connection.profile?.id, connection.home])
   function publish(target: Session) {
     const goals = [...target.remote.values()].map((entry) => entry.goal)
@@ -607,9 +603,7 @@ export function useResearchFiles(
         {
           op: 'init',
           readme,
-          instructions: researchInstructions,
-          previousInstructions: [legacyResearchInstructions],
-          methodGuide: researchMethodGuide,
+          ...researchWorkspaceGuidance(webInterface),
           methodSchema: researchMethodSchema,
           legacyWorkspaces: [...(legacy?.workspaces || []), connectionNow.current.workspace].filter(
             Boolean,
@@ -836,17 +830,8 @@ export function useResearchFiles(
         ...(problem
           ? { problemId: problem.id, problemDirectory: researchStorageName({ id: problem.id }) }
           : {}),
-        instructions: researchConversationInstructions,
-        previousInstructions: [
-          legacyResearchConversationInstructions,
-          legacyResearchInstructions,
-          researchInstructions,
-        ],
+        ...researchInvocationGuidance(webInterface, operation || goal.method?.activeOperation),
         invocationId: crypto.randomUUID(),
-        operation:
-          researchOperationCatalog.find(
-            (row) => row.id === (operation || goal.method?.activeOperation),
-          ) || researchOperationCatalog[0],
       },
       guard,
     )

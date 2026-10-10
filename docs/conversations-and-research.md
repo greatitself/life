@@ -34,7 +34,7 @@ Queue entries preserve their attachments and can be removed. Restarted queues ar
 
 Model, reasoning effort, and speed controls remain available while a thread works. Life uses settings controls, without sending an additional chat message or stopping and restarting the response.
 
-- **Codex:** Version 0.162 or later with the live settings API and model-step switching can apply supported model, effort, and speed choices at the next model step. Older providers save the choice for the next turn or request. Changing permission mode during a running turn applies to the next turn; a pending approval keeps its existing policy.
+- **Codex:** Version 0.162 or later with the live settings API and model-step switching can apply supported model, effort, speed, and reviewer choices at the next model step. Older providers save the choice for the next turn or request. Sandbox and approval-policy changes apply to the next turn; a pending approval keeps its existing policy.
 - **Claude Code:** Supported model and effort changes apply at subsequent model requests. Fast/default speed changes are accepted without interruption and take effect on the next turn. They cannot change the speed of inference already underway.
 
 The controls display the actual provider result. Choices follow the provider's advertised model capabilities, CLI version, account, and policy. Unsupported settings are not presented as successfully applied. Life never chooses a paid Fast tier automatically.
@@ -69,7 +69,7 @@ Each goal occupies a directory with `goal.json`, its problems and notes, and rel
 
 Each `.life-context.json` identifies the conversation as a goal overview or problem, records the stable goal and problem IDs, and points to the shared goal metadata, README, map files, and update lock. The provider reads that context and the latest `goal.json` through `AGENTS.md` or `CLAUDE.md`; Life does not add a generated summary or instructions to the submitted user message. Existing user instruction files are preserved. Research conversations retain their purpose and goal/problem association, stay out of Agents grouping, and do not create a synthetic `research` coding project. Selecting another Agents project does not change Research's storage.
 
-The root also contains `.life-method.md` and `.life-method-schema.json`. They define the research operators and the versioned `goal.json` method records. Each submitted operation is recorded separately in `.life-invocations/<invocation-id>.json` inside its conversation directory. These snapshots are immutable; the operation selected for later work does not replace the saved identity of a running or queued invocation. Research context is file metadata, and the submitted user message remains unchanged. See [research methods](research-method.md) for the 12 approaches and evidence traceability.
+The root also contains `.life-method.md` and `.life-method-schema.json`, which describe versioned `goal.json` method records. Each submitted request's goal/problem context is recorded in `.life-invocations/<invocation-id>.json` inside its conversation directory. These snapshots are immutable. In the web app, the user's prompt determines the research approach; new contexts and queued messages have no selected operation. Legacy desktop operation selections and older snapshots remain compatible. Research context is file metadata, and the submitted user message remains unchanged. See [research methods](research-method.md) for record formats and evidence traceability.
 
 Research's root instruction files and README document stable goal/problem IDs, conversation links, atomic metadata updates, and map formats. User messages remain unchanged. Map priority is `map.html`, `map.mmd`, `map.json`, then the automatic goal/problem map. HTML maps run in an isolated frame; Mermaid and JSON maps can also select linked problems. Life refreshes Research files while the view is visible and after completed turns. Local drafts and pending edits remain cached while disconnected.
 
@@ -94,6 +94,6 @@ Internal Studio workspaces and disposable title tasks are excluded from the prov
 
 ## Public browser preview
 
-The [Life browser preview](https://greatitself.github.io/life/) uses the shared interface with editable example Research and settings stored in the current browser. You can explore the workbench, maps, themes, and built-in feature controls, then use **Export Research** to save its browser-local records. The preview banner identifies this environment and links to desktop downloads and feedback.
+The [Life browser preview](https://greatitself.github.io/life/) uses the shared interface with editable example Research and settings stored in the current browser. You can explore the workbench, maps, themes, and built-in feature controls.
 
 The sample environment does not open SSH connections or execute Codex, Claude Code, extension backends, or source builds. Those features use the desktop host. Refreshing the site loads the latest published preview while retaining its locally stored edits; browser storage can be cleared by the user or browser.

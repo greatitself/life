@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { permissionModes } from './permissions'
 import { lifeStudioContextSchema } from './life-studio'
 export const sshConfigAliasSchema = z
   .string()
@@ -93,6 +94,7 @@ const reservedProtocolFields = new Set([
   'input',
   'cwd',
   'approvalPolicy',
+  'approvalsReviewer',
   'sandbox',
   'sandboxPolicy',
   'baseInstructions',
@@ -187,7 +189,7 @@ export const startSchema = z
     reasoningEffort: optionNameSchema.optional(),
     serviceTier: optionNameSchema.optional(),
     providerOptions: agentProviderOptionsSchema.optional(),
-    mode: z.enum(['review', 'edit', 'plan']),
+    mode: z.enum(permissionModes),
     workspace: remoteDirectorySchema.optional(),
     scope: z.enum(['life-customization', 'research']).optional(),
     studioContext: lifeStudioContextSchema.optional(),
@@ -213,7 +215,7 @@ export const agentSettingsSchema = z
     model: optionNameSchema.optional(),
     reasoningEffort: optionNameSchema.optional(),
     serviceTier: optionNameSchema.optional(),
-    mode: z.enum(['review', 'edit', 'plan']).optional(),
+    mode: z.enum(permissionModes).optional(),
   })
   .strict()
 export const agentSteerSchema = z

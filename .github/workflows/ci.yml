@@ -18,17 +18,35 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Select verification target
+        id: target
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT,'value='+(require('./package.json').lifeReleaseTarget||'desktop')+'\n')"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+        if: steps.target.outputs.value != 'web'
+      - run: npm run build:web
+        if: steps.target.outputs.value != 'desktop'
+      - run: npm run pack:web
+        if: steps.target.outputs.value != 'desktop'
       - run: npx playwright install chromium --with-deps
+      - run: npm run test:web-release
+        if: steps.target.outputs.value != 'desktop'
       - run: npm run test:recovery
+        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-queue-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-presentation-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/studio-lifecycle-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/app-live-controls-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/run-selectors-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/research-method-ui-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: npm run test:desktop
+        if: steps.target.outputs.value != 'web'
       - run: npm run format:check

@@ -1,6 +1,7 @@
 import { ArrowUp, Clock3, LoaderCircle, Paperclip, X } from 'lucide-react'
 import type { QueuedMessage } from '../thread-queue'
 import { researchOperationCatalog } from '../../shared/research-method'
+import { webInterface } from '../web-interface'
 
 export function QueuedMessages({
   messages,
@@ -23,7 +24,7 @@ export function QueuedMessages({
       {messages.map((message) => (
         <article className="thread-queued-message" key={message.id}>
           <p>{message.text}</p>
-          {message.researchOperation ? (
+          {!webInterface && message.researchOperation ? (
             <div className="thread-queued-files">
               Research approach:{' '}
               {researchOperationCatalog.find((entry) => entry.id === message.researchOperation)
@@ -59,7 +60,7 @@ export function QueuedMessages({
               }
               title={
                 working
-                  ? message.researchOperation
+                  ? !webInterface && message.researchOperation
                     ? 'Steer the current Research operation. The queued approach applies when sent as a new turn.'
                     : 'Send steering without stopping the current response'
                   : 'Send now with the selected settings'

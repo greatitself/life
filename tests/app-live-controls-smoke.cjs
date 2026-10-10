@@ -89,14 +89,27 @@ async function previewChecks(page, checks) {
     'Actions stay collapsed around expanded progress updates, with no Original message or Reasoning summary labels',
   )
 
+  const chooseEffort = async (name) => {
+    await page.getByRole('button', { name: /^Reasoning:.*speed:/ }).click()
+    await page.getByRole('menuitemradio', { name, exact: true }).click()
+  }
+  await chooseEffort('High')
+  await page.waitForFunction(() => window.controlsTest.records.configure.length === 1)
+  await page.getByRole('button', { name: /^Reasoning: High;/ }).waitFor()
+  assert.equal(await page.locator('.run-settings-note').count(), 0)
+  await page.evaluate(() => window.controlsTest.resolveConfiguration(0, 'Saved for next turn'))
+  assert.equal(await page.getByText('Saved for next turn', { exact: true }).count(), 0)
+  checks.push('Running web controls update immediately and apply settings without status notices')
+
   const composer = page.getByRole('textbox', { name: 'Message your coding agent' })
   const send = page.getByRole('button', { name: 'Steer current response', exact: true })
   const exact = '  Steer with exactly this text.\nNo extra words.  '
   await composer.fill(exact)
   assert.equal(
     await send.evaluate((el) => getComputedStyle(el).backgroundColor),
-    'rgb(244, 196, 78)',
+    'rgba(0, 0, 0, 0)',
   )
+  assert.equal(await send.evaluate((el) => getComputedStyle(el).color), 'rgb(244, 196, 78)')
   await composer.press('Enter')
   await page.waitForFunction(() => window.controlsTest.records.steering.length === 1)
   assert.equal(await page.evaluate(() => window.controlsTest.records.steering[0].prompt), exact)
@@ -153,6 +166,14 @@ async function previewChecks(page, checks) {
   checks.push(
     'Completion leaves only the parent final response and Worked for time; stored activity stays intact',
   )
+
+  await chooseEffort('Medium')
+  await page.waitForFunction(() => window.controlsTest.records.configure.length === 2)
+  await page.getByRole('button', { name: /^Reasoning: Medium;/ }).waitFor()
+  await page.evaluate(() => window.controlsTest.resolveConfiguration(1, 'Idle settings saved'))
+  assert.equal(await page.locator('.run-settings-note').count(), 0)
+  assert.equal(await page.getByText('Idle settings saved', { exact: true }).count(), 0)
+  checks.push('Idle web conversations send settings changes immediately without a status notice')
 
   for (const provider of ['codex', 'claude']) {
     await page.getByRole('button', { name: 'Host chat history', exact: true }).click()

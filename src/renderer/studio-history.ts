@@ -268,7 +268,7 @@ export function normalizeStudioSessions(value: unknown): StudioSession[] {
         ? { reasoningEffort: choice(thread.reasoningEffort) }
         : {}),
       ...(thread.serviceTier !== undefined ? { serviceTier: choice(thread.serviceTier) } : {}),
-      mode: ['review', 'edit', 'plan'].includes(String(thread.mode))
+      mode: permissionModes.some((mode) => mode === thread.mode)
         ? (thread.mode as Thread['mode'])
         : 'plan',
       updatedAt: time(thread.updatedAt),
@@ -400,3 +400,4 @@ export function migrateLegacyStudioPending(
     },
   }
 }
+import { permissionModes } from '../shared/permissions'

@@ -3,7 +3,7 @@ import type { ClientChannel } from 'ssh2'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Agents } from '../src/main/agents'
 import type { SSHConnection } from '../src/main/ssh'
-import type { AgentEvent, Provider, StartInput } from '../src/shared/types'
+import type { AgentEvent, PermissionMode, Provider, StartInput } from '../src/shared/types'
 
 const titleGenerator = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../src/main/provider-titles', () => ({ generateProviderTitle: titleGenerator }))
@@ -192,6 +192,93 @@ function codexComplete(channel: Channel, turnId = 'turn-1') {
     params: { threadId: 'parent-remote', turn: { id: turnId, status: 'completed' } },
   })
 }
+
+describe('native web access controls', () => {
+  it.each([
+    {
+      mode: 'ask-for-approval',
+      sandbox: 'workspace-write',
+      policy: { type: 'workspaceWrite', writableRoots: ['/project'], networkAccess: false },
+      approvalPolicy: 'on-request',
+      reviewer: 'user',
+    },
+    {
+      mode: 'read-only',
+      sandbox: 'read-only',
+      policy: { type: 'readOnly' },
+      approvalPolicy: 'on-request',
+      reviewer: 'user',
+    },
+    {
+      mode: 'auto-review',
+      sandbox: 'workspace-write',
+      policy: { type: 'workspaceWrite', writableRoots: ['/project'], networkAccess: false },
+      approvalPolicy: 'on-request',
+      reviewer: 'auto_review',
+    },
+    {
+      mode: 'full-access',
+      sandbox: 'danger-full-access',
+      policy: { type: 'dangerFullAccess' },
+      approvalPolicy: 'never',
+      reviewer: 'user',
+    },
+  ])(
+    'applies Codex $mode at startup and through live settings',
+    async ({ mode, sandbox, policy, approvalPolicy, reviewer }) => {
+      const { start, agents, conversation } = fixture()
+      await start({ mode: mode as PermissionMode })
+      const channel = conversation('codex')
+      expect(channel.of('thread/start')[0].params).toMatchObject({
+        sandbox,
+        approvalPolicy,
+        approvalsReviewer: reviewer,
+      })
+      expect(channel.of('turn/start')[0].params).toMatchObject({
+        sandboxPolicy: policy,
+        approvalPolicy,
+        approvalsReviewer: reviewer,
+      })
+      await agents.configure({ sessionId: 'local-thread', mode: mode as PermissionMode })
+      expect(channel.of('thread/settings/update')[0].params).toMatchObject({
+        sandboxPolicy: policy,
+        approvalPolicy,
+        approvalsReviewer: reviewer,
+      })
+      await agents.configure({ sessionId: 'local-thread', mode: 'ask-for-approval' })
+      expect(channel.of('thread/settings/update')[1].params).toMatchObject({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        sandboxPolicy: {
+          type: 'workspaceWrite',
+          writableRoots: ['/project'],
+          networkAccess: false,
+        },
+      })
+    },
+  )
+
+  it.each<[PermissionMode, string]>([
+    ['review', 'default'],
+    ['edit', 'acceptEdits'],
+    ['auto', 'auto'],
+    ['dontAsk', 'dontAsk'],
+    ['full-access', 'bypassPermissions'],
+  ])('applies Claude %s through its native CLI and live control', async (mode, nativeMode) => {
+    const { start, agents, commands, conversation } = fixture()
+    await start({ provider: 'claude', mode })
+    expect(commands[0]).toContain(`'--permission-mode' '${nativeMode}'`)
+    expect(commands[0]).toContain("'--allow-dangerously-skip-permissions'")
+    const channel = conversation('claude')
+    await agents.configure({ sessionId: 'local-thread', mode })
+    expect(channel.of('set_permission_mode')[0].request).toEqual({
+      subtype: 'set_permission_mode',
+      mode: nativeMode,
+    })
+    expect(channel.users()).toHaveLength(1)
+    expect(channel.of('interrupt')).toHaveLength(0)
+  })
+})
 
 describe('exact user input at the provider protocol boundary', () => {
   const prompt = '  /life do not expand this\r\n```$HOME ${literal}```\n研究 👋\t '
@@ -444,6 +531,49 @@ describe('native steering and live provider configuration', () => {
     expect(channel.of('turn/start')[1].params.input).toEqual([
       { type: 'text', text: 'Next explicit request' },
     ])
+  })
+
+  it('publishes Codex reviewer changes to the active turn without a prompt or interruption', async () => {
+    const { start, agents, conversation } = fixture()
+    await start({ mode: 'ask-for-approval' })
+    const channel = conversation('codex')
+    const result = await agents.configure({ sessionId: 'local-thread', mode: 'auto-review' })
+    expect(result.applied).toBe('live')
+    expect(channel.of('turn/settings/update')[0].params).toEqual({
+      threadId: 'parent-remote',
+      turnId: 'turn-1',
+      approvalsReviewer: 'auto_review',
+    })
+    expect(channel.of('turn/start')).toHaveLength(1)
+    expect(channel.of('turn/interrupt')).toHaveLength(0)
+    expect(channel.of('turn/steer')).toHaveLength(0)
+  })
+
+  it('applies live model changes alongside a permission change using only supported turn fields', async () => {
+    const { start, agents, conversation } = fixture()
+    await start({ mode: 'ask-for-approval' })
+    const channel = conversation('codex')
+    const result = await agents.configure({
+      sessionId: 'local-thread',
+      mode: 'read-only',
+      model: 'new-model',
+      reasoningEffort: 'high',
+    })
+    expect(result.applied).toBe('next-request')
+    expect(channel.of('thread/settings/update')[0].params).toMatchObject({
+      sandboxPolicy: { type: 'readOnly' },
+      approvalPolicy: 'on-request',
+      model: 'new-model',
+    })
+    expect(channel.of('turn/settings/update')[0].params).toEqual({
+      threadId: 'parent-remote',
+      turnId: 'turn-1',
+      approvalsReviewer: 'user',
+      model: 'new-model',
+      effort: 'high',
+    })
+    expect(channel.of('turn/start')).toHaveLength(1)
+    expect(channel.of('turn/interrupt')).toHaveLength(0)
   })
 
   it.each(['thread/settings/update', 'turn/settings/update'])(

@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { webInterface } from '../web-interface'
 import {
   ArrowRight,
   Check,
@@ -1008,49 +1009,53 @@ export function ResearchMethodWorkbench({
     )
   return (
     <div className="research-method-workbench">
-      <header className="research-method-goal">
-        <div className="research-method-goal-icon">
-          <Target size={18} />
-        </div>
-        <div>
-          <span className="research-method-eyebrow">Research goal</span>
-          <h1>{goal.title}</h1>
-          <p tabIndex={0} aria-label="Research goal brief">
-            {goal.goal}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Edit research goal"
-          onClick={workbench.editGoal}
-        >
-          <Pencil size={15} />
-        </button>
-      </header>
-      <div className="research-method-operation">
-        <label>
-          <FlaskConical size={14} />
-          <span>Research operation</span>
-          <select
-            aria-label="Research operation"
-            value={method.activeOperation}
-            onChange={(event) =>
-              workbench.methodAction({
-                type: 'operation',
-                operation: event.target.value as ResearchMethod['activeOperation'],
-              })
-            }
+      {!webInterface ? (
+        <header className="research-method-goal">
+          <div className="research-method-goal-icon">
+            <Target size={18} />
+          </div>
+          <div>
+            <span className="research-method-eyebrow">Research goal</span>
+            <h1>{goal.title}</h1>
+            <p tabIndex={0} aria-label="Research goal brief">
+              {goal.goal}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Edit research goal"
+            onClick={workbench.editGoal}
           >
-            {operations.map((row) => (
-              <option value={row.value} key={row.value}>
-                {row.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span>{operation.detail}</span>
-      </div>
+            <Pencil size={15} />
+          </button>
+        </header>
+      ) : null}
+      {!webInterface ? (
+        <div className="research-method-operation">
+          <label>
+            <FlaskConical size={14} />
+            <span>Research operation</span>
+            <select
+              aria-label="Research operation"
+              value={method.activeOperation}
+              onChange={(event) =>
+                workbench.methodAction({
+                  type: 'operation',
+                  operation: event.target.value as ResearchMethod['activeOperation'],
+                })
+              }
+            >
+              {operations.map((row) => (
+                <option value={row.value} key={row.value}>
+                  {row.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span>{operation.detail}</span>
+        </div>
+      ) : null}
       <nav className="research-method-tabs" aria-label="Research tools">
         {tabs.map(({ id, title, icon: Icon }) => (
           <button
@@ -1304,10 +1309,13 @@ export function ResearchMethodWorkbench({
                     </div>
                   </li>
                 </ol>
-                <p className="research-method-automation-hint">
-                  Choose an operation above and give your instruction in the research conversation.
-                  The operation is saved in research files; your message is sent exactly as written.
-                </p>
+                {!webInterface ? (
+                  <p className="research-method-automation-hint">
+                    Choose an operation above and give your instruction in the research
+                    conversation. The operation is saved in research files; your message is sent
+                    exactly as written.
+                  </p>
+                ) : null}
               </section>
             </div>
             <section className="research-method-map-preview">
@@ -1836,12 +1844,19 @@ export function ResearchMethodWorkbench({
             <SectionHeader
               eyebrow="Expand the search"
               title="Research approaches"
-              detail="Choose an operator, then make its premise, intervention, prediction, and outcome inspectable. Approaches are hypotheses until tested."
+              detail={
+                webInterface
+                  ? 'Record questions, predictions, observations, and evidence from your research.'
+                  : 'Choose an operator, then make its premise, intervention, prediction, and outcome inspectable. Approaches are hypotheses until tested.'
+              }
               action={<AddButton collection="inquiries" onEdit={edit} />}
             />
             <div className="research-method-operator-catalog">
               {researchOperationCatalog.map((operator) => (
-                <article key={operator.id} data-selected={method.activeOperation === operator.id}>
+                <article
+                  key={operator.id}
+                  data-selected={!webInterface && method.activeOperation === operator.id}
+                >
                   <h3>{operator.label}</h3>
                   <p>{operator.description}</p>
                   <details>
@@ -1849,21 +1864,23 @@ export function ResearchMethodWorkbench({
                     <p>{operator.artifactGuidance}</p>
                   </details>
                   <div>
-                    <button
-                      type="button"
-                      className="button secondary"
-                      onClick={() =>
-                        workbench.methodAction({ type: 'operation', operation: operator.id })
-                      }
-                      aria-pressed={method.activeOperation === operator.id}
-                    >
-                      {method.activeOperation === operator.id ? (
-                        <Check size={13} />
-                      ) : (
-                        <ArrowRight size={13} />
-                      )}
-                      Select operation
-                    </button>
+                    {!webInterface ? (
+                      <button
+                        type="button"
+                        className="button secondary"
+                        onClick={() =>
+                          workbench.methodAction({ type: 'operation', operation: operator.id })
+                        }
+                        aria-pressed={method.activeOperation === operator.id}
+                      >
+                        {method.activeOperation === operator.id ? (
+                          <Check size={13} />
+                        ) : (
+                          <ArrowRight size={13} />
+                        )}
+                        Select operation
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="button secondary"

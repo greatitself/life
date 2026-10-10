@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { permissionModes } from './permissions'
 
 const identifier = z
   .string()
@@ -6,7 +7,7 @@ const identifier = z
   .max(64)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/, 'Use letters, numbers, underscores or hyphens for IDs')
 const provider = z.enum(['codex', 'claude'])
-const mode = z.enum(['review', 'edit', 'plan'])
+const mode = z.enum(permissionModes)
 
 export const lifeCommandSchema = z
   .object({

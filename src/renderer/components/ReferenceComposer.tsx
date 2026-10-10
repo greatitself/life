@@ -16,6 +16,8 @@ import type { ConnectionState, ModelOption, PermissionMode, Provider } from '../
 import type { Thread } from '../state'
 import { fallbackModelCatalog } from '../model-catalog'
 import { parseModelSelection, parsePrefixedSelection } from '../selector-values'
+import { webPermissionMode } from '../../shared/permissions'
+import { webInterface } from '../web-interface'
 import { ProviderIcon } from './Icons'
 import { useBuiltinFeature } from '../builtin-extensions'
 import './reference-composer.css'
@@ -27,7 +29,7 @@ const effortName = (value: string) =>
         /(^|[_-])([a-z])/g,
         (_, separator, letter: string) => `${separator ? ' ' : ''}${letter.toUpperCase()}`,
       )
-const permissionChoices: {
+const legacyPermissionChoices: {
   id: PermissionMode
   name: string
   description: string
@@ -52,6 +54,70 @@ const permissionChoices: {
     icon: ClipboardList,
   },
 ]
+const nativePermissionChoices = (provider: Provider): typeof legacyPermissionChoices =>
+  provider === 'codex'
+    ? [
+        {
+          id: 'ask-for-approval',
+          name: 'Ask for approval',
+          description:
+            'Work in the workspace; ask before accessing the network or files outside it.',
+          icon: LockKeyhole,
+        },
+        {
+          id: 'read-only',
+          name: 'Read-only',
+          description: 'Read files without changing them; ask before going beyond the sandbox.',
+          icon: ClipboardList,
+        },
+        {
+          id: 'auto-review',
+          name: 'Approve for me',
+          description:
+            'Keep workspace boundaries and have Codex review approval requests automatically.',
+          icon: Zap,
+        },
+        {
+          id: 'full-access',
+          name: 'Full access',
+          description:
+            'Access files and the network without sandbox restrictions or approval prompts.',
+          icon: PenLine,
+        },
+      ]
+    : [
+        {
+          id: 'review',
+          name: 'Manual',
+          description: 'Ask before file changes and commands that need permission.',
+          icon: LockKeyhole,
+        },
+        {
+          id: 'edit',
+          name: 'Accept edits',
+          description: 'Accept file edits automatically; ask before other actions.',
+          icon: PenLine,
+        },
+        {
+          id: 'auto',
+          name: 'Auto',
+          description:
+            'Claude reviews actions automatically. Availability depends on the account and model.',
+          icon: Zap,
+        },
+        {
+          id: 'dontAsk',
+          name: "Don't ask",
+          description: 'Run allowed actions and deny anything that would need a permission prompt.',
+          icon: LockKeyhole,
+        },
+        {
+          id: 'full-access',
+          name: 'Bypass permissions',
+          description: 'Skip permission prompts using Claude Code’s bypassPermissions mode.',
+          icon: PenLine,
+        },
+      ]
 type RunPatch = {
   model?: string
   reasoningEffort?: string
@@ -100,7 +166,12 @@ export function ReferenceComposerControls({
   const efforts = current?.supportedReasoningEfforts || []
   const tiers = current?.serviceTiers || []
   const displayedEffort = reasoningEffort || current?.defaultReasoningEffort || ''
-  const permission = permissionChoices.find((item) => item.id === mode) || permissionChoices[0]
+  const permissionChoices = webInterface
+    ? nativePermissionChoices(provider)
+    : legacyPermissionChoices
+  const selectedMode = webInterface ? webPermissionMode(provider, mode) : mode
+  const permission =
+    permissionChoices.find((item) => item.id === selectedMode) || permissionChoices[0]
   return (
     <div
       className="reference-run-controls"
@@ -287,7 +358,7 @@ export function ReferenceComposerControls({
       </DropdownMenu.Root>
       <span className="reference-control-divider" aria-hidden="true" />
       <Select.Root
-        value={mode}
+        value={selectedMode}
         disabled={modeDisabled}
         onValueChange={(value) => {
           if (permissionChoices.some((choice) => choice.id === value))

@@ -54,9 +54,9 @@ Useful explicit operations are:
 | Constructive interference | Examine constructive, compatible, conflicting, redundant, and unknown interactions, and propose a combination |
 | Verification              | Record procedures, expected and observed outcomes, and evidence tied to requirements and candidates           |
 
-Choosing an operation records the researcher's intent in the isolated research context. The visible instruction remains the researcher's own text. Life sends that text unchanged to the provider; it does not append a research preamble or an invented continuation. The selected operation, stable goal/problem IDs, and file paths are available through native `AGENTS.md`/`CLAUDE.md` instructions and context files.
+In the web app, describe the desired approach in the prompt. There is no next-message operation selector, and stored selections do not guide new or queued requests. Life sends the researcher's text unchanged to the provider; it does not append a research preamble or an invented continuation. Stable goal/problem IDs and file paths are available through native `AGENTS.md`/`CLAUDE.md` instructions and context files. The legacy desktop operation selector still records its selection as context metadata.
 
-Each operation uses the context selected when it was submitted. Later navigation must not redirect running or queued research. Selected record IDs and operation identity belong to that invocation rather than a mutable global instruction file shared by concurrent investigations.
+Each request uses the goal/problem context selected when it was submitted. Later navigation must not redirect running or queued research. Selected record IDs belong to that invocation rather than a mutable global instruction file shared by concurrent investigations.
 
 The provider can work through normal tools and subagents, and its activity stays visible in the associated Research conversation. Analysis requires an available, authenticated provider and the applicable permissions. Life must show the real provider result, preserve unresolved questions, and leave failed work recoverable. There is no simulated automation or success message for an analysis that did not run.
 

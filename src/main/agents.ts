@@ -11,6 +11,7 @@ import type {
   StartInput,
 } from '../shared/types'
 import { agentProviderOptionsSchema, shellQuote } from '../shared/validation'
+import { claudePermissionMode, codexPermissions } from '../shared/permissions'
 import { SSHConnection } from './ssh'
 import { JsonLines } from './json-lines'
 import { CodexRPC as RPC, CodexRequestError } from './codex-rpc'
@@ -202,6 +203,21 @@ export class Agents {
     this.codexConfigStarting = undefined
     this.claudeModels = undefined
     this.claudeModelsStarting = undefined
+  }
+  /** Browser reconnects can restore live turn state without starting or repeating a request. */
+  runningSessionEvents(): AgentEvent[] {
+    return [...this.sessions.entries()].flatMap(([sessionId, session]) =>
+      session.busy && !session.stopRequested
+        ? [
+            {
+              sessionId,
+              type: 'status' as const,
+              status: 'running',
+              provider: session.input.provider,
+            },
+          ]
+        : [],
+    )
   }
   private async providerChannel(command: string): Promise<ClientChannel> {
     const durable = this.ssh as SSHConnection & {
@@ -811,23 +827,19 @@ export class Agents {
             : input.reasoningEffort
         if (input.reasoningEffort === '' && !effort)
           throw new Error('Codex has not advertised its default effort for this model')
+        const permissions =
+          input.mode !== undefined ? codexPermissions(input.mode, session.writableRoot) : undefined
         const patch = {
           ...(input.model !== undefined ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(input.serviceTier !== undefined
             ? { serviceTier: input.serviceTier || this.codexDefaultTiers.get(model || '') || null }
             : {}),
-          ...(input.mode !== undefined
+          ...(permissions
             ? {
-                approvalPolicy: input.mode === 'review' ? 'untrusted' : 'on-request',
-                sandboxPolicy:
-                  input.mode === 'plan'
-                    ? { type: 'readOnly' }
-                    : {
-                        type: 'workspaceWrite',
-                        writableRoots: [session.writableRoot],
-                        networkAccess: false,
-                      },
+                approvalPolicy: permissions.approvalPolicy,
+                approvalsReviewer: permissions.approvalsReviewer,
+                sandboxPolicy: permissions.sandboxPolicy,
               }
             : {}),
         }
@@ -838,21 +850,36 @@ export class Agents {
             15000,
           )
           if (!ownsSession()) throw new Error('Agent session changed while applying settings')
-          if (session.busy && session.turnId && input.mode === undefined) {
+          if (session.busy && session.turnId) {
+            // The running-turn API accepts reviewer/model settings, but not
+            // approvalPolicy or sandboxPolicy. Publish supported changes now.
+            const {
+              approvalPolicy: _approvalPolicy,
+              sandboxPolicy: _sandboxPolicy,
+              ...turnPatch
+            } = patch
+            const previousPermissions = codexPermissions(session.input.mode, session.writableRoot)
+            const permissionBoundaryChanged =
+              permissions &&
+              (permissions.approvalPolicy !== previousPermissions.approvalPolicy ||
+                JSON.stringify(permissions.sandboxPolicy) !==
+                  JSON.stringify(previousPermissions.sandboxPolicy))
             try {
               const live = await rpc.request(
                 'turn/settings/update',
                 {
                   threadId: session.remoteId,
                   turnId: session.turnId,
-                  ...patch,
+                  ...turnPatch,
                 },
                 15000,
               )
               if (!ownsSession()) throw new Error('Agent session changed while applying settings')
               if (live.status === 'applied') {
-                result.applied = 'live'
-                result.note = 'Applied at the next model step in this running turn.'
+                result.applied = permissionBoundaryChanged ? 'next-request' : 'live'
+                result.note = permissionBoundaryChanged
+                  ? 'Model and reviewer changes are live; sandbox changes apply to the next turn.'
+                  : 'Applied at the next model step in this running turn.'
               } else result.note = 'The active turn finished; saved for the next turn.'
             } catch (error) {
               if (
@@ -865,11 +892,7 @@ export class Agents {
               result.note =
                 'Saved for the next turn. Update remote Codex to enable live model-step changes.'
             }
-          } else
-            result.note =
-              input.mode !== undefined && session.busy
-                ? 'Permission changes are saved for the next turn; pending approvals keep their original policy.'
-                : 'Saved in the Codex thread without starting a turn.'
+          } else result.note = 'Saved in the Codex thread without starting a turn.'
         } catch (error) {
           if (
             !(error instanceof CodexRequestError) ||
@@ -886,8 +909,7 @@ export class Agents {
           session,
           {
             subtype: 'set_permission_mode',
-            mode:
-              input.mode === 'plan' ? 'plan' : input.mode === 'edit' ? 'acceptEdits' : 'default',
+            mode: claudePermissionMode(input.mode),
           },
           15000,
         )
@@ -933,8 +955,10 @@ export class Agents {
     session.codexRPC = rpc
     const { input } = session
     if (this.sessions.get(input.sessionId) !== session || session.stopRequested) return
-    const approvalPolicy = input.mode === 'review' ? 'untrusted' : 'on-request'
-    const sandbox = input.mode === 'plan' ? 'read-only' : 'workspace-write'
+    const { approvalPolicy, approvalsReviewer, sandbox, sandboxPolicy } = codexPermissions(
+      input.mode,
+      session.writableRoot,
+    )
     const genericThreadModel = string(input.providerOptions?.thread?.model)
     const genericTurnModel = string(input.providerOptions?.turn?.model)
     if (!input.model && !genericThreadModel && !genericTurnModel) {
@@ -982,6 +1006,7 @@ export class Agents {
           ...(session.remoteId ? { threadId: session.remoteId, excludeTurns: true } : {}),
           cwd: session.workspace,
           approvalPolicy,
+          approvalsReviewer,
           sandbox,
           ...(threadModel ? { model: threadModel } : {}),
         },
@@ -1060,6 +1085,7 @@ export class Agents {
       input: codexUserInput(input.prompt, input.attachments),
       cwd: session.workspace,
       approvalPolicy,
+      approvalsReviewer,
       ...(turnModel ? { model: turnModel } : {}),
       ...(effort ? { effort } : {}),
       ...(input.serviceTier !== undefined
@@ -1067,10 +1093,7 @@ export class Agents {
             serviceTier: input.serviceTier || this.codexDefaultTiers.get(turnModel || '') || null,
           }
         : {}),
-      sandboxPolicy:
-        input.mode === 'plan'
-          ? { type: 'readOnly' }
-          : { type: 'workspaceWrite', writableRoots: [session.writableRoot], networkAccess: false },
+      sandboxPolicy,
     })
     if (effort) session.appliedReasoningEffort = effort
     session.turnId = string(object(result.turn).id)
@@ -1368,7 +1391,7 @@ export class Agents {
         session,
         {
           subtype: 'set_permission_mode',
-          mode: input.mode === 'plan' ? 'plan' : input.mode === 'edit' ? 'acceptEdits' : 'default',
+          mode: claudePermissionMode(input.mode),
         },
         15000,
       )
@@ -1415,7 +1438,8 @@ export class Agents {
       '--permission-prompt-tool',
       'stdio',
       '--permission-mode',
-      input.mode === 'plan' ? 'plan' : input.mode === 'edit' ? 'acceptEdits' : 'default',
+      claudePermissionMode(input.mode),
+      '--allow-dangerously-skip-permissions',
     ]
     if (input.scope === 'research' && session.writableRoot !== session.workspace)
       args.push('--add-dir', session.writableRoot)

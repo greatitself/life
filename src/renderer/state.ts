@@ -6,6 +6,7 @@ import type {
   PermissionMode,
   Provider,
 } from '../shared/types'
+import { permissionModes } from '../shared/permissions'
 import { normalizeThreadAttachments, type ThreadAttachment } from './attachments'
 import { normalizeQueuedMessages, pauseQueuedMessages, type QueuedMessage } from './thread-queue'
 import { normalizeFileChanges, type ThreadFileChange } from './thread-activity'
@@ -239,9 +240,7 @@ export function readThreads(): Thread[] {
         queue: normalizeQueuedMessages(t.queue),
         ...(t.lifeScope === true ? { lifeScope: true } : {}),
         turn: Number.isInteger(t.turn) && t.turn >= 0 ? t.turn : 0,
-        mode: ['review', 'edit', 'plan'].includes(t.mode)
-          ? (t.mode as PermissionMode)
-          : ('review' as const),
+        mode: permissionModes.includes(t.mode) ? (t.mode as PermissionMode) : ('review' as const),
         model: typeof t.model === 'string' ? t.model : '',
         ...(t.reasoningEffort !== undefined
           ? { reasoningEffort: validModelChoice(t.reasoningEffort) }

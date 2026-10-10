@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import type { Provider } from '../../shared/types'
 import type { Thread } from '../state'
+import { webInterface } from '../web-interface'
 import type {
   ProblemStatus,
   ResearchGoal,
@@ -69,6 +70,41 @@ function Menu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  )
+}
+export function ResearchGoalMenu({
+  workbench,
+  goals = workbench.goals,
+  trigger,
+}: {
+  workbench: ResearchWorkbenchState
+  goals?: ResearchGoal[]
+  trigger: ReactNode
+}) {
+  return (
+    <Menu label="Research goals" trigger={trigger}>
+      {goals.map((item) => (
+        <DropdownMenu.Item
+          key={item.id}
+          className="life-workbench-menu-item"
+          onSelect={() => workbench.selectGoal(item.id)}
+        >
+          <Target size={14} />
+          <span>{item.title}</span>
+          {workbench.goal?.id === item.id ? <Check size={13} /> : null}
+        </DropdownMenu.Item>
+      ))}
+      {!goals.length ? <div className="research-sidebar-empty">No matching goals</div> : null}
+      {workbench.goal ? (
+        <>
+          <DropdownMenu.Separator className="life-workbench-menu-separator" />
+          <DropdownMenu.Item className="life-workbench-menu-item" onSelect={workbench.editGoal}>
+            <Pencil size={14} />
+            <span>Edit goal</span>
+          </DropdownMenu.Item>
+        </>
+      ) : null}
+    </Menu>
   )
 }
 function ProblemCard({
@@ -332,35 +368,43 @@ export function ResearchSidebar({
           </button>
         </div>
       </div>
-      <button
-        type="button"
-        className="research-storage-selector"
-        onClick={onChooseWorkspace}
-        title={
-          workbench.scope
-            ? workbench.scope.host + ' · ' + workbench.scope.root
-            : 'Choose the machine for Research'
-        }
-      >
-        <Folder size={13} />
-        <span>
-          {workbench.scope ? workbench.scope.host + ' · Research' : 'Choose Research environment'}
-        </span>
-        <ChevronDown size={12} />
-      </button>
-      <div className="research-storage-status" data-status={workbench.storageStatus}>
-        <span role="status" title={workbench.storageError || undefined}>
-          {storageLabel}
-        </span>
-        {workbench.storageError ? (
+      {!webInterface ? (
+        <>
           <button
             type="button"
-            onClick={workbench.storageConflict ? () => setConflictOpen(true) : workbench.refresh}
+            className="research-storage-selector"
+            onClick={onChooseWorkspace}
+            title={
+              workbench.scope
+                ? workbench.scope.host + ' · ' + workbench.scope.root
+                : 'Choose the machine for Research'
+            }
           >
-            {workbench.storageConflict ? 'Resolve' : 'Retry'}
+            <Folder size={13} />
+            <span>
+              {workbench.scope
+                ? workbench.scope.host + ' · Research'
+                : 'Choose Research environment'}
+            </span>
+            <ChevronDown size={12} />
           </button>
-        ) : null}
-      </div>
+          <div className="research-storage-status" data-status={workbench.storageStatus}>
+            <span role="status" title={workbench.storageError || undefined}>
+              {storageLabel}
+            </span>
+            {workbench.storageError ? (
+              <button
+                type="button"
+                onClick={
+                  workbench.storageConflict ? () => setConflictOpen(true) : workbench.refresh
+                }
+              >
+                {workbench.storageConflict ? 'Resolve' : 'Retry'}
+              </button>
+            ) : null}
+          </div>
+        </>
+      ) : null}
       {workbench.storageNotice ? (
         <div className="research-migration-notice" role="status">
           <p>{workbench.storageNotice}</p>
@@ -385,12 +429,15 @@ export function ResearchSidebar({
           </button>
         </div>
       ) : null}
-      <div className="research-goals-heading">
-        <span>Goals</span>
-      </div>
-      {workbench.goals.length ? (
-        <Menu
-          label="Research goals"
+      {!webInterface ? (
+        <div className="research-goals-heading">
+          <span>Goals</span>
+        </div>
+      ) : null}
+      {!webInterface && workbench.goals.length ? (
+        <ResearchGoalMenu
+          workbench={workbench}
+          goals={goals}
           trigger={
             <button type="button" className="research-goal-picker">
               <Target size={15} />
@@ -398,43 +445,23 @@ export function ResearchSidebar({
               <ChevronDown size={13} />
             </button>
           }
-        >
-          {goals.map((item) => (
-            <DropdownMenu.Item
-              key={item.id}
-              className="life-workbench-menu-item"
-              onSelect={() => workbench.selectGoal(item.id)}
-            >
-              <Target size={14} />
-              <span>{item.title}</span>
-              {goal?.id === item.id ? <Check size={13} /> : null}
-            </DropdownMenu.Item>
-          ))}
-          {!goals.length ? <div className="research-sidebar-empty">No matching goals</div> : null}
-          {goal ? (
-            <>
-              <DropdownMenu.Separator className="life-workbench-menu-separator" />
-              <DropdownMenu.Item className="life-workbench-menu-item" onSelect={workbench.editGoal}>
-                <Pencil size={14} />
-                <span>Edit goal</span>
-              </DropdownMenu.Item>
-            </>
-          ) : null}
-        </Menu>
+        />
       ) : null}
       {goal ? (
         <>
-          <button
-            className={'research-overview-button' + (!workbench.problem ? ' selected' : '')}
-            onClick={workbench.overview}
-          >
-            <LayoutGrid size={14} />
-            <span>Overview</span>
-            <small>
-              {goal.problems.filter((problem) => problem.status === 'solved').length}/
-              {goal.problems.length}
-            </small>
-          </button>
+          {!webInterface ? (
+            <button
+              className={'research-overview-button' + (!workbench.problem ? ' selected' : '')}
+              onClick={workbench.overview}
+            >
+              <LayoutGrid size={14} />
+              <span>Overview</span>
+              <small>
+                {goal.problems.filter((problem) => problem.status === 'solved').length}/
+                {goal.problems.length}
+              </small>
+            </button>
+          ) : null}
           <div className="research-problem-filters" aria-label="Problem status">
             {(['all', 'open', 'blocked'] as const).map((status) => (
               <button

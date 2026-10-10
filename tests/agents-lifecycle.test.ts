@@ -14,6 +14,7 @@ class Channel extends EventEmitter {
   messages: Record<string, any>[] = []
   closeRequested = false
   resumedId?: string
+  activeTurnId?: string
   write(raw: string) {
     const message = JSON.parse(raw)
     this.messages.push(message)
@@ -27,6 +28,7 @@ class Channel extends EventEmitter {
         })
       if (message.method === 'turn/start') {
         const turnId = `turn-${this.id}-${message.id}`
+        this.activeTurnId = turnId
         this.reply({ id: message.id, result: { turn: { id: turnId } } })
         if (message.params.input?.[0]?.text === 'hang') return
         this.reply({
@@ -94,6 +96,26 @@ function fixture() {
 }
 
 describe('Codex transport restart lifecycle', () => {
+  it('reports active conversations for a reconnect and drops completed turns from that snapshot', async () => {
+    const { channels, agents, start } = fixture()
+    try {
+      await start({ prompt: 'hang' })
+      expect(agents.runningSessionEvents()).toEqual([
+        { sessionId: 'local-thread', type: 'status', status: 'running', provider: 'codex' },
+      ])
+      channels[0].reply({
+        method: 'turn/completed',
+        params: {
+          threadId: 'saved-id',
+          turn: { id: channels[0].activeTurnId, status: 'completed' },
+        },
+      })
+      await vi.waitFor(() => expect(agents.runningSessionEvents()).toEqual([]))
+    } finally {
+      agents.close()
+    }
+  })
+
   it.each(['same-thread', 'different-thread'])(
     'does not close a replacement Codex transport or emit stale interruption events after a project switch (%s)',
     async (replacementIdentity) => {

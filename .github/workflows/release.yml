@@ -20,6 +20,8 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.target.outputs.value }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,23 +32,49 @@ jobs:
           cache: npm
       - name: Verify release version
         run: node -e "if (process.env.LIFE_RELEASE_TAG !== 'v' + require('./package.json').version) throw new Error('Release tag must match package.json version')"
+      - name: Select release target
+        id: target
+        run: node -e "const target=require('./package.json').lifeReleaseTarget||'desktop'; if(!['web','desktop','all'].includes(target)) throw new Error('Unknown release target'); require('fs').appendFileSync(process.env.GITHUB_OUTPUT,'value='+target+'\n')"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+        if: steps.target.outputs.value != 'web'
+      - run: npm run build:web
+        if: steps.target.outputs.value != 'desktop'
+      - run: npm run pack:web
+        if: steps.target.outputs.value != 'desktop'
       - run: npx playwright install chromium --with-deps
+      - run: npm run test:web-release
+        if: steps.target.outputs.value != 'desktop'
+      - uses: actions/upload-artifact@v4
+        if: steps.target.outputs.value != 'desktop'
+        with:
+          name: life-web-release
+          path: release/web/*
+          if-no-files-found: error
       - run: npm run test:recovery
+        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-queue-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-presentation-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/studio-lifecycle-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/app-live-controls-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/app-live-controls-smoke.cjs --preview
+        if: steps.target.outputs.value != 'web'
       - run: node tests/run-selectors-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: node tests/research-method-ui-smoke.cjs
+        if: steps.target.outputs.value != 'web'
       - run: xvfb-run -a npm run test:desktop
+        if: steps.target.outputs.value != 'web'
 
   build:
     needs: verify
+    if: needs.verify.outputs.target != 'web'
     strategy:
       fail-fast: false
       matrix:
@@ -96,10 +124,10 @@ jobs:
           path: .release-verification
           sparse-checkout: tests/windows-upgrade.ps1
           sparse-checkout-cone-mode: false
-      - name: Verify Windows upgrades from Life 0.1.0, 0.5.1, 0.6.0 and 0.7.0
+      - name: Verify Windows upgrades from Life 0.1.0, 0.5.1, 0.6.0, 0.7.0 and 0.8.0
         if: matrix.platform == 'windows-x64'
         shell: pwsh
-        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1','0.6.0','0.7.0')
+        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1','0.6.0','0.7.0','0.8.0')
       - name: Save Windows upgrade proof
         if: matrix.platform == 'windows-x64'
         uses: actions/upload-artifact@v4
@@ -148,5 +176,34 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG" --notes-file release-notes.md
           fi
-          gh release upload "$RELEASE_TAG" Life-* latest*.yml SHA256SUMS.txt --clobber
+          assets=(Life-* latest*.yml SHA256SUMS.txt)
+          if [ -f SHA256SUMS-web.txt ]; then assets+=(SHA256SUMS-web.txt); fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
+
+  publish-web:
+    needs: verify
+    if: needs.verify.outputs.target == 'web'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.LIFE_RELEASE_REF }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-web-release
+          path: release/web
+      - name: Publish web application bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ env.LIFE_RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG — Web application" --notes-file "docs/release-notes-${RELEASE_TAG}.md"
+          fi
+          gh release upload "$RELEASE_TAG" release/web/Life-*-web.tar.gz release/web/Life-*-web.zip release/web/SHA256SUMS-web.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false

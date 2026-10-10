@@ -120,13 +120,20 @@ export const researchMethodSchema =
     2,
   ) + '\n'
 
-export const researchMethodGuide = `# Life research method · version 1
+const operationInvocationInstructions =
+  "Read the conversation's .life-context.json first. Its operation is the immutable operator selected for this submitted request, even when goal.json's activeOperation has since changed. Follow the user's literal request, the selected goal/problem, and the permission mode. The operator and research context are instruction-file metadata; never pretend they were user messages. An operator selection by itself does not authorize sending an invented request or continuing work."
+
+const promptInvocationInstructions =
+  "Read the conversation's .life-context.json for the selected goal/problem and file paths. The user's message determines the research approach. Historical operation and activeOperation fields do not select an approach for a message. Follow the user's literal request and permission mode; never add an approach or an invented continuation. Use this guide for structured research records when needed."
+
+function methodGuide(invocationInstructions: string): string {
+  return `# Life research method · version 1
 
 This is a research workspace for Automated Abstraction and Anti-Abstraction Based Research.
 
 The terminology is explicit: anti-abstraction breaks a whole into basic constituents (an atom into electrons, protons and neutrons). Abstraction composes constituents into higher-level assemblies and a proposed whole. Grounding and falsification are distinct tools, not alternative definitions of these terms.
 
-Read the conversation's .life-context.json first. Its operation is the immutable operator selected for this submitted request, even when goal.json's activeOperation has since changed. Follow the user's literal request, the selected goal/problem, and the permission mode. The operator and research context are instruction-file metadata; never pretend they were user messages. An operator selection by itself does not authorize sending an invented request or continuing work.
+${invocationInstructions}
 
 Read the current goalFile and methodSchemaFile identified in that context. Store structured records in goal.json's method field with version 1, stable IDs and the bounded tables described in the schema. Preserve unrelated goal fields, problems, conversation links and unknown metadata. Each table supports up to ${RESEARCH_METHOD_LIMIT} records; goal.json remains bounded at 4 MB. Missing relationships and parent/composition cycles are invalid. Update updatedAt with the actual millisecond time when a record changes.
 
@@ -146,3 +153,7 @@ ${researchOperationCatalog.map((operation) => `## ${operation.label} (${operatio
 
 Use atomic replacements and wait while the context's lockFile exists before editing goalFile. Keep working artifacts in the current research goal/conversation directory. Life refreshes structured records and diagrams from files after turns complete. No research operation authorizes edits to Life's application source.
 `
+}
+
+export const researchMethodGuide = methodGuide(operationInvocationInstructions)
+export const promptResearchMethodGuide = methodGuide(promptInvocationInstructions)

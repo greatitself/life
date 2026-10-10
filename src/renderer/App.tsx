@@ -48,6 +48,8 @@ import type {
   StartInput,
 } from '../shared/types'
 import { api, desktop, errorText, streamlinedWorkspace } from './api'
+import { webInterface } from './web-interface'
+import { webPermissionMode } from '../shared/permissions'
 import './workspace-presentation.css'
 import {
   applyEvent,
@@ -136,6 +138,7 @@ import {
 } from './workbench'
 import {
   ResearchSidebar,
+  ResearchGoalMenu,
   ResearchProblemContext,
   ResearchProblemStart,
   ResearchDialogs,
@@ -444,7 +447,9 @@ export function App() {
   const currentModel = active?.model ?? model
   const currentReasoningEffort = active ? (active.reasoningEffort ?? '') : reasoningEffort
   const currentServiceTier = active ? (active.serviceTier ?? '') : serviceTier
-  const currentMode = active?.mode || mode
+  const currentMode = webInterface
+    ? webPermissionMode(currentProvider, active?.mode || mode)
+    : active?.mode || mode
   const connected = connection.status === 'connected'
   const projectReady = connected && Boolean(connection.workspace)
   const draftUploads = useDraftUploads(
@@ -739,10 +744,9 @@ export function App() {
   }, [refreshProfiles])
 
   function persistThreadHistory() {
-    localStorage.setItem(
-      'relay.threads.v1',
-      JSON.stringify(threadsCurrent.current.map((thread) => ({ ...thread, pending: [] }))),
-    )
+    const history = threadsCurrent.current.map((thread) => ({ ...thread, pending: [] }))
+    localStorage.setItem('relay.threads.v1', JSON.stringify(history))
+    void api?.conversations?.save(history).catch((error) => setToast(errorText(error)))
   }
   useEffect(() => {
     const unload = () => {
@@ -760,10 +764,9 @@ export function App() {
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(
-          'relay.threads.v1',
-          JSON.stringify(threads.map((t) => ({ ...t, pending: [] }))),
-        )
+        const history = threads.map((t) => ({ ...t, pending: [] }))
+        localStorage.setItem('relay.threads.v1', JSON.stringify(history))
+        void api?.conversations?.save(history).catch((error) => setToast(errorText(error)))
       } catch {
         setToast('Local history storage is full. Delete older threads to free space.')
       }
@@ -993,7 +996,9 @@ export function App() {
         active,
         prompt,
         selectedAttachments,
-        researchTarget ? researchTarget.goal.method?.activeOperation || 'explore' : undefined,
+        !webInterface && researchTarget
+          ? researchTarget.goal.method?.activeOperation || 'explore'
+          : undefined,
       )
       if (queuedId) {
         setDraft((current) => (current === draft ? '' : current))
@@ -1093,6 +1098,7 @@ export function App() {
     const turn = thread.turn + 1
     const next: Thread = {
       ...thread,
+      mode: webInterface ? webPermissionMode(thread.provider, thread.mode) : thread.mode,
       profileId: connection.profile!.id,
       workspace:
         researchTarget && researchScope
@@ -1148,9 +1154,11 @@ export function App() {
         await workbench.flushForThread(id)
         const preparedWorkspace = await workbench.prepareForThread(
           id,
-          queuedMessage?.researchOperation ||
-            researchTarget.goal.method?.activeOperation ||
-            'explore',
+          webInterface
+            ? undefined
+            : queuedMessage?.researchOperation ||
+                researchTarget.goal.method?.activeOperation ||
+                'explore',
         )
         if (preparedWorkspace !== next.workspace)
           throw new Error(
@@ -1190,7 +1198,7 @@ export function App() {
         model: thread.model,
         reasoningEffort: thread.reasoningEffort ?? '',
         serviceTier: thread.serviceTier ?? '',
-        mode: thread.mode,
+        mode: next.mode,
       }
       if (transfer) {
         const uploaded = await ensureAttachmentUploads(
@@ -1438,12 +1446,12 @@ export function App() {
       setThreads((previous) =>
         previous.map((thread) => (thread.id === active.id ? { ...thread, ...next } : thread)),
       )
-      if (active.busy && api) {
-        setSettingsNote('Applying settings…')
+      if (api) {
+        if (!webInterface) setSettingsNote('Applying settings…')
         void api.agent
           .configure({ sessionId: active.id, ...next })
           .then((result) => {
-            if (!isCurrent()) return
+            if (!isCurrent() || webInterface) return
             setSettingsNote(
               result.note ||
                 (result.applied === 'live'
@@ -1452,9 +1460,11 @@ export function App() {
             )
           })
           .catch((error) => {
-            if (isCurrent()) setSettingsNote(errorText(error))
+            if (!isCurrent()) return
+            if (webInterface) setToast(errorText(error))
+            else setSettingsNote(errorText(error))
           })
-      } else setSettingsNote('Settings saved for the next request.')
+      } else if (!webInterface) setSettingsNote('Settings saved for the next request.')
     } else {
       if (next.model !== undefined) setModel(next.model)
       if (next.mode) setMode(next.mode)
@@ -2113,22 +2123,39 @@ export function App() {
                       ) : (
                         <Folder size={15} />
                       )}
-                      <span
-                        title={
-                          view === 'investigation'
-                            ? workbench.goal?.goal
-                            : active?.workspace || connection.workspace
-                        }
-                      >
-                        {view === 'investigation'
-                          ? workbench.goal?.title || 'Research'
-                          : (active?.workspace || connection.workspace)
-                              ?.split('/')
-                              .filter(Boolean)
-                              .pop() ||
-                            titleProfile?.name ||
-                            workspaceTitle}
-                      </span>
+                      {webInterface && view === 'investigation' && workbench.goals.length ? (
+                        <ResearchGoalMenu
+                          workbench={workbench}
+                          trigger={
+                            <button
+                              type="button"
+                              className="research-header-goal"
+                              title={workbench.goal?.goal}
+                              aria-label={`Research goal: ${workbench.goal?.title || 'Choose goal'}`}
+                            >
+                              <span>{workbench.goal?.title || 'Research'}</span>
+                              <ChevronDown size={12} aria-hidden="true" />
+                            </button>
+                          }
+                        />
+                      ) : (
+                        <span
+                          title={
+                            view === 'investigation'
+                              ? workbench.goal?.goal
+                              : active?.workspace || connection.workspace
+                          }
+                        >
+                          {view === 'investigation'
+                            ? workbench.goal?.title || 'Research'
+                            : (active?.workspace || connection.workspace)
+                                ?.split('/')
+                                .filter(Boolean)
+                                .pop() ||
+                              titleProfile?.name ||
+                              workspaceTitle}
+                        </span>
+                      )}
                       <span className="breadcrumb-separator" aria-hidden="true">
                         /
                       </span>
@@ -2288,7 +2315,9 @@ export function App() {
                     <ResearchProblemContext workbench={workbench} />
                   ) : null}
                   <div className="chat-area">
-                    {active && builtin.enabled('message-navigation') ? (
+                    {active &&
+                    builtin.enabled('message-navigation') &&
+                    !(webInterface && view === 'investigation') ? (
                       <ThreadMessageNavigator
                         key={active.id}
                         messages={navigableMessages}
@@ -2305,18 +2334,20 @@ export function App() {
                       }}
                     >
                       {!active && view === 'investigation' ? (
-                        <ResearchProblemStart
-                          problem={workbench.problem}
-                          goal={workbench.goal}
-                          onNewGoal={workbench.newGoal}
-                          provider={provider}
-                          onProvider={(next) => {
-                            setProvider(next)
-                            setModel('')
-                            setReasoningEffort('')
-                            setServiceTier('')
-                          }}
-                        />
+                        !webInterface ? (
+                          <ResearchProblemStart
+                            problem={workbench.problem}
+                            goal={workbench.goal}
+                            onNewGoal={workbench.newGoal}
+                            provider={provider}
+                            onProvider={(next) => {
+                              setProvider(next)
+                              setModel('')
+                              setReasoningEffort('')
+                              setServiceTier('')
+                            }}
+                          />
+                        ) : null
                       ) : !active ? (
                         <ActiveProject
                           connection={connection}
@@ -2451,7 +2482,7 @@ export function App() {
                           ))}
                         </div>
                       ) : null}
-                      {settingsNote ? (
+                      {!webInterface && settingsNote ? (
                         <div className="run-settings-note" role="status">
                           {settingsNote}
                         </div>
@@ -2581,7 +2612,7 @@ export function App() {
                                 className="composer-steer"
                                 aria-label="Steer current response"
                                 title={
-                                  active?.purpose === 'research'
+                                  !webInterface && active?.purpose === 'research'
                                     ? 'Steer the current Research operation. The toolbar approach applies to a new turn.'
                                     : 'Send your message to the current turn without interrupting it'
                                 }
@@ -2594,10 +2625,12 @@ export function App() {
                               </button>
                             ) : null}
 
-                            <AttachmentPicker
-                              disabled={queue.preparing || Boolean(attachmentProgress)}
-                              onFiles={attachFiles}
-                            />
+                            {!(webInterface && view === 'investigation') ? (
+                              <AttachmentPicker
+                                disabled={queue.preparing || Boolean(attachmentProgress)}
+                                onFiles={attachFiles}
+                              />
+                            ) : null}
                             {busy ? (
                               <button
                                 type="button"
@@ -2664,71 +2697,73 @@ export function App() {
                           </div>
                         </div>
                       </div>
-                      <div className="composer-caption composer-worktree-strip">
-                        <span>
-                          <span className={`status-dot ${connected ? 'online' : ''}`} />
-                          {view === 'investigation' ? (
-                            <button
-                              className="composer-project-control"
-                              aria-label="Edit research goal"
-                              title={workbench.goal?.goal || 'New research goal'}
-                              onClick={workbench.goal ? workbench.editGoal : workbench.newGoal}
-                            >
-                              <Target size={13} />
-                              <span>{workbench.goal?.title || 'New goal'}</span>
-                            </button>
-                          ) : (
-                            <button
-                              className="composer-project-control"
-                              aria-label="Choose workspace project"
-                              title={connection.workspace || 'Choose a project after connecting'}
-                              onClick={() => {
-                                if (connected) {
-                                  setSuggestedProject(undefined)
-                                  setProjectOpen(true)
-                                } else setConnectOpen(true)
-                              }}
-                            >
-                              <Folder size={13} />
-                              <span>
-                                {projectReady
-                                  ? connection.workspace
-                                      ?.split('/')
-                                      .filter(Boolean)
-                                      .slice(-2)
-                                      .join('/') || '/'
-                                  : connected
-                                    ? 'Choose a project'
-                                    : 'Connect a machine'}
-                              </span>
-                              <ChevronDown size={11} />
-                            </button>
-                          )}
-                        </span>
-                        <span
-                          className="composer-machine-status"
-                          title={
-                            connected
-                              ? `${connection.profile?.username}@${connection.profile?.host}`
-                              : undefined
-                          }
-                        >
-                          {connected ? (
-                            <>
-                              <Cloud size={14} />
-                              <span>{connection.profile?.host}</span>
-                            </>
-                          ) : (
-                            'No machine connected'
-                          )}
-                        </span>
-                        <ReferenceComposerDetails
-                          thread={composerMetadata}
-                          connection={connection}
-                          onWorkspace={() => setWorkspaceOpen(true)}
-                          onNotify={setToast}
-                        />
-                      </div>
+                      {!(webInterface && view === 'investigation') ? (
+                        <div className="composer-caption composer-worktree-strip">
+                          <span>
+                            <span className={`status-dot ${connected ? 'online' : ''}`} />
+                            {view === 'investigation' ? (
+                              <button
+                                className="composer-project-control"
+                                aria-label="Edit research goal"
+                                title={workbench.goal?.goal || 'New research goal'}
+                                onClick={workbench.goal ? workbench.editGoal : workbench.newGoal}
+                              >
+                                <Target size={13} />
+                                <span>{workbench.goal?.title || 'New goal'}</span>
+                              </button>
+                            ) : (
+                              <button
+                                className="composer-project-control"
+                                aria-label="Choose workspace project"
+                                title={connection.workspace || 'Choose a project after connecting'}
+                                onClick={() => {
+                                  if (connected) {
+                                    setSuggestedProject(undefined)
+                                    setProjectOpen(true)
+                                  } else setConnectOpen(true)
+                                }}
+                              >
+                                <Folder size={13} />
+                                <span>
+                                  {projectReady
+                                    ? connection.workspace
+                                        ?.split('/')
+                                        .filter(Boolean)
+                                        .slice(-2)
+                                        .join('/') || '/'
+                                    : connected
+                                      ? 'Choose a project'
+                                      : 'Connect a machine'}
+                                </span>
+                                <ChevronDown size={11} />
+                              </button>
+                            )}
+                          </span>
+                          <span
+                            className="composer-machine-status"
+                            title={
+                              connected
+                                ? `${connection.profile?.username}@${connection.profile?.host}`
+                                : undefined
+                            }
+                          >
+                            {connected ? (
+                              <>
+                                <Cloud size={14} />
+                                <span>{connection.profile?.host}</span>
+                              </>
+                            ) : (
+                              'No machine connected'
+                            )}
+                          </span>
+                          <ReferenceComposerDetails
+                            thread={composerMetadata}
+                            connection={connection}
+                            onWorkspace={() => setWorkspaceOpen(true)}
+                            onNotify={setToast}
+                          />
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </ResearchLayout>

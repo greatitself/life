@@ -34,6 +34,18 @@ export function researchScopeMatches(scope: ResearchScope, connection: Connectio
   )
 }
 
+/** The web Research panel follows the connected host because it has no separate host picker. */
+export function shouldUseResearchConnection(
+  scope: ResearchScope | undefined,
+  connection: ConnectionState,
+  followConnection = false,
+): boolean {
+  return Boolean(
+    makeResearchScope(connection) &&
+    (!scope || (followConnection && !researchScopeMatches(scope, connection))),
+  )
+}
+
 /** Metadata IDs need not be filesystem names; give malformed legacy names a stable safe folder. */
 export function researchStorageName(goal: { id: string; directory?: string }): string {
   const safe = (name: string | undefined) =>
@@ -85,6 +97,13 @@ export const researchInstructions =
 export const researchConversationInstructions =
   legacyResearchConversationInstructions +
   '\nRead methodGuideFile and methodSchemaFile from this context before using research tools. The operation in .life-context.json belongs to this invocation; the live activeOperation in goal.json may be different. Anti-abstraction decomposes a whole, abstraction composes constituents, and the other operators have distinct typed artifacts. Never invent observations or turn the operator into an extra user message.\n'
+
+export const promptResearchInstructions =
+  legacyResearchInstructions +
+  "\nRead .life-context.json in the current conversation directory when present for the selected goal/problem and file paths. The user's message determines the research approach. Stored operation and activeOperation fields do not select an approach for a message. Read methodGuideFile and methodSchemaFile when creating or editing structured research records. Preserve the user request exactly; do not add an approach or an invented continuation.\n"
+export const promptResearchConversationInstructions =
+  legacyResearchConversationInstructions +
+  "\nThe user's message determines the research approach. Stored operation and activeOperation fields do not select an approach for a message. Read methodGuideFile and methodSchemaFile when creating or editing structured research records. Never invent observations or add an approach to the user's message.\n"
 
 // This string runs on the selected SSH machine, never in the renderer.
 export const researchFileWorker = String.raw`

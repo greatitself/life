@@ -22,6 +22,10 @@ import {
 import { researchMethodGuide, researchMethodSchema } from '../src/shared/research-method-protocol'
 import { parseResearchGoal } from '../src/renderer/research-files'
 import {
+  researchInvocationGuidance,
+  researchWorkspaceGuidance,
+} from '../src/renderer/research-guidance'
+import {
   legacyResearchConversationInstructions,
   legacyResearchInstructions,
   researchConversationInstructions,
@@ -159,6 +163,96 @@ function readContext(directory: string) {
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
 
 describe('file-backed research method instructions on a real filesystem', () => {
+  it('removes legacy approach guidance from web conversations and keeps the user prompt unchanged', () => {
+    const { root, directory, value, original } = setup()
+    const researchRoot = join(root, '.life/research')
+    const legacyInvocation = randomUUID()
+    expect(
+      context(root, value, 'anti-abstraction', undefined, legacyInvocation).error,
+    ).toBeUndefined()
+    const legacySnapshot = readFileSync(
+      join(directory, '.life-invocations', legacyInvocation + '.json'),
+      'utf8',
+    )
+
+    const workspace = researchWorkspaceGuidance(true)
+    expect(call(root, { ...initialization(), ...workspace }).error).toBeUndefined()
+    expect(workspace.methodGuide).toContain("The user's message determines the research approach.")
+    expect(workspace.methodGuide).not.toContain(
+      'immutable operator selected for this submitted request',
+    )
+    expect(readFileSync(join(researchRoot, '.life-method.md'), 'utf8')).toBe(workspace.methodGuide)
+    for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+      expect(readFileSync(join(researchRoot, name), 'utf8')).toBe(workspace.instructions)
+    }
+
+    const literal = '  Challenge the premise, then follow the evidence.\n  '
+    for (const problemId of [undefined, value.problems[0].id]) {
+      const invocationId = randomUUID()
+      // A restored selection or queue item must not add guidance to a web request.
+      const guidance = researchInvocationGuidance(true, 'verify')
+      expect(guidance).not.toHaveProperty('operation')
+      const result = call(root, {
+        op: 'context',
+        directory: value.directory,
+        ...guidance,
+        invocationId,
+        ...(problemId ? { problemId, problemDirectory: problemId } : {}),
+      })
+      expect(result.error).toBeUndefined()
+      const conversation = problemId ? join(directory, 'problems', problemId) : directory
+      const metadata = readContext(conversation)
+      expect(metadata).toMatchObject({ goalId: value.id, invocationId })
+      if (problemId) expect(metadata.problemId).toBe(problemId)
+      expect(metadata).not.toHaveProperty('operation')
+      expect(JSON.parse(readFileSync(join(conversation, metadata.invocationFile), 'utf8'))).toEqual(
+        metadata,
+      )
+      for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+        expect(readFileSync(join(conversation, name), 'utf8')).toBe(guidance.instructions)
+        expect(guidance.instructions).not.toContain(
+          'The operation in .life-context.json belongs to this invocation',
+        )
+      }
+      expect(
+        researchPrompt(
+          { goal: value, ...(problemId ? { problem: value.problems[0] } : {}) },
+          literal,
+          root,
+        ),
+      ).toBe(literal)
+    }
+    expect(readFileSync(join(directory, 'goal.json'), 'utf8')).toBe(original)
+    expect(
+      readFileSync(join(directory, '.life-invocations', legacyInvocation + '.json'), 'utf8'),
+    ).toBe(legacySnapshot)
+  })
+
+  it('preserves custom instruction files when upgrading web research guidance', () => {
+    const { root, directory, value } = setup()
+    const researchRoot = join(root, '.life/research')
+    const custom = '# My research instructions\nUse the procedure I describe in my message.\n'
+    for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+      writeFileSync(join(researchRoot, name), custom)
+      writeFileSync(join(directory, name), custom)
+    }
+    expect(
+      call(root, { ...initialization(), ...researchWorkspaceGuidance(true) }).error,
+    ).toBeUndefined()
+    expect(
+      call(root, {
+        op: 'context',
+        directory: value.directory,
+        ...researchInvocationGuidance(true),
+        invocationId: randomUUID(),
+      }).error,
+    ).toBeUndefined()
+    for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+      expect(readFileSync(join(researchRoot, name), 'utf8')).toBe(custom)
+      expect(readFileSync(join(directory, name), 'utf8')).toBe(custom)
+    }
+  })
+
   it('writes the complete operator guide and schema as standalone files, without inventing findings', () => {
     const root = temporary()
     expect(init(root)).toEqual({ value: { ok: true } })

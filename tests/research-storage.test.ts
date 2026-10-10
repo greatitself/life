@@ -19,6 +19,7 @@ import {
   researchInstructions,
   researchReadme,
   researchScopeMatches,
+  shouldUseResearchConnection,
   researchStorageName,
 } from '../src/renderer/research-storage'
 import {
@@ -33,6 +34,71 @@ import type { ConnectionProfile, ConnectionState } from '../src/shared/types'
 import type { Thread } from '../src/renderer/state'
 
 const roots: string[] = []
+
+describe('web Research uses the connected machine', () => {
+  const connection: ConnectionState = {
+    status: 'connected',
+    profile: {
+      id: 'life-web-local',
+      name: 'This machine',
+      host: 'localhost',
+      port: 22,
+      username: 'researcher',
+      auth: 'agent',
+      privateKeyPath: '',
+      workspace: '/workspace/project',
+    },
+    home: '/workspace',
+    workspace: '/workspace/project',
+  }
+  const preview = makeResearchScope({
+    ...connection,
+    home: '/browser',
+    profile: { ...connection.profile!, id: 'life-browser-preview', host: 'browser.local' },
+  })!
+
+  it('replaces a restored browser-preview scope before messages are prepared', () => {
+    expect(shouldUseResearchConnection(preview, connection, true)).toBe(true)
+  })
+
+  it('follows a newly connected SSH machine and a changed machine root', () => {
+    const scope = makeResearchScope(connection)!
+    expect(
+      shouldUseResearchConnection(
+        scope,
+        {
+          ...connection,
+          profile: { ...connection.profile!, id: 'ssh-host', host: 'research.example' },
+          home: '/home/researcher',
+        },
+        true,
+      ),
+    ).toBe(true)
+    expect(
+      shouldUseResearchConnection(scope, { ...connection, home: '/different-root' }, true),
+    ).toBe(true)
+  })
+
+  it('keeps the active scope when only the Agents project changes', () => {
+    expect(
+      shouldUseResearchConnection(
+        makeResearchScope(connection),
+        {
+          ...connection,
+          workspace: '/other/project',
+        },
+        true,
+      ),
+    ).toBe(false)
+  })
+
+  it('preserves disconnected work and desktop host selections', () => {
+    expect(shouldUseResearchConnection(preview, { status: 'disconnected' }, true)).toBe(false)
+    expect(shouldUseResearchConnection(preview, connection)).toBe(false)
+    expect(shouldUseResearchConnection(undefined, connection)).toBe(true)
+  })
+})
+
 function temporary() {
   const root = mkdtempSync(join(tmpdir(), 'life-research-storage-'))
   roots.push(root)

@@ -5,7 +5,9 @@ const { createServer } = require('node:http')
 const { readFile, stat, mkdir, writeFile } = require('node:fs/promises')
 const { resolve, extname, sep } = require('node:path')
 const { chromium } = require('playwright')
-const directory = resolve(__dirname, '..', 'dist-web')
+const directory = process.env.LIFE_WEB_PREVIEW_DIR
+  ? resolve(process.env.LIFE_WEB_PREVIEW_DIR)
+  : resolve(__dirname, '..', 'dist-web')
 const artifacts = resolve(process.env.LIFE_WEB_ARTIFACTS_DIR || 'output/playwright/web-preview')
 const checks = []
 const errors = []
@@ -68,8 +70,11 @@ async function main() {
       .waitFor()
     assert.equal(
       await page.getByRole('complementary', { name: 'Browser preview information' }).count(),
-      1,
+      0,
     )
+    const shell = await page.locator('.app-shell').boundingBox()
+    assert.equal(shell.y, 0)
+    assert.equal(shell.height, await page.evaluate(() => innerHeight))
     assert.equal(await page.getByRole('group', { name: 'Window controls' }).isVisible(), false)
     const native = await page.evaluate(async () => {
       const state = await window.relay.connection.state()
@@ -91,7 +96,7 @@ async function main() {
     assert.equal(native.state.claude, undefined)
     assert.match(native.failure, /browser preview.*desktop app/i)
     checks.push(
-      'Shared desktop UI with an explicit browser banner; native runs rejected without simulated output',
+      'Shared desktop UI fills the viewport without a preview header; native runs rejected without simulated output',
     )
     await page.screenshot({ path: resolve(artifacts, 'agents-dark.png') })
     await page.getByRole('button', { name: 'Switch to light theme', exact: true }).click()
@@ -105,9 +110,68 @@ async function main() {
     checks.push('Light and dark themes persist across reload')
     await page.getByRole('button', { name: 'Research', exact: true }).click()
     await page
-      .getByRole('heading', { name: 'Example: Reliable research workflow', exact: true })
-      .first()
+      .locator('.research-header-goal')
+      .filter({ hasText: 'Example: Reliable research workflow' })
       .waitFor()
+    const researchChat = page.getByRole('complementary', { name: 'Research conversation' })
+    assert.equal(await page.locator('.research-sidebar .research-goals-heading').count(), 0)
+    assert.equal(await page.locator('.research-sidebar .research-goal-picker').count(), 0)
+    assert.equal(await page.locator('.research-sidebar .research-overview-button').count(), 0)
+    assert.equal(await page.locator('.research-method-goal').count(), 0)
+    assert.equal(await researchChat.locator('.research-problem-start').count(), 0)
+    assert.equal(await researchChat.locator('.composer-caption').count(), 0)
+    assert.equal(
+      await researchChat
+        .getByRole('button', { name: 'Attach images or files', exact: true })
+        .count(),
+      0,
+    )
+    const composerLayout = await researchChat.locator('.composer').evaluate((element) => {
+      const style = getComputedStyle(element)
+      const box = element.getBoundingClientRect()
+      const sidebar = element.closest('.research-agent-sidebar').getBoundingClientRect()
+      return {
+        radius: style.borderRadius,
+        borders: [style.borderLeftWidth, style.borderRightWidth, style.borderBottomWidth],
+        leftGap: box.left - sidebar.left,
+        rightGap: sidebar.right - box.right,
+        bottomGap: sidebar.bottom - box.bottom,
+      }
+    })
+    assert.equal(composerLayout.radius, '0px')
+    assert.deepEqual(composerLayout.borders, ['0px', '0px', '0px'])
+    assert.ok(Math.abs(composerLayout.leftGap) <= 1, JSON.stringify(composerLayout))
+    assert.ok(Math.abs(composerLayout.rightGap) <= 1, JSON.stringify(composerLayout))
+    assert.ok(Math.abs(composerLayout.bottomGap) <= 1, JSON.stringify(composerLayout))
+    const permissionControl = researchChat.getByRole('combobox', {
+      name: /^Agent permission mode:/,
+    })
+    await permissionControl.click()
+    assert.deepEqual(await page.locator('.reference-permission-title').allTextContents(), [
+      'Ask for approval',
+      'Read-only',
+      'Approve for me',
+      'Full access',
+    ])
+    await page.getByRole('option', { name: 'Full access', exact: true }).click()
+    assert.equal(await permissionControl.textContent(), 'Full access')
+    await researchChat.getByRole('combobox', { name: /^Model:/ }).click()
+    await page.getByRole('option', { name: 'Claude default', exact: true }).click()
+    await page.getByRole('textbox', { name: /^Message Claude Code about/ }).waitFor()
+    await permissionControl.click()
+    assert.deepEqual(await page.locator('.reference-permission-title').allTextContents(), [
+      'Manual',
+      'Accept edits',
+      'Auto',
+      "Don't ask",
+      'Bypass permissions',
+    ])
+    await page.getByRole('option', { name: 'Manual', exact: true }).click()
+    await researchChat.getByRole('combobox', { name: /^Model:/ }).click()
+    await page.getByRole('option', { name: 'Codex default', exact: true }).click()
+    checks.push(
+      'Research composer reaches the sidebar borders with square corners and no duplicate goal sections; access choices use each provider’s native modes without Plan',
+    )
     await page.getByRole('button', { name: 'New goal', exact: true }).click()
     let dialog = page.getByRole('dialog')
     await dialog
@@ -118,8 +182,8 @@ async function main() {
       .fill('A real browser-local goal, without remote execution.')
     await dialog.getByRole('button', { name: 'Create goal', exact: true }).click()
     await page
-      .getByRole('heading', { name: 'Browser persistence proof', exact: true })
-      .first()
+      .locator('.research-header-goal')
+      .filter({ hasText: 'Browser persistence proof' })
       .waitFor()
     await page.waitForFunction(() =>
       Object.values(JSON.parse(localStorage.getItem('life.web.research.files.v1') || '{}')).some(
@@ -149,8 +213,8 @@ async function main() {
     await page.reload()
     await page.getByRole('button', { name: 'Research', exact: true }).click()
     await page
-      .getByRole('heading', { name: 'Browser persistence proof', exact: true })
-      .first()
+      .locator('.research-header-goal')
+      .filter({ hasText: 'Browser persistence proof' })
       .waitFor()
     assert.ok((await page.getByRole('button', { name: /Measurable obstacle/ }).count()) > 0)
     checks.push('Research goal and problem creation persist to actual local files across reload')
@@ -167,9 +231,10 @@ async function main() {
       .getByRole('textbox', { name: /^Acceptance criterion/ })
       .fill('After reload the same requirement ID and statement remain in goal.json.')
     await dialog.getByRole('button', { name: 'Save requirement', exact: true }).click()
-    await page
-      .getByRole('combobox', { name: 'Research operation', exact: true })
-      .selectOption('anti-abstraction')
+    assert.equal(
+      await page.getByRole('combobox', { name: 'Research operation', exact: true }).count(),
+      0,
+    )
     await page.waitForFunction(() =>
       Object.values(JSON.parse(localStorage.getItem('life.web.research.files.v1') || '{}')).some(
         (contents) => {
@@ -177,12 +242,9 @@ async function main() {
             return false
           try {
             const goal = JSON.parse(contents)
-            return (
-              goal.method?.activeOperation === 'anti-abstraction' &&
-              goal.method?.requirements.some(
-                (row) =>
-                  row.statement === 'Persist each research record without losing its identity.',
-              )
+            return goal.method?.requirements.some(
+              (row) =>
+                row.statement === 'Persist each research record without losing its identity.',
             )
           } catch {
             return false
@@ -203,11 +265,23 @@ async function main() {
       })
       .waitFor()
     assert.equal(
-      await page.getByRole('combobox', { name: 'Research operation', exact: true }).inputValue(),
-      'anti-abstraction',
+      await page.getByRole('combobox', { name: 'Research operation', exact: true }).count(),
+      0,
+    )
+    await page
+      .getByRole('navigation', { name: 'Research tools' })
+      .getByRole('button', { name: /^Approaches(?: \d+)?$/ })
+      .click()
+    assert.equal(
+      await page.getByRole('button', { name: 'Select operation', exact: true }).count(),
+      0,
+    )
+    assert.equal(
+      await page.locator('.research-method-operator-catalog [data-selected="true"]').count(),
+      0,
     )
     checks.push(
-      'Structured requirements and the selected research operator persist through real UI edits and reload',
+      'Structured requirements persist across reload, without a next-message approach selector',
     )
     await page.getByRole('button', { name: 'Current Active Environment', exact: true }).click()
     assert.ok(
@@ -224,18 +298,6 @@ async function main() {
     await page.screenshot({ path: resolve(artifacts, 'research-light.png') })
     await page.getByRole('button', { name: 'Switch to dark theme', exact: true }).click()
     await page.screenshot({ path: resolve(artifacts, 'research-dark.png') })
-    const downloadReady = page.waitForEvent('download')
-    await page.getByRole('button', { name: 'Export Research', exact: true }).click()
-    const download = await downloadReady
-    await download.saveAs(resolve(artifacts, 'export.json'))
-    const exported = JSON.parse(await readFile(resolve(artifacts, 'export.json'), 'utf8'))
-    assert.equal(exported.format, 'life-web-research')
-    assert.ok(
-      Object.values(exported.files).some((contents) =>
-        contents.includes('Browser persistence proof'),
-      ),
-    )
-    checks.push('Research exports the local persisted files as a downloadable backup')
     const doc = await page.evaluate(async () =>
       window.relay.researchDocuments.register(
         `<html><body><button id="proof" onclick="let access;try { void parent.relay; access='allowed' } catch { access='denied' };document.getElementById('result').textContent = typeof window.relay + '/' + access">Run isolated map</button><p id="result">pending</p></body></html>`,
@@ -272,7 +334,13 @@ async function main() {
         `<button onclick="document.getElementById('selection-proof').textContent = typeof window.relay;parent.postMessage({type:'life-research-select',problemId:'${goal.problems[0].id}'},'*')">Select preview problem</button><p id="selection-proof">pending</p>`
       localStorage.setItem('life.web.research.files.v1', JSON.stringify(files))
     })
-    await page.getByRole('button', { name: /^Overview \d/ }).click()
+    await page
+      .getByRole('button', { name: 'Research goal: Browser persistence proof', exact: true })
+      .click()
+    await page
+      .getByRole('menu')
+      .getByRole('menuitem', { name: 'Browser persistence proof', exact: true })
+      .click()
     await page
       .getByRole('navigation', { name: 'Research tools' })
       .getByRole('button', { name: 'Map', exact: true })
@@ -282,7 +350,7 @@ async function main() {
     assert.equal(await actualMap.locator('#selection-proof').textContent(), 'undefined')
     await page
       .getByRole('complementary', { name: 'Research conversation' })
-      .getByRole('heading', { name: 'Measurable obstacle', exact: true })
+      .getByRole('textbox', { name: 'Message Codex about Measurable obstacle', exact: true })
       .waitFor()
     checks.push(
       'Actual Research HTML map renders through the shared component and selects the correct problem',

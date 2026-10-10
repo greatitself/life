@@ -46,6 +46,8 @@ export interface SourceCodeStoreOptions {
   sourceDir: string
   /** Real filesystem directory, outside app.asar, for esbuild and the bundled dependencies. */
   nodeModulesDir: string
+  /** Trusted host-specific constants used when compiling the shared renderer. */
+  rendererDefines?: Record<string, string>
   directory: string
   onUpdate?: (state: LifeSourceSnapshot) => void
   compilerTimeoutMs?: number
@@ -1457,7 +1459,11 @@ export class SourceCodeStore {
       minify: true,
       legalComments: 'none',
       nodePaths: [...(packageModules ? [packageModules] : []), this.options.nodeModulesDir],
-      define: { 'process.env.NODE_ENV': '"production"', __LIFE_SOURCE_BUILD__: 'true' },
+      define: {
+        'process.env.NODE_ENV': '"production"',
+        __LIFE_SOURCE_BUILD__: 'true',
+        ...this.options.rendererDefines,
+      },
       loader: {
         '.svg': 'file',
         '.png': 'file',

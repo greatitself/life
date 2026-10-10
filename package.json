@@ -1,6 +1,7 @@
 {
   "name": "life-desktop",
-  "version": "0.8.0",
+  "version": "0.9.0",
+  "lifeReleaseTarget": "all",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -15,7 +16,8 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "dev:web": "vite --config vite.web.config.ts --host 0.0.0.0",
+    "dev:web": "vite --config vite.web.config.ts --host 127.0.0.1",
+    "dev:preview": "LIFE_WEB_STATIC=true vite --config vite.web.config.ts --host 127.0.0.1",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
@@ -26,7 +28,12 @@
     "dist:dir": "npm run build && electron-builder --dir",
     "test:desktop": "node tests/desktop-smoke.cjs",
     "test:recovery": "node tests/renderer-recovery-smoke.cjs",
-    "build:web": "vite build --config vite.web.config.ts",
+    "build:web": "vite build --config vite.web.config.ts && node scripts/build-web-server.cjs",
+    "build:preview": "LIFE_WEB_STATIC=true vite build --config vite.web.config.ts",
+    "start:web": "node out/web/server.cjs",
+    "pack:web": "node scripts/package-web-release.cjs",
+    "test:web-release": "node tests/web-release-smoke.cjs",
+    "test:web-app": "node tests/web-app-smoke.cjs",
     "test:web-preview": "node tests/web-preview-smoke.cjs"
   },
   "dependencies": {

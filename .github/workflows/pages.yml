@@ -33,7 +33,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npx vitest run tests/web-research.test.ts
-      - run: npm run build:web
+      - run: npm run build:preview
       - run: npx playwright install chromium --with-deps
       - run: npm run test:web-preview
       - uses: actions/configure-pages@v5

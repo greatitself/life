@@ -1,18 +1,22 @@
 # Life
 
-Life is an Electron research workspace for **Codex and Claude Code over SSH**, with an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
+Life is a web and desktop research workspace for **Codex and Claude Code**, with local and SSH connections, an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Download installers from [GitHub Releases](https://github.com/greatitself/life/releases/latest). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
+Download the complete web app from [Life v0.9.0](https://github.com/greatitself/life/releases/tag/v0.9.0), extract its ZIP or tar.gz bundle, then run `npm ci` and `npm run start:web`. See the [v0.9.0 release notes](docs/release-notes-v0.9.0.md).
 
-Try the [public browser preview](https://greatitself.github.io/life/) to explore the same interface with editable sample Research. Your edits and preferences stay in that browser; **Export Research** downloads them. SSH connections, provider runs, native updates, and source compilation require the desktop application.
+Desktop installers are included in the [v0.9.0 release](https://github.com/greatitself/life/releases/tag/v0.9.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
+
+Run `npm run dev:web` and open [Life on localhost](http://localhost:5173/life/) for the web app with real Codex and Claude Code conversations, project files, Git, an interactive terminal, Research, and customization. It uses the CLIs and credentials on the server, and also supports SSH connections. See [web app setup](docs/web-app.md).
+
+Try the [public browser preview](https://greatitself.github.io/life/) to explore the same interface with editable sample Research stored in that browser. The public demo runs independently of the local web application's backend.
 
 ## Upgrade your installed Life
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.8.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0, 0.5.1, 0.6.0, and 0.7.0 releases, upgrades each, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.9.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0, 0.5.1, 0.6.0, 0.7.0, and 0.8.0 releases, upgrades each, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
 
 Life 0.8 includes all **37 incorporated customizations**: the 27 earlier workspace changes and 10 additions from the October 9 backup. They are installed features with individual enable, disable, delete, and restore controls. Exact matching old source layers remain exportable archives; unrelated or subsequently edited extensions are preserved. See the [incorporation audit](docs/backup-incorporation-2026-10-09.md) and [release notes](docs/release-notes-v0.8.0.md).
 
@@ -107,9 +111,9 @@ claude auth login
 
 Life starts the installed CLI through SSH, using its remote account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard local CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
 
-Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The interface reports the provider's actual result. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the remote CLI version, account, and managed policy.
+Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The web controls update immediately without routine settings notices. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the CLI version, account, and managed policy.
 
-**Review actions** surfaces approval requests, **Allow edits** allows workspace edits, and **Plan only** selects the provider’s planning/read-only behavior. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
+The web access menu uses each provider's native terminology and omits Plan: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
 
 Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Conversation history and project maps are stored locally.
 
@@ -119,25 +123,25 @@ Use Node.js **22.12 or newer**:
 
 ```bash
 npm install
-npm run dev
+npm run dev:web
 ```
 
 ```bash
-npm run build
-npm start
-npm run dist
+npm run build:web
+npm run start:web
+npm run pack:web
 ```
 
-Installers appear in `release/`. Build on the target platform. `npm run dev:web` provides the browser preview at `http://localhost:5173/life/`; `npm run build:web` builds its static files into `dist-web/`. The browser uses the shared interface with locally persistent, editable sample Research. SSH, provider execution, native updates, executable backend extensions, and local source compilation require Electron. Development from this checkout needs Node.js; source customization inside an installed Life uses its bundled tools.
+The web app opens at [http://localhost:5173/life/](http://localhost:5173/life/). `npm run build:web` builds the frontend into `dist-web/` and the Node.js backend into `out/web/`. `npm run pack:web` creates ZIP and tar.gz bundles with checksums in `release/web/`. Saved connections, history, Research, and private backups are excluded from those bundles. See [web app setup](docs/web-app.md) for provider authentication and production configuration.
 
-Pushing a version tag runs verification, builds Windows x64, Linux x64, and both macOS architectures, tests Windows upgrades, and publishes installers, updater metadata, blockmaps, and SHA-256 checksums.
+Pushing a version tag runs verification and publishes the target declared by `lifeReleaseTarget` in `package.json`. Version 0.9.0 uses `all`: CI verifies the web bundles and builds Electron installers for Windows x64, Linux x64, and macOS on Intel and Apple Silicon, including Windows upgrade checks. Desktop development and packaging use `npm run dev`, `npm run build`, and `npm run dist`.
 
 ## Verify changes
 
 ```bash
 npm run typecheck
 npm test
-npm run build
+npm run build:web
 npm run test:desktop
 npm run test:web-preview
 npm run format:check

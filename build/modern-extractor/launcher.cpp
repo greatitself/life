@@ -389,6 +389,23 @@ struct Child {
     return true;
   }
 
+  bool wait_for_completion() const noexcept {
+    // A signaled decoder can precede the job's final process rundown. Retain
+    // the job and every path pin while allowing a short natural completion;
+    // no nonzero count, expired grace, or failed query can become success.
+    const ULONGLONG started = GetTickCount64();
+    bool first = true;
+    for (;;) {
+      if (!first && !LIFE_PRED(GetTickCount64() - started < 100, L"job-completion-deadline")) return false;
+      first = false;
+      DWORD active = 0;
+      if (!accounting(active)) return false;
+      if (!LIFE_PRED(GetTickCount64() - started < 100, L"job-completion-deadline")) return false;
+      if (!active) return LIFE_PRED(true, L"job-drained");
+      Sleep(1);
+    }
+  }
+
   void terminate_and_drain() noexcept {
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
     if (diagnostic) diagnostic->termination_requested = true;
@@ -630,13 +647,12 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
       child.terminate_and_drain(); return;
     }
     DWORD exit_code = STILL_ACTIVE;
-    DWORD active = 0;
     const BOOL exited = LIFE_BOOL(GetExitCodeProcess(child.process.value, &exit_code), L"process-exit-query");
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
     if (diagnostic) diagnostic->decoder_exit = exit_code;
 #endif
     if (!exited || !LIFE_PRED(exit_code == 0, L"process-exit-zero") ||
-        !child.accounting(active) || !LIFE_PRED(active == 0, L"job-drained")) { child.terminate_and_drain(); return; }
+        !child.wait_for_completion()) { child.terminate_and_drain(); return; }
     child.drained = true;
     result = L"ok";
   };

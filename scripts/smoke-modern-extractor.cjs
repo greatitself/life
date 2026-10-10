@@ -408,8 +408,10 @@ async function main(argv = process.argv.slice(2)) {
           assert(
             evidence.markerFields &&
               evidence.markerFields.result === 'ok' &&
-              evidence.markerFields['decoder-exit'] === '0',
-            'Diagnostic trace must report successful result',
+              evidence.markerFields['decoder-exit'] === '0' &&
+              evidence.markerFields['accounting-last-active'] === '0' &&
+              evidence.markerFields['accounting-termination-requested'] === '0',
+            'Diagnostic trace must report successful result and natural job drain',
           )
       } catch (error) {
         failures.push(error)

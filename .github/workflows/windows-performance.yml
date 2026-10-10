@@ -41,6 +41,10 @@ jobs:
         shell: pwsh
         run: ./tests/windows-upgrade-performance.ps1
       - run: npm ci
+      - name: Verify native NSIS marker append and register preservation
+        run: node scripts/verify-nsis-trace-fixture.cjs
+      - name: Verify native installer payload integrity and guarded deployment
+        run: node scripts/verify-nsis-payload-fixture.cjs
       - run: npm run build
       - run: npx electron-builder --win --x64 --publish never
         env:
@@ -53,10 +57,6 @@ jobs:
             ${{ runner.temp }}/life-nsis-payload/app-64.7z
             ${{ runner.temp }}/life-nsis-payload/app-64.json
           if-no-files-found: error
-      - name: Verify native NSIS marker append and register preservation
-        run: node scripts/verify-nsis-trace-fixture.cjs
-      - name: Verify native installer payload integrity and guarded deployment
-        run: node scripts/verify-nsis-payload-fixture.cjs
       - name: Verify actual packaged Windows compiler and source customization
         shell: pwsh
         run: ./tests/windows-source-runtime.ps1

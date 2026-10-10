@@ -23,41 +23,16 @@ if ($metadataRoot.Length -le 3) { throw 'Fixture must not customize or snapshot 
 $rootItem = Get-Item -LiteralPath $metadataRoot -Force
 if (-not $rootItem.PSIsContainer -or ([Int64]$rootItem.Attributes -band 0x400) -ne 0) { throw 'Metadata fixture root must be an ordinary directory.' }
 
-if ($metadataAction -eq 'customize') {
-  if (@(Get-ChildItem -LiteralPath $metadataRoot -Force).Count -ne 0) { throw 'Custom metadata must be prepared on an empty fixture target.' }
-  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-  $customAcl = Get-Acl -LiteralPath $metadataRoot
-  $customAcl.SetAccessRuleProtection($true, $false)
-  foreach ($rule in @($customAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
-    [void]$customAcl.RemoveAccessRuleSpecific($rule)
-  }
-  $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-  $customAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentSid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
-  $customAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'), [Security.AccessControl.FileSystemRights]::ReadAndExecute, $inheritance, [Security.AccessControl.PropagationFlags]::InheritOnly, [Security.AccessControl.AccessControlType]::Allow))
-  Set-Acl -LiteralPath $metadataRoot -AclObject $customAcl
-  [IO.File]::WriteAllText(($metadataRoot + ':life-fixture-root'), 'Life root stream sentinel', [Text.UTF8Encoding]::new($false))
-} elseif ($metadataAction -ne 'snapshot') { throw 'Unsupported metadata fixture action.' }
-
-function Get-FixtureHash([String]$filename) {
-  $hash = [Security.Cryptography.SHA256]::Create()
-  $handle = $null
-  try {
-    $handle = [IO.File]::Open($filename, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    if ($handle.Length -gt 16MB) { throw 'Fixture stream or file exceeds the hashing limit.' }
-    return ([BitConverter]::ToString($hash.ComputeHash($handle))).Replace('-', '').ToLowerInvariant()
-  } finally {
-    if ($null -ne $handle) { $handle.Dispose() }
-    $hash.Dispose()
-  }
-}
-
 # Windows PowerShell 5 cannot reliably enumerate directory ADS through -Stream.
-# Read the native enumeration with immediate last-error capture instead.
+# .NET Framework path constructors also reject ADS colons. Use native handles
+# for stream creation and reads, and preserve immediate native error capture.
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 public static class LifeFixtureStreams {
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
   private struct StreamData {
@@ -67,6 +42,8 @@ public static class LifeFixtureStreams {
   }
   public sealed class Entry { public string Name; public long Size; }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+  private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   private static extern IntPtr FindFirstStreamW(string path, int level, out StreamData data, uint flags);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   [return: MarshalAs(UnmanagedType.Bool)]
@@ -74,6 +51,47 @@ public static class LifeFixtureStreams {
   [DllImport("kernel32.dll", SetLastError=true)]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool FindClose(IntPtr handle);
+  private static FileStream Open(string path, bool write) {
+    SafeFileHandle handle = CreateFileW(path, write ? 0x40000000u : 0x80000000u, 1, IntPtr.Zero, write ? 2u : 3u, 0x02000080u, IntPtr.Zero);
+    int error = Marshal.GetLastWin32Error();
+    if (handle.IsInvalid) {
+      handle.Dispose();
+      throw new Win32Exception(error, "Native fixture stream open failed");
+    }
+    try { return new FileStream(handle, write ? FileAccess.Write : FileAccess.Read, 4096, false); }
+    catch { handle.Dispose(); throw; }
+  }
+  public static FileStream OpenRead(string path) { return Open(path, false); }
+  public static void WriteNamedStream(string path, string name, byte[] bytes) {
+    if (String.IsNullOrEmpty(name) || name.IndexOfAny(new char[] { ':', '\\', '/' }) >= 0 || bytes == null || bytes.Length > 8388608) throw new ArgumentException("Invalid fixture stream write");
+    using (FileStream stream = Open(path + ":" + name, true)) {
+      stream.Write(bytes, 0, bytes.Length);
+      stream.Flush(true);
+      if (stream.Position != bytes.Length || stream.Length != bytes.Length) throw new IOException("Native fixture stream write was incomplete");
+    }
+  }
+  public static byte[] ReadBytes(string path) {
+    using (FileStream stream = OpenRead(path)) {
+      if (stream.Length < 0 || stream.Length > 8388608) throw new InvalidOperationException("Fixture stream read exceeds bounds");
+      byte[] result = new byte[(int)stream.Length];
+      int offset = 0;
+      while (offset < result.Length) {
+        int read = stream.Read(result, offset, result.Length - offset);
+        if (read == 0) throw new EndOfStreamException("Fixture stream ended unexpectedly");
+        offset += read;
+      }
+      if (stream.ReadByte() != -1) throw new IOException("Fixture stream changed during read");
+      return result;
+    }
+  }
+  public static void RequireMissingStream(string path) {
+    try { using (FileStream stream = OpenRead(path)) {} }
+    catch (Win32Exception error) {
+      if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3) return;
+      throw;
+    }
+    throw new InvalidOperationException("Missing fixture stream unexpectedly opened");
+  }
   public static Entry[] Read(string path) {
     StreamData data;
     IntPtr handle = FindFirstStreamW(path, 0, out data, 0);
@@ -104,6 +122,46 @@ public static class LifeFixtureStreams {
   }
 }
 '@
+
+function Get-FixtureHash([String]$filename) {
+  $hash = [Security.Cryptography.SHA256]::Create()
+  $handle = $null
+  try {
+    $handle = [LifeFixtureStreams]::OpenRead($filename)
+    if ($handle.Length -gt 16MB) { throw 'Fixture stream or file exceeds the hashing limit.' }
+    return ([BitConverter]::ToString($hash.ComputeHash($handle))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    if ($null -ne $handle) { $handle.Dispose() }
+    $hash.Dispose()
+  }
+}
+
+if ($metadataAction -eq 'customize' -or $metadataAction -eq 'probe-ads') {
+  if (@(Get-ChildItem -LiteralPath $metadataRoot -Force).Count -ne 0) { throw 'Custom metadata must be prepared on an empty fixture target.' }
+  if ($metadataAction -eq 'customize') {
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $customAcl = Get-Acl -LiteralPath $metadataRoot
+    $customAcl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($customAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
+      [void]$customAcl.RemoveAccessRuleSpecific($rule)
+    }
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $customAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentSid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+    $customAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'), [Security.AccessControl.FileSystemRights]::ReadAndExecute, $inheritance, [Security.AccessControl.PropagationFlags]::InheritOnly, [Security.AccessControl.AccessControlType]::Allow))
+    Set-Acl -LiteralPath $metadataRoot -AclObject $customAcl
+  }
+  [byte[]]$sentinel = ([Text.UTF8Encoding]::new($false)).GetBytes('Life root stream sentinel')
+  [LifeFixtureStreams]::WriteNamedStream($metadataRoot, 'life-fixture-root', $sentinel)
+  [byte[]]$readBack = [LifeFixtureStreams]::ReadBytes($metadataRoot + ':life-fixture-root')
+  if ([Convert]::ToBase64String($readBack) -cne [Convert]::ToBase64String($sentinel)) { throw 'Native directory ADS exact-byte roundtrip failed.' }
+  $sentinelHash = [Security.Cryptography.SHA256]::Create()
+  try { $expectedHash = ([BitConverter]::ToString($sentinelHash.ComputeHash($sentinel))).Replace('-', '').ToLowerInvariant() }
+  finally { $sentinelHash.Dispose() }
+  if ((Get-FixtureHash ($metadataRoot + ':life-fixture-root')) -cne $expectedHash) { throw 'Native directory ADS hash proof failed.' }
+  if ($metadataAction -eq 'probe-ads') { [LifeFixtureStreams]::RequireMissingStream($metadataRoot + ':life-fixture-missing') }
+  $sentinelEntries = @([LifeFixtureStreams]::Read($metadataRoot) | Where-Object { $_.Name -ceq 'life-fixture-root' })
+  if ($sentinelEntries.Count -ne 1 -or $sentinelEntries[0].Size -ne $sentinel.Length) { throw 'Native directory ADS enumeration proof failed.' }
+} elseif ($metadataAction -ne 'snapshot') { throw 'Unsupported metadata fixture action.' }
 
 $pending = [Collections.Generic.Stack[Object]]::new()
 $pending.Push([PSCustomObject]@{ Item = (Get-Item -LiteralPath $metadataRoot -Force); Relative = ''; Depth = 0 })
@@ -1040,6 +1098,27 @@ try {
       })
     }
 
+    const rootSentinelBytes = Buffer.from('Life root stream sentinel', 'utf8')
+    const expectedRootStream = {
+      Name: 'life-fixture-root',
+      Size: rootSentinelBytes.length,
+      Sha256: createHash('sha256').update(rootSentinelBytes).digest('hex'),
+    }
+    const adsProbe = metadata(
+      'native-directory-ads-probe',
+      directory('native-directory-ads-probe'),
+      'probe-ads',
+    )
+    assert.equal(adsProbe.length, 1, 'Native ADS roundtrip must leave the ordinary directory empty')
+    assert.deepEqual(
+      adsProbe[0].Streams,
+      [expectedRootStream],
+      'Native ADS create/read/enumeration must preserve independently known exact UTF-8 length and hash, without creating the missing read probe',
+    )
+    console.log(
+      'Native directory ADS probe passed: exact UTF-8 bytes, independent length/hash, stream enumeration and noncreating missing-stream reads.',
+    )
+
     for (const custom of [false, true]) {
       const label = custom ? 'custom-acl' : 'default-acl'
       const directTarget = directory(`metadata-direct-${label}`)
@@ -1101,9 +1180,15 @@ try {
           true,
           'Custom target ACL must be protected before extraction',
         )
-        assert.ok(
-          beforeDirect[0].Streams.some((stream) => stream.Name === 'life-fixture-root'),
-          'Custom empty target must contain the root ADS preservation sentinel',
+        assert.deepEqual(
+          beforeDirect[0].Streams,
+          [expectedRootStream],
+          'Custom empty target must contain the root ADS sentinel with independently known exact length and hash',
+        )
+        assert.deepEqual(
+          beforeControl[0].Streams,
+          [expectedRootStream],
+          'Stock custom target must contain the same independently verified root ADS sentinel',
         )
       }
     }

@@ -227,12 +227,14 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 public static class LifeFixtureAttributes {
   public sealed class Result { public long Attributes; public int Error; }
   public sealed class FileRead { public long Length; public string Sha256; }
+  public sealed class AccessRead { public int Control; public string OrderedDacl; public string Access; public string Identity; }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   private static extern uint GetFileAttributesW(string path);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
@@ -250,6 +252,10 @@ public static class LifeFixtureAttributes {
   private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
   private static extern uint SetNamedSecurityInfoW(string path, int objectType, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  private static extern uint GetNamedSecurityInfoW(string path, int objectType, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll", ExactSpelling=true)]
+  private static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
   [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
   private static extern IntPtr LocalFree(IntPtr memory);
   public static string NormalizePath(string path) {
@@ -286,6 +292,57 @@ public static class LifeFixtureAttributes {
       if (stream.Position != length || stream.Length != length) throw new IOException("ACL fixture file changed during native read");
       return new FileRead { Length = length, Sha256 = sha256 };
     }
+  }
+  public static AccessRead ReadAccess(string path) {
+    IntPtr owner, group, namedDacl, sacl;
+    IntPtr descriptor = IntPtr.Zero;
+    uint status = GetNamedSecurityInfoW(path, 1, 7, out owner, out group, out namedDacl, out sacl, out descriptor);
+    Exception failure = null;
+    AccessRead result = null;
+    try {
+      if (status != 0) throw new Win32Exception(unchecked((int)status), "Native fixture DACL read failed: " + path);
+      if (descriptor == IntPtr.Zero) throw new InvalidOperationException("Native fixture descriptor is absent");
+      ushort control;
+      uint revision;
+      bool gotControl = GetSecurityDescriptorControl(descriptor, out control, out revision);
+      int controlError = Marshal.GetLastWin32Error();
+      if (!gotControl) throw new Win32Exception(controlError, "Native fixture DACL control read failed");
+      if (revision != 1 || (control & 0x8000) == 0) throw new InvalidOperationException("Native fixture descriptor must be self-relative revision 1");
+      uint size = GetSecurityDescriptorLength(descriptor);
+      if (size < 20 || size > 65536) throw new InvalidOperationException("Native fixture descriptor exceeds bounds");
+      bool present, defaulted;
+      IntPtr dacl;
+      bool gotDacl = GetSecurityDescriptorDacl(descriptor, out present, out dacl, out defaulted);
+      int daclError = Marshal.GetLastWin32Error();
+      if (!gotDacl) throw new Win32Exception(daclError, "Native fixture raw DACL lookup failed");
+      if (!present || dacl == IntPtr.Zero || dacl != namedDacl) throw new InvalidOperationException("Native fixture DACL is absent, NULL or inconsistent");
+      long offset = dacl.ToInt64() - descriptor.ToInt64();
+      if (offset < 20 || offset > size - 8) throw new InvalidOperationException("Native fixture raw DACL lies outside descriptor");
+      int aclSize = unchecked((ushort)Marshal.ReadInt16(dacl, 2));
+      if (aclSize < 8 || offset + aclSize > size) throw new InvalidOperationException("Native fixture raw DACL exceeds descriptor bounds");
+      byte[] orderedDacl = new byte[aclSize];
+      Marshal.Copy(dacl, orderedDacl, 0, orderedDacl.Length);
+      byte[] bytes = new byte[(int)size];
+      Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+      RawSecurityDescriptor raw = new RawSecurityDescriptor(bytes, 0);
+      result = new AccessRead {
+        Control = control, OrderedDacl = Convert.ToBase64String(orderedDacl),
+        Access = raw.GetSddlForm(AccessControlSections.Access),
+        Identity = raw.GetSddlForm(AccessControlSections.Owner | AccessControlSections.Group)
+      };
+    } catch (Exception error) { failure = error; }
+    finally {
+      if (descriptor != IntPtr.Zero) {
+        IntPtr remaining = LocalFree(descriptor);
+        int freeError = Marshal.GetLastWin32Error();
+        if (remaining != IntPtr.Zero) {
+          Exception freeFailure = new Win32Exception(freeError, "Native fixture read descriptor release failed");
+          failure = failure == null ? freeFailure : new AggregateException("DACL read and descriptor release failed", failure, freeFailure);
+        }
+      }
+    }
+    if (failure != null) throw failure;
+    return result;
   }
   public static void ValidateAccess(string sddl) { AccessDescriptor(null, sddl, false); }
   public static void RestoreAccess(string path, string sddl) { AccessDescriptor(path, sddl, true); }
@@ -355,9 +412,56 @@ function Assert-FixturePathNormalization([String]$phase) {
   }
   [Console]::Error.WriteLine('Fixture ACL native normalization ' + $phase + ': ' + (ConvertTo-Json -InputObject $again -Compress))
 }
+function Get-FixtureAclState {
+  $rootAttributes = [LifeFixtureAttributes]::Read($fixtureRoot)
+  $parentAttributes = [LifeFixtureAttributes]::Read($fixtureParent)
+  $fileAttributes = [LifeFixtureAttributes]::Read($fixtureFile)
+  foreach ($ordinary in @($rootAttributes, $parentAttributes)) {
+    if ($ordinary.Attributes -eq -1 -or ($ordinary.Attributes -band 0x410) -ne 0x10) { throw 'ACL preparation requires ordinary owned directories.' }
+  }
+  if ($fileAttributes.Attributes -eq -1 -or ($fileAttributes.Attributes -band 0x410) -ne 0) { throw 'ACL preparation requires an ordinary expected file.' }
+  $entries = @([IO.Directory]::GetFileSystemEntries($fixtureParent) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+  if ($entries.Count -ne 1 -or $entries[0] -cne [IO.Path]::GetFileName($fixtureFile)) { throw 'ACL preparation parent must contain only the expected ordinary file.' }
+  $parent = [LifeFixtureAttributes]::ReadAccess($fixtureParent)
+  $file = [LifeFixtureAttributes]::ReadAccess($fixtureFile)
+  $read = [LifeFixtureAttributes]::ReadFile($fixtureFile)
+  return [PSCustomObject][ordered]@{
+    ParentAccess = $parent.Access; FileAccess = $file.Access
+    ParentControl = $parent.Control; FileControl = $file.Control
+    ParentOrderedDacl = $parent.OrderedDacl; FileOrderedDacl = $file.OrderedDacl
+    ParentIdentity = $parent.Identity; FileIdentity = $file.Identity
+    ParentAttributes = $parentAttributes.Attributes; FileAttributes = $fileAttributes.Attributes
+    ParentEntries = $entries; FileLength = $read.Length; FileSha256 = $read.Sha256
+  }
+}
 if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
   Assert-FixturePathNormalization 'path-only probe'
   $result = [PSCustomObject]@{ Paths = $fixturePaths; PathNormalizationStable = $true }
+} elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'prepare-acl') {
+  # Explicitly initialize the owned fixture to Windows' documented current
+  # inheritance model BEFORE taking the denial/restoration baseline.
+  # Both objects are observed before the parent can propagate any changes.
+  $beforePreparation = Get-FixtureAclState
+  [LifeFixtureAttributes]::ValidateAccess($beforePreparation.ParentAccess)
+  [LifeFixtureAttributes]::ValidateAccess($beforePreparation.FileAccess)
+  [LifeFixtureAttributes]::RestoreAccess($fixtureParent, $beforePreparation.ParentAccess)
+  [LifeFixtureAttributes]::RestoreAccess($fixtureFile, $beforePreparation.FileAccess)
+  $afterPreparation = Get-FixtureAclState
+  [Console]::Error.WriteLine('Fixture ACL explicit preparation before saved baseline: ' + (ConvertTo-Json -InputObject ([ordered]@{ Before = $beforePreparation; After = $afterPreparation }) -Depth 6 -Compress))
+  foreach ($name in @('ParentControl', 'FileControl')) {
+    if ($afterPreparation.$name -ne ($beforePreparation.$name -bor 0x0400)) { throw 'ACL preparation may only establish the documented AI control flag.' }
+  }
+  foreach ($name in @('ParentOrderedDacl', 'FileOrderedDacl', 'ParentIdentity', 'FileIdentity', 'ParentAttributes', 'FileAttributes', 'FileLength', 'FileSha256')) {
+    if ($afterPreparation.$name -cne $beforePreparation.$name) { throw ('ACL preparation changed existing metadata: ' + $name) }
+  }
+  if ((ConvertTo-Json -InputObject $afterPreparation.ParentEntries -Compress) -cne (ConvertTo-Json -InputObject $beforePreparation.ParentEntries -Compress)) { throw 'ACL preparation changed directory enumeration.' }
+  [LifeFixtureAttributes]::RestoreAccess($fixtureParent, $afterPreparation.ParentAccess)
+  [LifeFixtureAttributes]::RestoreAccess($fixtureFile, $afterPreparation.FileAccess)
+  $afterRepeat = Get-FixtureAclState
+  [Console]::Error.WriteLine('Fixture ACL repeated preparation stability: ' + (ConvertTo-Json -InputObject ([ordered]@{ Before = $afterPreparation; After = $afterRepeat }) -Depth 6 -Compress))
+  if ((ConvertTo-Json -InputObject $afterRepeat -Depth 6 -Compress) -cne (ConvertTo-Json -InputObject $afterPreparation -Depth 6 -Compress)) { throw 'ACL preparation must be exactly stable on repeat.' }
+  Assert-FixturePathNormalization 'after explicit ACL preparation'
+  $result = [PSCustomObject]@{ Before = $beforePreparation; After = $afterPreparation; Repeat = $afterRepeat; Paths = $fixturePaths; PathNormalizationStable = $true }
 } elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
   foreach ($ordinary in @($fixtureRoot, $fixtureParent)) {
     $attributes = [LifeFixtureAttributes]::Read($ordinary)
@@ -368,6 +472,7 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
   if ($beforeFile.Attributes -eq -1 -or ($beforeFile.Attributes -band 0x410) -ne 0) { throw 'Access denial requires an ordinary expected file.' }
   $parentAcl = [IO.Directory]::GetAccessControl($fixtureParent)
   $fileAcl = [IO.File]::GetAccessControl($fixtureFile)
+  $baselineState = Get-FixtureAclState
   $beforeRead = [LifeFixtureAttributes]::ReadFile($fixtureFile)
   $beforeEntries = @([IO.Directory]::GetFileSystemEntries($fixtureParent) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
   if ($beforeEntries.Count -gt 16) { throw 'ACL fixture directory exceeds enumeration bounds.' }
@@ -381,10 +486,11 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
     ParentAttributes = $beforeParent.Attributes
     FileLength = $beforeRead.Length; FileSha256 = $beforeRead.Sha256
     ParentEntries = $beforeEntries
+    NativeBaseline = $baselineState
   }
   [LifeFixtureAttributes]::ValidateAccess($backup.ParentAccess)
   [LifeFixtureAttributes]::ValidateAccess($backup.FileAccess)
-  [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_BACKUP, (ConvertTo-Json -InputObject $backup -Compress), [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_BACKUP, (ConvertTo-Json -InputObject $backup -Depth 6 -Compress), [Text.UTF8Encoding]::new($false))
   Assert-FixturePathNormalization 'before access denial'
   # NTFS also exposes a child's attributes through parent directory listing.
   # Deny both independent rights, without denying traversal or WRITE_DAC.
@@ -395,7 +501,7 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
   $denied = [LifeFixtureAttributes]::Read($fixtureFile)
   if ($denied.Attributes -ne -1 -or $denied.Error -ne 5) { throw ('Expected actual native GetFileAttributesW access denial, got attributes=' + $denied.Attributes + ', error=' + $denied.Error) }
   Assert-FixturePathNormalization 'after actual native access denial'
-  $result = [PSCustomObject]@{ Attributes = $denied.Attributes; Error = $denied.Error; Sid = $currentSid.Value; Paths = $fixturePaths; PathNormalizationStable = $true }
+  $result = [PSCustomObject]@{ Attributes = $denied.Attributes; Error = $denied.Error; Sid = $currentSid.Value; Paths = $fixturePaths; PathNormalizationStable = $true; NativeBaseline = $baselineState }
 } elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'restore') {
   $backup = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($env:LIFE_ACL_FIXTURE_BACKUP))
   if ($backup.Parent -cne $fixtureParent -or $backup.File -cne $fixtureFile -or $backup.Sid -cne $currentSid.Value) { throw 'ACL backup paths or identity do not match this owned fixture.' }
@@ -427,8 +533,11 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'probe-path') {
   if ($restoredEntries.Count -ne @($backup.ParentEntries).Count -or [String]::Join([char]0, [String[]]$restoredEntries) -cne [String]::Join([char]0, [String[]]$backup.ParentEntries)) { throw 'Access denial cleanup did not restore exact directory enumeration.' }
   $restoredRead = [LifeFixtureAttributes]::ReadFile($fixtureFile)
   if ($restoredRead.Length -ne $backup.FileLength -or $restoredRead.Sha256 -cne $backup.FileSha256) { throw 'Access denial cleanup did not restore exact native file read/hash.' }
+  $restoredNativeState = Get-FixtureAclState
+  [Console]::Error.WriteLine('Fixture ACL exact native baseline restoration: ' + (ConvertTo-Json -InputObject ([ordered]@{ Saved = $backup.NativeBaseline; Restored = $restoredNativeState }) -Depth 6 -Compress))
+  if ((ConvertTo-Json -InputObject $restoredNativeState -Depth 6 -Compress) -cne (ConvertTo-Json -InputObject $backup.NativeBaseline -Depth 6 -Compress)) { throw 'Access denial cleanup did not restore every exact native baseline field.' }
   Assert-FixturePathNormalization 'after exact ACL restoration'
-  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; ParentAttributes = $restoredParentAttributes.Attributes; Sid = $currentSid.Value; DirectoryEntries = $restoredEntries; FileLength = $restoredRead.Length; FileSha256 = $restoredRead.Sha256; Paths = $fixturePaths; PathNormalizationStable = $true }
+  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; ParentAttributes = $restoredParentAttributes.Attributes; Sid = $currentSid.Value; DirectoryEntries = $restoredEntries; FileLength = $restoredRead.Length; FileSha256 = $restoredRead.Sha256; Paths = $fixturePaths; PathNormalizationStable = $true; NativeRestored = $restoredNativeState }
 } else { throw 'Unsupported access denial fixture action.' }
 [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_OUTPUT, (ConvertTo-Json -InputObject $result -Compress), [Text.UTF8Encoding]::new($false))`
 
@@ -1802,6 +1911,45 @@ try {
     }
     assert.deepEqual(inventory(deniedTarget), deniedBefore)
     assert.deepEqual(inventory(fileSymlinkOutside), deniedOutsideBefore)
+    const preparedAcl = deniedAcl('prepare-acl')
+    assert.equal(preparedAcl.PathNormalizationStable, true)
+    assert.deepEqual(preparedAcl.Paths, expectedDeniedPaths)
+    for (const name of ['ParentControl', 'FileControl']) {
+      assert.equal(
+        preparedAcl.After[name],
+        preparedAcl.Before[name] | 0x0400,
+        'Fixture preparation must only establish the documented AI control flag',
+      )
+    }
+    for (const name of Object.keys(preparedAcl.Before)) {
+      if (['ParentAccess', 'FileAccess', 'ParentControl', 'FileControl'].includes(name)) continue
+      assert.deepEqual(
+        preparedAcl.After[name],
+        preparedAcl.Before[name],
+        `Fixture preparation must preserve the complete ordered ACL and existing metadata: ${name}`,
+      )
+    }
+    assert.deepEqual(preparedAcl.After.ParentEntries, [path.basename(deniedFile)])
+    assert.deepEqual(
+      preparedAcl.Repeat,
+      preparedAcl.After,
+      'Fixture ACL preparation must be exactly stable on repeat',
+    )
+    assert.equal(
+      fs.existsSync(deniedBackup),
+      false,
+      'ACL preparation must precede the saved denial baseline',
+    )
+    assert.deepEqual(
+      inventory(deniedTarget),
+      deniedBefore,
+      'ACL preparation must preserve the entire payload inventory and hashes',
+    )
+    assert.deepEqual(
+      inventory(fileSymlinkOutside),
+      deniedOutsideBefore,
+      'ACL preparation must preserve the outside inventory and hashes',
+    )
     let deniedPrimaryFailure
     try {
       const denied = deniedAcl('apply')
@@ -1809,6 +1957,15 @@ try {
       assert.equal(denied.Error, 5, 'Access denial must report actual ERROR_ACCESS_DENIED')
       assert.equal(denied.PathNormalizationStable, true)
       assert.deepEqual(denied.Paths, expectedDeniedPaths)
+      assert.deepEqual(
+        denied.NativeBaseline,
+        preparedAcl.After,
+        'Denial must observe the exact explicitly prepared native baseline',
+      )
+      const savedAcl = JSON.parse(fs.readFileSync(deniedBackup, 'utf8'))
+      assert.equal(savedAcl.ParentAccess, preparedAcl.After.ParentAccess)
+      assert.equal(savedAcl.FileAccess, preparedAcl.After.FileAccess)
+      assert.deepEqual(savedAcl.NativeBaseline, preparedAcl.After)
       const afterDeniedPaths = deniedAcl('probe-path', {}, true, 'paths-under-actual-denial')
       assert.deepEqual(
         afterDeniedPaths,
@@ -1843,6 +2000,11 @@ try {
             assert.equal(restored.Restored, true)
             assert.equal(restored.PathNormalizationStable, true)
             assert.deepEqual(restored.Paths, expectedDeniedPaths)
+            assert.deepEqual(
+              restored.NativeRestored,
+              preparedAcl.After,
+              'Restoration must preserve exact native control flags, ordered DACL bytes and every baseline field',
+            )
             assert.deepEqual(restored.DirectoryEntries, deniedParentEntries)
             assert.equal(restored.FileLength, deniedFileLength)
             assert.equal(restored.FileSha256, deniedFileHash)

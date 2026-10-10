@@ -5,7 +5,8 @@ param(
     [Alias('BaselineVersion')]
     [string[]]$BaselineVersions = @(),
     [string]$ProofPath = 'output/windows-upgrade-proof.json',
-    [double]$MaxUpgradeMilliseconds = 0
+    [double]$MaxUpgradeMilliseconds = 0,
+    [switch]$CaptureInstallerTrace
 )
 
 # This destructive installer smoke test belongs only on a disposable Windows CI runner.
@@ -219,15 +220,60 @@ function Stop-InstalledLife([string]$Executable) {
     }
 }
 
+function Read-InstallerTrace([string]$Path) {
+    $records = [Collections.Generic.List[object]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $raw = $null
+    $emitted = $false
+    try {
+        $emitted = Test-Path -LiteralPath $Path -PathType Leaf
+        if ($emitted) {
+            $raw = [IO.File]::ReadAllText($Path)
+            foreach ($line in ($raw -split '\r?\n')) {
+                if (-not $line) { continue }
+                if ($line -notmatch '^(?<phase>[A-Za-z0-9_.:-]+)\t(?<ticks>\d+)$') {
+                    $errors.Add("Unrecognized trace row: $line")
+                    continue
+                }
+                $uptime = [long]0
+                if (-not [long]::TryParse($Matches['ticks'], [ref]$uptime) -or $uptime -lt 0) {
+                    $errors.Add("Invalid uptime trace row: $line")
+                    continue
+                }
+                $records.Add([pscustomobject]@{
+                    phase = $Matches['phase']; uptimeMilliseconds = $uptime
+                })
+            }
+        }
+    } catch { $errors.Add($_.Exception.Message) }
+    return [pscustomobject]@{
+        clock = 'kernel32.GetTickCount64'; requested = $true; emitted = $emitted
+        filename = [IO.Path]::GetFileName($Path); raw = $raw
+        records = $records.ToArray(); errors = $errors.ToArray()
+        scope = 'Optional installer markers only; authoritative NSIS launch-to-exit timing is unchanged.'
+    }
+}
+
 function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description, [string]$Phase) {
+    $options = @{
+        FilePath = $Path; ArgumentList = $Arguments
+        WorkingDirectory = [IO.Path]::GetTempPath(); PassThru = $true
+    }
+    $tracePath = $null
+    if ($CaptureInstallerTrace) {
+        $tracePath = Join-Path $downloadDirectory ('nsis-trace-' + [Guid]::NewGuid().ToString('N') + '.tsv')
+        # Supply only this child's test-owned trace path; parent/global settings stay unchanged.
+        $options.Environment = @{ LIFE_NSIS_TRACE_FILE = $tracePath }
+    }
     $startedAt = [DateTime]::UtcNow.ToString('o')
+    $uptimeBeforeLaunch = [Environment]::TickCount64
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $process = $null
     $processId = $null
     $exitCode = $null
     $succeeded = $false
     try {
-        $process = Start-Process -FilePath $Path -ArgumentList $Arguments -WorkingDirectory ([IO.Path]::GetTempPath()) -PassThru
+        $process = Start-Process @options
         $processId = $process.Id
         if (-not $process.WaitForExit(300000)) {
             # Terminate only the installer started by this test if a prompt or failure hangs it.
@@ -241,6 +287,7 @@ function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description, [s
         $succeeded = $true
     } finally {
         $watch.Stop()
+        $uptimeAfterExit = [Environment]::TickCount64
         if ($null -ne $process) { $process.Dispose() }
         $timing = [pscustomobject]@{
             name = $Phase; kind = 'nsis'; ok = $succeeded
@@ -248,6 +295,16 @@ function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description, [s
             elapsedMilliseconds = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
             processId = $processId; exitCode = $exitCode
             installer = [IO.Path]::GetFileName($Path)
+        }
+        if ($tracePath) {
+            # Read telemetry after process completion; retain raw records before owned temp cleanup.
+            $trace = Read-InstallerTrace $tracePath
+            $trace | Add-Member -NotePropertyName outerProcessUptime -NotePropertyValue ([pscustomobject]@{
+                clock = 'Environment.TickCount64 (Windows native system uptime)'
+                beforeLaunchMilliseconds = $uptimeBeforeLaunch; afterExitMilliseconds = $uptimeAfterExit
+                scope = 'Samples immediately bracket the authoritative Stopwatch interval. Comparison with GetTickCount64 markers includes sampling and native clock tick-resolution offsets; no time is subtracted.'
+            })
+            $timing | Add-Member -NotePropertyName installerTrace -NotePropertyValue $trace
         }
         $script:PhaseTimings.Add($timing)
         Write-Host "$Phase elapsed=$($timing.elapsedMilliseconds)ms success=$succeeded."

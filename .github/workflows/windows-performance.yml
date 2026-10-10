@@ -85,7 +85,7 @@ jobs:
         run: |
           $installers = @(Get-ChildItem release/*.exe)
           if ($installers.Count -ne 1) { throw 'Expected exactly one candidate installer.' }
-          ./tests/windows-upgrade.ps1 -Installer $installers[0].FullName -ExpectedVersion '0.11.1' -BaselineVersions @('0.11.0') -MaxUpgradeMilliseconds 10000
+          ./tests/windows-upgrade.ps1 -Installer $installers[0].FullName -ExpectedVersion '0.11.1' -BaselineVersions @('0.11.0') -MaxUpgradeMilliseconds 10000 -CaptureInstallerTrace
       - name: Report the raw trial even when the time requirement fails
         if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
         shell: pwsh

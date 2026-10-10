@@ -7,7 +7,7 @@ $errors = $null
 $syntax = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $SourcePath).Path, [ref]$tokens, [ref]$errors)
 if ($errors.Count -ne 0) { throw "Windows upgrade script has syntax errors: $errors" }
 # Parse and import only pure validation functions; never invoke an installer or cleanup.
-foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance')) {
+foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance', 'Read-InstallerTrace')) {
     $definition = $syntax.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) |
         Where-Object { $_.Name -eq $name } | Select-Object -First 1
     if (-not $definition) { throw "Missing validation function $name." }
@@ -49,4 +49,24 @@ Assert-Throws { Get-UpgradePerformance @() 10000 } 'Missing complete trial'
 $failed = New-Trial 1000
 $failed.timings.targetUpgrade.ok = $false
 Assert-Throws { Get-UpgradePerformance @($failed) 10000 } 'Failed installer cannot pass the time gate'
+$traceDirectory = Join-Path ([IO.Path]::GetTempPath()) ('life-nsis-trace-parser-' + [Guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $traceDirectory
+try {
+    $tracePath = Join-Path $traceDirectory 'trial.tsv'
+    $missing = Read-InstallerTrace $tracePath
+    Assert-Equal $missing.emitted $false 'Published baseline without marker support'
+    Assert-Equal $missing.errors.Count 0 'An absent optional marker is not an error'
+    $raw = "init`t100`r`npayload-copied`t250`r`n"
+    [IO.File]::WriteAllText($tracePath, $raw)
+    $trace = Read-InstallerTrace $tracePath
+    Assert-Equal $trace.raw $raw 'Unmodified raw trace retained'
+    Assert-Equal $trace.records.Count 2 'Complete valid marker rows'
+    Assert-Equal $trace.records[1].phase 'payload-copied' 'Marker phase'
+    Assert-Equal $trace.records[1].uptimeMilliseconds 250 'Native clock reading'
+    Assert-Equal $trace.errors.Count 0 'Valid markers have no parser errors'
+    [IO.File]::WriteAllText($tracePath, "bad row`ninit`t999999999999999999999999999999`n")
+    $invalid = Read-InstallerTrace $tracePath
+    Assert-Equal $invalid.records.Count 0 'Invalid markers never invent clock values'
+    Assert-Equal $invalid.errors.Count 2 'Malformed and overflowing raw markers are retained as errors'
+} finally { Remove-Item -LiteralPath $traceDirectory -Recurse -Force }
 Write-Host 'Windows latest-baseline and strict full-installer performance gate checks passed.'

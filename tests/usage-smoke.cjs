@@ -10,7 +10,7 @@ const { chromium } = require('playwright')
 
 async function run() {
   const directory = await mkdtemp(join(tmpdir(), 'life-usage-'))
-  const output = resolve(__dirname, '../output/playwright/usage-v0.10.0')
+  const output = resolve(__dirname, '../output/playwright/usage-v0.11.1')
   await mkdir(output, { recursive: true })
   const checks = []
   const errors = []
@@ -23,7 +23,7 @@ async function run() {
         sourcefile: 'usage-fixture.tsx',
         loader: 'tsx',
         contents: `
-          import React, { useCallback, useState } from 'react'
+          import React, { StrictMode, useCallback, useState } from 'react'
           import { createRoot } from 'react-dom/client'
           import { UsageDialog } from './src/renderer/components/UsageDialog'
           import './src/renderer/styles.css'
@@ -38,10 +38,11 @@ async function run() {
             { ...base, id: 'codex-import', profileId: 'machine-a', remoteId: 'codex-native-a', provider: 'codex', title: 'Imported Codex copy', messages: [msg({ ...codex, tokenUsage: { ...codex.tokenUsage, last: { inputTokens: 600, outputTokens: 100, totalTokens: 700 } } }, 3)] },
           ]
           const profiles = [{ id: 'machine-a', name: 'Research machine', host: 'research.example' }, { id: 'machine-b', name: 'Build machine', host: 'build.example' }]
-          const fixture = window.usageFixture = { fail: false, defer: false, reads: [], pending: [], selected: [] }
+          const fixture = window.usageFixture = { fail: false, defer: false, resetOnly: false, reads: [], pending: [], selected: [] }
           function snapshot(provider, machine) {
             const fetchedAt = Date.now()
-            return provider === 'codex' ? { provider, status: 'available', fetchedAt, limits: [{ id: 'codex', label: machine === 'machine-a' ? 'Machine A bucket' : 'Machine B bucket', primary: { usedPercent: machine === 'machine-a' ? 12.5 : 20, windowDurationMins: 300, resetsAt: 1791648000 }, secondary: { usedPercent: 37, windowDurationMins: 10080 }, credits: { hasCredits: true, unlimited: false, balance: '18.00' } }], ordinaryUsageAllowed: machine === 'machine-b', availableResetCredits: 2 } : { provider, status: 'available', fetchedAt, accountType: 'pro', limits: [{ id: 'weekly', label: 'Weekly usage', primary: { usedPercent: 43, windowDurationMins: 10080, resetsAt: 1792166400 } }], extraUsage: { isEnabled: true, usedCredits: 125, monthlyLimit: 2500, usedPercent: 5, currency: 'USD' } }
+            if(fixture.resetOnly && provider === 'codex') return { provider, status: 'available', fetchedAt, limits: [{ id: 'reset-only', label: 'Reset-only allowance', primary: { windowDurationMins: 300, resetsAt: 1791648000 } }] }
+            return provider === 'codex' ? { provider, status: 'available', fetchedAt, limits: [{ id: 'codex', label: machine === 'machine-a' ? 'Machine A bucket' : 'Machine B bucket', primary: { usedPercent: machine === 'machine-a' ? 12.5 : 20, windowDurationMins: 300, resetsAt: 1791648000 }, secondary: { usedPercent: 37, windowDurationMins: 10080 }, credits: { hasCredits: true, unlimited: false, balance: '18.00' } }], ordinaryUsageAllowed: machine === 'machine-b', availableResetCredits: 2 } : { provider, status: 'available', fetchedAt, accountType: 'pro', limits: [{ id: 'weekly', label: 'Weekly usage', primary: { usedPercent: 43, windowDurationMins: 10080, resetsAt: 1792166400 } }], extraUsage: { isEnabled: true, amountUnit: 'minor-currency', usedCredits: 125, monthlyLimit: 2500, usedPercent: 5, currency: 'USD' } }
           }
           function Fixture() {
             const [open, setOpen] = useState(false)
@@ -61,10 +62,10 @@ async function run() {
             }, [machine])
             return <div data-theme="dark" style={{ padding: 24 }}>
               <button className="button secondary" onClick={() => setOpen(true)}>Usage</button>
-              <UsageDialog open={open} onOpenChange={setOpen} threads={retained} profiles={profiles} activeThreadId="codex-a" activeProfileId={machine} connected={connected} accountSnapshots={live} onReadUsage={read} onSelectThread={id => fixture.selected.push(id)} />
+              {open ? <UsageDialog open={open} onOpenChange={setOpen} threads={retained} profiles={profiles} activeThreadId="codex-a" activeProfileId={machine} connected={connected} accountSnapshots={live} onReadUsage={read} onSelectThread={id => fixture.selected.push(id)} /> : null}
             </div>
           }
-          createRoot(document.getElementById('root')).render(<Fixture />)
+          createRoot(document.getElementById('root')).render(<StrictMode><Fixture /></StrictMode>)
         `,
       },
       bundle: true,
@@ -120,6 +121,39 @@ async function run() {
     const codexAccount = dialog.getByRole('article', { name: 'Codex account usage', exact: true })
     await codexAccount.getByText('12.5% used', { exact: true }).waitFor()
     assert.equal(
+      await page.evaluate(() => window.usageFixture.reads.length),
+      2,
+      'Lazy first-open StrictMode effect replay shares the two promptless account reads',
+    )
+    assert.equal(await codexAccount.getByText('87.5% left', { exact: true }).count(), 1)
+    assert.equal(await codexAccount.getByText('63% left', { exact: true }).count(), 1)
+    assert.equal(
+      await codexAccount
+        .getByRole('progressbar', {
+          name: 'Machine A bucket primary window remaining allowance',
+          exact: true,
+        })
+        .getAttribute('value'),
+      '87.5',
+    )
+    assert.equal(await codexAccount.getByText('5-hour allowance', { exact: true }).count(), 1)
+    assert.equal(await codexAccount.getByText('Weekly allowance', { exact: true }).count(), 1)
+    assert.equal(await codexAccount.getByText(/Resets Oct 10/).count(), 1)
+    assert.equal(
+      await dialog.evaluate((element) =>
+        Boolean(
+          element
+            .querySelector('.usage-account-section')
+            .compareDocumentPosition(element.querySelector('.usage-summary')) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+      ),
+      true,
+    )
+    checks.push(
+      'Promptless account allowance is first, remaining percentages and native windows are exact, and lazy StrictMode first-open reads are coalesced',
+    )
+    assert.equal(
       await codexAccount
         .getByText('Provider reports ordinary usage unavailable.', { exact: true })
         .count(),
@@ -143,6 +177,21 @@ async function run() {
       .getByRole('article', { name: 'Claude Code account usage', exact: true })
       .getByText('43% used', { exact: true })
       .waitFor()
+    assert.equal(
+      await dialog
+        .getByRole('article', { name: 'Claude Code account usage', exact: true })
+        .getByText('57% left', { exact: true })
+        .count(),
+      1,
+    )
+    assert.equal(
+      await dialog.getByText('Enabled · $1.25 used of $25.00', { exact: true }).count(),
+      1,
+    )
+    assert.equal(
+      await dialog.getByText('$23.75 left before the monthly spend cap', { exact: true }).count(),
+      1,
+    )
     checks.push(
       'Native allowance remains unavailable despite low utilization; context uses last request and account balances retain native values',
     )
@@ -185,6 +234,7 @@ async function run() {
       'Native account limits temporarily unavailable',
     )
     assert.equal(await dialog.locator('[data-usage="total-tokens"]').innerText(), '4,100')
+    assert.equal(await codexAccount.getByText(/Last-known usage/).count(), 1)
     await page.evaluate(() => {
       window.usageFixture.fail = false
     })
@@ -192,6 +242,27 @@ async function run() {
     await codexAccount.getByRole('alert').waitFor({ state: 'hidden' })
     await page.waitForFunction(() => window.usageFixture.reads.length >= 6)
     checks.push('Native account read errors keep saved totals and recover after manual refresh')
+
+    await page.evaluate(() => {
+      window.usageFixture.resetOnly = true
+    })
+    await dialog.getByRole('button', { name: 'Refresh limits', exact: true }).click()
+    await codexAccount.getByText('Reset-only allowance', { exact: true }).waitFor()
+    assert.equal(
+      await codexAccount.getByText('Remaining allowance not reported', { exact: true }).count(),
+      1,
+    )
+    assert.equal(await codexAccount.getByRole('progressbar').count(), 0)
+    assert.equal(await codexAccount.getByText(/Resets Oct 10/).count(), 1)
+    assert.equal(await codexAccount.getByText('100% left', { exact: true }).count(), 0)
+    await page.evaluate(() => {
+      window.usageFixture.resetOnly = false
+    })
+    await dialog.getByRole('button', { name: 'Refresh limits', exact: true }).click()
+    await codexAccount.getByText('Machine A bucket', { exact: true }).waitFor()
+    checks.push(
+      'A reset-only native window keeps its reset time and shows unknown remaining allowance without a fabricated full meter',
+    )
 
     await page.evaluate(() => {
       window.usageFixture.defer = true
@@ -214,6 +285,7 @@ async function run() {
     await page.evaluate(() => window.usageFixture.publish())
     await codexAccount.getByText('Live account bucket', { exact: true }).waitFor()
     assert.equal(await codexAccount.getByText('64% used', { exact: true }).count(), 1)
+    assert.equal(await codexAccount.getByText('36% left', { exact: true }).count(), 1)
     checks.push(
       'Slow reads from a previous machine are discarded and newer native account events update the open dialog',
     )

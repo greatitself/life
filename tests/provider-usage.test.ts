@@ -140,4 +140,99 @@ describe('native Codex account quota snapshots', () => {
       spendControlReached: false,
     })
   })
+
+  it('preserves a reset-only window without inventing utilization or a standard duration', () => {
+    const snapshot = codexUsageSnapshot({
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: null, windowDurationMins: 15, resetsAt: 1800000000 },
+        secondary: { usedPercent: undefined, resetsAt: 1800010000 },
+      },
+    })
+    expect(snapshot.status).toBe('available')
+    expect(snapshot.limits[0]).toMatchObject({
+      primary: { windowDurationMins: 15, resetsAt: 1800000000 },
+      secondary: { resetsAt: 1800010000 },
+    })
+    expect(snapshot.limits[0].primary?.usedPercent).toBeUndefined()
+    expect(snapshot.limits[0].secondary?.usedPercent).toBeUndefined()
+    expect(snapshot.limits[0].secondary?.windowDurationMins).toBeUndefined()
+  })
+
+  it('merges a sparse reset update while retaining reported utilization', () => {
+    const previous = codexUsageSnapshot({
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1800000000 },
+      },
+    })
+    const snapshot = codexUsageSnapshot(
+      { rateLimits: { limitId: 'codex', primary: { resetsAt: 1800020000 } } },
+      previous,
+      true,
+    )
+    expect(snapshot.limits[0].primary).toEqual({
+      usedPercent: 25,
+      windowDurationMins: 300,
+      resetsAt: 1800020000,
+    })
+  })
+
+  it('keeps the modern bucket authoritative when a rolling update also includes its legacy mirror', () => {
+    const snapshot = codexUsageSnapshot(
+      {
+        rateLimits: { limitId: 'codex', primary: { usedPercent: 99 } },
+        rateLimitsByLimitId: {
+          codex: { limitId: 'codex', primary: { usedPercent: 12.5 } },
+        },
+      },
+      codexUsageSnapshot({ rateLimits: { limitId: 'codex', primary: { usedPercent: 40 } } }),
+      true,
+    )
+    expect(snapshot.limits).toHaveLength(1)
+    expect(snapshot.limits[0].primary?.usedPercent).toBe(12.5)
+  })
+
+  it("does not inherit another reported account's windows, credits or access state", () => {
+    const previous = codexUsageSnapshot({
+      accountId: 'account-before',
+      ordinaryUsageAllowed: false,
+      rateLimits: {
+        limitId: 'codex',
+        planType: 'pro',
+        primary: { usedPercent: 100 },
+        secondary: { usedPercent: 50 },
+        credits: { hasCredits: true, unlimited: false, balance: '123.45' },
+      },
+    })
+    const snapshot = codexUsageSnapshot(
+      {
+        accountId: 'account-after',
+        rateLimits: { limitId: 'codex', primary: { usedPercent: 0 } },
+      },
+      previous,
+      true,
+    )
+    expect(snapshot.accountId).toBe('account-after')
+    expect(snapshot.limits[0].primary?.usedPercent).toBe(0)
+    expect(snapshot.limits[0].secondary).toBeUndefined()
+    expect(snapshot.limits[0].credits).toBeUndefined()
+    expect(snapshot.accountType).toBeUndefined()
+    expect(snapshot.ordinaryUsageAllowed).toBeUndefined()
+  })
+
+  it('retains a reported account scope across sparse native notifications', () => {
+    const previous = codexUsageSnapshot({
+      accountId: 'same-account',
+      rateLimits: { limitId: 'codex', primary: { usedPercent: 25 } },
+    })
+    const snapshot = codexUsageSnapshot(
+      { rateLimits: { limitId: 'codex', primary: { usedPercent: 50 } } },
+      previous,
+      true,
+    )
+    expect(snapshot.accountId).toBe('same-account')
+    expect(snapshot.limits[0].primary?.usedPercent).toBe(50)
+    expect(codexUsageSnapshot({ rateLimits: {} }, previous).accountId).toBeUndefined()
+  })
 })

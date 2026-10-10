@@ -172,16 +172,24 @@ jobs:
           path: .release-verification
           sparse-checkout: |
             tests/windows-upgrade.ps1
+            tests/windows-upgrade-performance.ps1
             scripts/windows-installation-report.cjs
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Verify strict upgrade time validation
+        shell: pwsh
+        run: ./.release-verification/tests/windows-upgrade-performance.ps1 -SourcePath ./.release-verification/tests/windows-upgrade.ps1
       - name: Verify Windows upgrade from Life ${{ matrix.baseline }}
         shell: pwsh
         env:
           BASELINE_VERSION: ${{ matrix.baseline }}
-        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @($env:BASELINE_VERSION)
+          LIFE_SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $limit = if ([version]$version -ge [version]'0.11.1') { 10000 } else { 0 }
+          ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion $version -BaselineVersions @($env:BASELINE_VERSION) -MaxUpgradeMilliseconds $limit
       - name: Report Windows installation benchmark
         if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
         shell: pwsh

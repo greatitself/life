@@ -91,6 +91,8 @@ const metadataSchema = z
       .optional(),
     /** Migration records use the installed UI and do not have an executable custom bundle. */
     baselineOnly: z.literal(true).optional(),
+    /** Older saves may lack the preimages needed to merge an app update safely. */
+    legacyBaseUnavailable: z.literal(true).optional(),
   })
   .strict()
 type Metadata = z.infer<typeof metadataSchema>
@@ -192,6 +194,12 @@ const defaultState = (): SavedState => ({
   enabled: false,
   failed: [],
 })
+const outdatedCustomization =
+  'Life was updated after this customization was built. Your source edits are preserved. Open Life Studio to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.'
+const outdatedAdditionalExtensions =
+  'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Open Life Studio to adapt those extensions to the current Life version.'
+const wasDisabledByUpgrade = (error?: string) =>
+  error === outdatedCustomization || error === outdatedAdditionalExtensions
 
 // Native CSS packages run in a separate process, never in an Electron worker.
 // Oxide 4.3.3 can execute unloaded native code when a Windows worker exits
@@ -300,6 +308,41 @@ export class SourceCodeStore {
           error: `Life restored its built-in interface because the saved source could not load: ${explain(error)}`,
         }
     }
+    const wasRunning = existsSync(this.markerPath)
+    const canRefresh =
+      !wasRunning &&
+      this.state.current !== null &&
+      !this.state.failed.includes(this.state.current) &&
+      (this.state.enabled || wasDisabledByUpgrade(this.state.error))
+    if (wasRunning && (this.state.enabled || wasDisabledByUpgrade(this.state.error))) {
+      this.recovered = true
+      this.state = {
+        ...this.state,
+        revision: this.state.revision + 1,
+        enabled: false,
+        error:
+          'Recovery restored Life’s built-in interface after the customized application did not close cleanly. Your source changes are preserved.',
+      }
+      await this.writeState(this.state)
+    } else if (
+      this.state.current !== null &&
+      this.state.failed.includes(this.state.current) &&
+      (this.state.enabled || wasDisabledByUpgrade(this.state.error))
+    ) {
+      this.state = {
+        ...this.state,
+        revision: this.state.revision + 1,
+        enabled: false,
+        error: wasDisabledByUpgrade(this.state.error)
+          ? 'Life kept the installed interface active because this customization previously failed. Your source edits are preserved.'
+          : this.state.error ||
+            'Life kept the installed interface active because this customization previously failed. Your source edits are preserved.',
+      }
+      await this.writeState(this.state)
+    }
+    // Cover startup compilation as well as renderer execution. A crashed upgrade
+    // must enter recovery on its next launch, rather than repeatedly rebuilding.
+    await writeFile(this.markerPath, String(process.pid), 'utf8')
     if (this.state.current !== null) {
       try {
         this.metadata = await this.readMetadata(this.state.current)
@@ -312,26 +355,49 @@ export class SourceCodeStore {
           )
         }
         if (this.metadata.baseFingerprint !== this.baselineFingerprint) {
-          const incorporated = await this.retireIncorporatedLayers(
+          await this.retireIncorporatedLayers(
             this.state.current,
             this.metadata,
             [...this.state.history, this.state.current].slice(-5),
           )
-          if (!incorporated) {
-            const error =
-              this.metadata.baselineOnly &&
-              this.metadata.extensions?.some((layer) => this.isIncorporated(layer))
-                ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Open Life Studio to adapt those extensions to the current Life version.'
-                : 'Life was updated after this customization was built. Your source edits are preserved. Open Life Studio to update your customization for the current Life version; unchanged files are refreshed automatically when rebuilding.'
-            if (this.state.enabled || this.state.error !== error) {
+          if (this.metadata!.baseFingerprint !== this.baselineFingerprint && canRefresh) {
+            try {
+              if (this.legacyPreimagesUnavailable(this.metadata!))
+                throw new Error(
+                  'This older customization did not save the original source needed to merge files changed by Life. Open Life Studio to adapt those files.',
+                )
+              await this.queue(() =>
+                this.commitLayers(
+                  this.cloneLayers(),
+                  'Update source customizations for the installed Life version',
+                  this.operationEpoch,
+                  true,
+                ),
+              )
+            } catch (error) {
               this.state = {
                 ...this.state,
                 revision: this.state.revision + 1,
                 enabled: false,
-                error,
+                error: `Life could not automatically update this customization. The installed interface is active and your original source edits are preserved: ${explain(error)}`,
               }
               await this.writeState(this.state)
             }
+          } else if (
+            this.metadata!.baseFingerprint !== this.baselineFingerprint &&
+            this.state.enabled
+          ) {
+            // Even contradictory saved state must never execute an old bundle:
+            // a previously failed generation is ineligible for automatic refresh.
+            this.state = {
+              ...this.state,
+              revision: this.state.revision + 1,
+              enabled: false,
+              error:
+                this.state.error ||
+                'Life kept the installed interface active because this older customization previously failed. Your source edits are preserved.',
+            }
+            await this.writeState(this.state)
           }
         }
         if (!this.metadata.baselineOnly)
@@ -352,18 +418,6 @@ export class SourceCodeStore {
         await this.writeState(this.state)
       }
     }
-    if (existsSync(this.markerPath) && this.state.enabled) {
-      this.recovered = true
-      this.state = {
-        ...this.state,
-        revision: this.state.revision + 1,
-        enabled: false,
-        error:
-          'Recovery restored Life’s built-in interface after the customized application did not close cleanly. Your source changes are preserved.',
-      }
-      await this.writeState(this.state)
-    }
-    await writeFile(this.markerPath, String(process.pid), 'utf8')
     this.emit()
     return this.get()
   }
@@ -903,7 +957,11 @@ export class SourceCodeStore {
         if (content === undefined) files.delete(change.path)
         else files.set(change.path, content)
       }
-      if (rebase) layer.bundle.files = adjusted
+      // An update may already contain an unrecognized extension's exact change.
+      // Keep its original portable bundle and identity when its rebased diff is
+      // empty; it is a valid no-op against the new baseline, not lost user work.
+      if (rebase && (adjusted.length || Object.keys(layer.bundle.dependencies).length))
+        layer.bundle.files = adjusted
       if (layer.bundle.files.length || Object.keys(layer.bundle.dependencies).length)
         layer.bundle = parseSourceExtensionBundle(layer.bundle)
       Object.assign(dependencies, layer.bundle.dependencies)
@@ -912,8 +970,6 @@ export class SourceCodeStore {
       files,
       baselineFiles,
       dependencies,
-      // Rebased code already included by another adapted layer does not create an
-      // invalid empty portable bundle. The composed source still contains its result.
       layers: nextLayers.filter(
         (layer) => layer.bundle.files.length || Object.keys(layer.bundle.dependencies).length,
       ),
@@ -923,14 +979,24 @@ export class SourceCodeStore {
   private async migrateLegacy(revision: number, metadata: Metadata): Promise<Metadata> {
     const baseline = await this.readEditable(this.options.sourceDir)
     const current = await this.readEditable(this.generation(revision))
+    const sameBaseline = metadata.baseFingerprint === this.baselineFingerprint
     const affected = new Set<string>()
     for (const [path, content] of current) {
       // Untouched files from the old app do not become private overrides after an upgrade.
       if (metadata.baseHashes[path] && this.hash(content) === metadata.baseHashes[path]) continue
       if (baseline.get(path) !== content) affected.add(path)
     }
-    for (const path of Object.keys(metadata.baseHashes))
+    for (const path of sameBaseline ? baseline.keys() : Object.keys(metadata.baseHashes))
       if (!current.has(path) && baseline.has(path)) affected.add(path)
+    const unsafeUpgrade =
+      !sameBaseline &&
+      (!Object.keys(metadata.baseHashes).length ||
+        [...baseline.keys()].some((path) => !current.has(path) && !metadata.baseHashes[path]) ||
+        [...affected].some((path) =>
+          metadata.baseHashes[path]
+            ? metadata.baseHashes[path] !== this.baselineHashes[path]
+            : baseline.has(path),
+        ))
     const files = this.extensionFiles(baseline, current, affected)
     const extensions: SourceLayer[] =
       files.length || Object.keys(metadata.dependencies).length
@@ -941,7 +1007,37 @@ export class SourceCodeStore {
             },
           ]
         : []
-    return { ...metadata, extensions }
+    return {
+      ...metadata,
+      // A matching fingerprint identifies the exact original installation, so
+      // its hashes can safely complete older metadata and preserve deletions.
+      baseHashes: sameBaseline ? { ...this.baselineHashes } : metadata.baseHashes,
+      extensions,
+      ...(unsafeUpgrade ? { legacyBaseUnavailable: true as const } : {}),
+    }
+  }
+
+  private legacyPreimagesUnavailable(metadata: Metadata): boolean {
+    if (
+      metadata.legacyBaseUnavailable ||
+      (!Object.keys(metadata.baseHashes).length && Object.keys(this.baselineHashes).length > 0)
+    )
+      return true
+    // Earlier releases may already have synthesized a legacy layer against a
+    // newer install. Its saved old baseline hashes expose unavailable preimages.
+    return Boolean(
+      metadata.extensions?.some(
+        (layer) =>
+          layer.enabled &&
+          layer.bundle.name === 'Legacy customization' &&
+          layer.bundle.description === 'Legacy customization' &&
+          layer.bundle.files.some((file) =>
+            file.kind === 'create'
+              ? Boolean(metadata.baseHashes[file.path])
+              : !metadata.baseHashes[file.path] || metadata.baseHashes[file.path] !== file.baseHash,
+          ),
+      ),
+    )
   }
 
   /**
@@ -967,8 +1063,8 @@ export class SourceCodeStore {
     }
     if (!matched) return false
 
-    // Unknown enabled layers still need the user's explicit adaptation. Keep their old
-    // source as readable context, with execution disabled, instead of silently rebasing it.
+    // Preserve unknown layers' old source until the caller can safely compose and
+    // compile them against the installed app. No old executable is carried forward.
     const needsAdaptation = layers.some((layer) => layer.enabled)
     if (needsAdaptation && !newlyMatched) return false
     const source = needsAdaptation ? this.generation(previous) : this.options.sourceDir
@@ -991,6 +1087,7 @@ export class SourceCodeStore {
       baseHashes: needsAdaptation ? metadata.baseHashes : { ...this.baselineHashes },
       extensions: layers,
       baselineOnly: true,
+      ...(needsAdaptation && metadata.legacyBaseUnavailable ? { legacyBaseUnavailable: true } : {}),
     })
     let moved = false
     try {
@@ -1022,9 +1119,12 @@ export class SourceCodeStore {
         current: nextRevision,
         history,
         enabled: false,
-        error: needsAdaptation
-          ? 'Life now includes the recognized UI improvements. Your additional source extensions are preserved with execution disabled. Open Life Studio to adapt those extensions to the current Life version.'
-          : undefined,
+        error:
+          needsAdaptation && (this.state.enabled || wasDisabledByUpgrade(this.state.error))
+            ? outdatedAdditionalExtensions
+            : needsAdaptation
+              ? this.state.error
+              : undefined,
       }
       await this.writeState(next)
       this.state = next

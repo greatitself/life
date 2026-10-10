@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, writeSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -66,6 +66,10 @@ async function run() {
   let store = new SourceCodeStore(options)
   const checks: string[] = []
   let assetDigest = ''
+  let migratedFromVersion = ''
+  let migratedToVersion = ''
+  let migrationElapsedMilliseconds = 0
+  let migratedRestartElapsedMilliseconds = 0
   try {
     stage('initialize source extension store')
     const initial = await store.init()
@@ -199,6 +203,110 @@ export function RuntimeProof() {
     assert(preserved.files[0].content.includes('Life packaged live source runtime proof'))
     checks.push('A clean store restart preserved the active source, dependency metadata and assets')
 
+    stage('prepare an isolated app version and source upgrade')
+    const originalGeneration = join(directory, 'revisions', String(reopened.active!.revision))
+    const originalFiles = [
+      'metadata.json',
+      'package.json',
+      'src/renderer/main.tsx',
+      'src/renderer/RuntimeProof.tsx',
+      'src/renderer/RuntimeProof.css',
+      'dist/entry.js',
+      'dist/entry.css',
+    ]
+    const originalContents = await Promise.all(
+      originalFiles.map((path) => readFile(join(originalGeneration, path))),
+    )
+    const upgradedSource = join(directory, 'updated installed source')
+    await cp(sourceDir, upgradedSource, { recursive: true })
+    const installedManifest = JSON.parse(
+      await readFile(join(upgradedSource, 'package.json'), 'utf8'),
+    )
+    const version = String(installedManifest.version).split('.').map(Number)
+    assert.equal(version.length, 3)
+    assert(version.every(Number.isSafeInteger))
+    const upgradedVersion = `${version[0]}.${version[1]}.${version[2] + 1}`
+    migratedFromVersion = String(installedManifest.version)
+    migratedToVersion = upgradedVersion
+    await writeFile(
+      join(upgradedSource, 'package.json'),
+      JSON.stringify({ ...installedManifest, version: upgradedVersion }),
+    )
+    const installationMarker = 'Life packaged automatic upgrade uses the updated installed source'
+    await writeFile(
+      join(upgradedSource, 'src/renderer/main.tsx'),
+      `${main}\n;(globalThis as any).__life_runtime_proof_installed_update = ${JSON.stringify(installationMarker)}\n`,
+    )
+    await store.close()
+    options.sourceDir = upgradedSource
+    store = new SourceCodeStore(options)
+    stage('automatically migrate persisted customizations to the updated app')
+    const migrationStarted = performance.now()
+    const migrated = await store.init()
+    migrationElapsedMilliseconds = Math.round(performance.now() - migrationStarted)
+    assert.equal(migrated.enabled, true, 'A compatible app update disabled source customization')
+    assert.equal(migrated.error, undefined)
+    assert.equal(migrated.baseChanged, undefined)
+    assert(migrated.active!.revision > reopened.active!.revision)
+    assert.deepEqual(
+      migrated.extensions.map(({ id, enabled, dependencies }) => ({ id, enabled, dependencies })),
+      reopened.extensions.map(({ id, enabled, dependencies }) => ({ id, enabled, dependencies })),
+      'Automatic migration changed portable extension identities or dependency declarations',
+    )
+    const migratedJs = await readFile(store.assetPath(migrated.active!.js)!, 'utf8')
+    const migratedCss = await readFile(store.assetPath(migrated.active!.css!)!, 'utf8')
+    assert(migratedJs.includes(installationMarker), 'The installed source update was lost')
+    assert(
+      migratedJs.includes('Life packaged live source runtime proof'),
+      'User source edits were lost',
+    )
+    assert(migratedCss.includes('.life-runtime-proof') && migratedCss.includes('#123456'))
+    assert(!/@(?:apply|theme|source)\b/.test(migratedCss))
+    const migrationContext = await store.getContext({
+      paths: ['src/renderer/RuntimeProof.tsx', 'src/renderer/RuntimeProof.css'],
+    })
+    assert.equal(migrationContext.files[0].content, originalContents[3].toString('utf8'))
+    assert.equal(migrationContext.files[1].content, originalContents[4].toString('utf8'))
+    assert.equal(
+      JSON.parse(
+        await readFile(
+          join(directory, 'revisions', String(migrated.active!.revision), 'package.json'),
+          'utf8',
+        ),
+      ).version,
+      upgradedVersion,
+    )
+    for (const [index, path] of originalFiles.entries())
+      assert.deepEqual(
+        await readFile(join(originalGeneration, path)),
+        originalContents[index],
+        `Automatic migration changed the immutable original ${path}`,
+      )
+    checks.push(
+      'A version and installed-source update automatically rebuilt existing React, npm and Tailwind customization while preserving extension identities and immutable original generations',
+    )
+    await store.close()
+    store = new SourceCodeStore(options)
+    stage('verify a migrated customization cold restart is idempotent')
+    const migratedRestartStarted = performance.now()
+    const migratedRestart = await store.init()
+    migratedRestartElapsedMilliseconds = Math.round(performance.now() - migratedRestartStarted)
+    assert.equal(migratedRestart.enabled, true)
+    assert.equal(migratedRestart.revision, migrated.revision)
+    assert.deepEqual(migratedRestart.active, migrated.active)
+    assert.equal(migratedRestart.error, undefined)
+    checks.push('A cold restart reused the migrated customization without rebuilding it again')
+
+    stage('reject executing an old pre-upgrade customization on rollback')
+    const preUpgradeRollback = await store.rollback()
+    assert.equal(preUpgradeRollback.enabled, false)
+    assert.equal(preUpgradeRollback.active, undefined)
+    assert.equal(preUpgradeRollback.baseChanged, true)
+    assert.deepEqual(await store.exportExtension(portable.id), portable)
+    checks.push(
+      'Rollback preserved the pre-upgrade source archive without executing its stale bundle',
+    )
+
     stage('roll back source extension to built-in interface')
     const rolledBack = await store.rollback()
     assert.equal(rolledBack.enabled, false)
@@ -263,6 +371,11 @@ export function RuntimeProof() {
     startedAt,
     finishedAt: new Date().toISOString(),
     assetDigest,
+    migratedFromVersion,
+    migratedToVersion,
+    // These measure source initialization, outside the installer launch/exit timer.
+    migrationElapsedMilliseconds,
+    migratedRestartElapsedMilliseconds,
     checks,
   }
   stage('write completed runtime proof')

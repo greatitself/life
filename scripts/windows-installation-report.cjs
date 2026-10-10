@@ -32,10 +32,49 @@ function installationReport(proof) {
     '',
     `Target: **${cell(proof.targetVersion)}**. Result: **${proof.ok ? 'passed' : 'failed'}**.`,
     '',
-    'Each installer is measured from NSIS process launch through exit with System.Diagnostics.Stopwatch. Downloads, verification, and cleanup are excluded from the installation comparison.',
+    'Each installer is measured from NSIS process launch through exit with System.Diagnostics.Stopwatch. Downloads, verification, and separately timed test cleanup are excluded from the installation comparison; previous-version cleanup performed by the installer remains included.',
     '',
   ]
   if (!proof.ok) lines.push(`Failure: ${cell(proof.failure)}.`, '')
+  if (proof.performanceGate) {
+    const gate = proof.performanceGate
+    if (
+      typeof gate.maximumMilliseconds !== 'number' ||
+      !Number.isFinite(gate.maximumMilliseconds) ||
+      gate.maximumMilliseconds <= 0 ||
+      gate.strictlyBelow !== true ||
+      !Array.isArray(gate.trials) ||
+      gate.trials.length !== proof.pairs.length ||
+      gate.trials.length === 0
+    ) {
+      throw new Error('Invalid Windows upgrade performance gate evidence.')
+    }
+    for (const [index, pair] of proof.pairs.entries()) {
+      const trial = gate.trials[index]
+      const elapsed = milliseconds(pair.timings?.targetUpgrade)
+      if (
+        trial.baselineVersion !== pair.baselineVersion ||
+        trial.targetVersion !== pair.targetVersion ||
+        trial.elapsedMilliseconds !== elapsed ||
+        trial.passed !== elapsed < gate.maximumMilliseconds
+      ) {
+        throw new Error('Windows upgrade gate must use the complete raw installer timing.')
+      }
+    }
+    if (gate.passed !== gate.trials.every((trial) => trial.passed) || (proof.ok && !gate.passed)) {
+      throw new Error('Windows upgrade performance gate result contradicts its trials.')
+    }
+    lines.push(
+      `Upgrade requirement: **strictly below ${seconds(gate.maximumMilliseconds)}**. Performance gate: **${gate.passed ? 'passed' : 'failed'}**.`,
+      '',
+      `Raw upgrade trial: **${gate.trials.map((trial) => `${trial.elapsedMilliseconds} ms`).join(', ')}**.`,
+      '',
+      `Installation identity and saved-data validation: **${proof.functionalValidationPassed === true ? 'passed' : 'not completed'}**.`,
+      '',
+      'The gate uses the complete raw NSIS launch-to-exit duration, including synchronous previous-version cleanup. No time is subtracted; a failed time requirement still retains the full trial and verification evidence.',
+      '',
+    )
+  }
   for (const pair of proof.pairs) {
     const baseline = milliseconds(pair.timings?.baselineFreshInstall)
     const upgrade = milliseconds(pair.timings?.targetUpgrade)

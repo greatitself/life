@@ -1,0 +1,101 @@
+name: Measure Windows upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Full source commit SHA for the unpublished Life 0.11.1 candidate'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      LIFE_SOURCE_REF: ${{ inputs.source_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: Verify exact candidate source and latest baseline
+        id: source
+        shell: pwsh
+        run: |
+          if ($env:LIFE_SOURCE_REF -cnotmatch '^[0-9a-f]{40}$') { throw 'Provide the complete source commit SHA.' }
+          $source = git rev-parse HEAD
+          if ($source -cne $env:LIFE_SOURCE_REF) { throw 'Candidate checkout does not match the requested source commit.' }
+          "sha=$source" >> $env:GITHUB_OUTPUT
+          node -e "const assert = require('node:assert/strict'); assert.equal(require('./package.json').version, '0.11.1'); assert.deepEqual(require('./scripts/release-baselines.cjs').releaseBaselines('0.11.1'), ['0.11.0'])"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify strict timing and latest-baseline validation
+        shell: pwsh
+        run: ./tests/windows-upgrade-performance.ps1
+      - run: npm ci
+      - run: npm run build
+      - run: npx electron-builder --win --x64 --publish never
+      - name: Verify actual packaged Windows compiler and source customization
+        shell: pwsh
+        run: ./tests/windows-source-runtime.ps1
+      - name: Save packaged customization proof
+        if: always() && hashFiles('output/source-runtime-proof.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-customization-proof
+          path: output/source-runtime-proof.json
+          if-no-files-found: error
+      - name: Save unpublished candidate installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-installer
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  benchmark:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      LIFE_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-windows-performance-installer
+          path: release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Measure complete 0.11.0 to 0.11.1 upgrade and preserve saved data
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem release/*.exe)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one candidate installer.' }
+          ./tests/windows-upgrade.ps1 -Installer $installers[0].FullName -ExpectedVersion '0.11.1' -BaselineVersions @('0.11.0') -MaxUpgradeMilliseconds 10000
+      - name: Report the raw trial even when the time requirement fails
+        if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
+        shell: pwsh
+        run: node scripts/windows-installation-report.cjs output/windows-upgrade-proof.json output/windows-installation-benchmark.md
+      - name: Save full benchmark and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-upgrade-proof-0.11.0
+          path: |
+            output/windows-upgrade-proof.json
+            output/windows-installation-benchmark.md
+          if-no-files-found: error

@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,

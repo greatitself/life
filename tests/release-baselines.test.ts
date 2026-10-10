@@ -9,12 +9,14 @@ const { releaseBaselines } = require('../scripts/release-baselines.cjs') as {
 describe('Windows installer upgrade baselines', () => {
   it('checks only the latest preceding release for 0.10.0 without lexical comparisons', () => {
     expect(releaseBaselines('0.10.0')).toEqual(['0.9.0'])
-    expect(releaseBaselines('1.0.0')).toEqual(['0.10.0'])
+    expect(releaseBaselines('1.0.0')).toEqual(['0.11.0'])
   })
 
   it('benchmarks new releases only from the latest published release', () => {
     expect(releaseBaselines('0.10.1')).toEqual(['0.10.0'])
     expect(releaseBaselines('0.11.0')).toEqual(['0.10.0'])
+    expect(releaseBaselines('0.11.1')).toEqual(['0.11.0'])
+    expect(releaseBaselines('0.12.0')).toEqual(['0.11.0'])
   })
 
   it('supports rebuilding 0.9.0 without trying to upgrade from the same version', () => {

@@ -4,7 +4,8 @@ param(
     [string]$ExpectedVersion,
     [Alias('BaselineVersion')]
     [string[]]$BaselineVersions = @(),
-    [string]$ProofPath = 'output/windows-upgrade-proof.json'
+    [string]$ProofPath = 'output/windows-upgrade-proof.json',
+    [double]$MaxUpgradeMilliseconds = 0
 )
 
 # This destructive installer smoke test belongs only on a disposable Windows CI runner.
@@ -21,6 +22,9 @@ trap {
 if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true') {
     throw 'Run this installer upgrade test only on a disposable GitHub Actions Windows runner.'
 }
+if (-not [double]::IsFinite($MaxUpgradeMilliseconds) -or $MaxUpgradeMilliseconds -lt 0) {
+    throw 'The optional upgrade time limit must be finite and nonnegative; zero disables it.'
+}
 
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
 if ([IO.Path]::GetExtension($Installer) -ne '.exe') { throw 'Installer must be a Windows .exe.' }
@@ -35,7 +39,7 @@ function Get-ValidatedBaselineVersions([string[]]$Versions, [string]$TargetVersi
     }
     if (-not $Versions -or $Versions.Count -eq 0) {
         # The default matches release CI: test only the latest published predecessor.
-        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0') |
+        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0', '0.11.0') |
             Where-Object { [version]$_ -lt [version]$TargetVersion } |
             Sort-Object { [version]$_ } -Descending |
             Select-Object -First 1
@@ -52,6 +56,33 @@ function Get-ValidatedBaselineVersions([string[]]$Versions, [string]$TargetVersi
             throw "Baseline $version must be older than target $TargetVersion."
         }
         $version
+    }
+}
+
+function Get-UpgradePerformance([object[]]$Pairs, [double]$MaximumMilliseconds) {
+    if (-not [double]::IsFinite($MaximumMilliseconds) -or $MaximumMilliseconds -lt 0) {
+        throw 'Invalid upgrade performance limit.'
+    }
+    if ($MaximumMilliseconds -eq 0) { return $null }
+    if (-not $Pairs -or $Pairs.Count -eq 0) { throw 'An upgrade performance gate requires a complete trial.' }
+    $trials = [Collections.Generic.List[object]]::new()
+    foreach ($pair in $Pairs) {
+        $timing = $pair.timings.targetUpgrade
+        if (-not $pair.ok -or -not $timing.ok -or $timing.kind -ne 'nsis' -or
+            -not [double]::IsFinite($timing.elapsedMilliseconds) -or $timing.elapsedMilliseconds -lt 0) {
+            throw 'An upgrade performance gate requires a successful complete installer timing.'
+        }
+        $trials.Add([pscustomobject]@{
+            baselineVersion = $pair.baselineVersion; targetVersion = $pair.targetVersion
+            elapsedMilliseconds = $timing.elapsedMilliseconds
+            passed = $timing.elapsedMilliseconds -lt $MaximumMilliseconds
+        })
+    }
+    return [pscustomobject]@{
+        maximumMilliseconds = $MaximumMilliseconds; strictlyBelow = $true
+        passed = @($trials | Where-Object { -not $_.passed }).Count -eq 0
+        trials = $trials.ToArray()
+        scope = 'Complete NSIS installer launch through exit, including synchronous previous-version cleanup; no elapsed time is subtracted.'
     }
 }
 
@@ -486,6 +517,8 @@ $null = New-Item -ItemType Directory -Path $downloadDirectory
 $pairs = [Collections.Generic.List[object]]::new()
 $startedAt = [DateTime]::UtcNow.ToString('o')
 $succeeded = $false
+$functionalValidationPassed = $false
+$performanceGate = $null
 $failure = $null
 try {
     foreach ($baselineVersion in $BaselineVersions) {
@@ -497,6 +530,12 @@ try {
         }
     }
     if ($pairs.Count -ne $BaselineVersions.Count) { throw 'Not every requested baseline produced an upgrade proof.' }
+    $functionalValidationPassed = $true
+    $performanceGate = Get-UpgradePerformance $pairs.ToArray() $MaxUpgradeMilliseconds
+    if ($null -ne $performanceGate -and -not $performanceGate.passed) {
+        $rawDurations = ($performanceGate.trials | ForEach-Object { "$($_.baselineVersion)->$($_.targetVersion): $($_.elapsedMilliseconds)ms" }) -join ', '
+        throw "Windows upgrade must finish strictly below ${MaxUpgradeMilliseconds}ms; raw trial: $rawDurations. All installation identity and saved-data checks passed."
+    }
     $succeeded = $true
 } catch {
     $failure = $_.Exception.Message
@@ -504,13 +543,14 @@ try {
 } finally {
     $proof = [pscustomobject]@{
         ok = $succeeded; failure = $failure
+        functionalValidationPassed = $functionalValidationPassed; performanceGate = $performanceGate
         targetVersion = $ExpectedVersion; baselineVersions = $BaselineVersions
         installerSHA256 = (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash
         startedAt = $startedAt; completedAt = [DateTime]::UtcNow.ToString('o')
         pairs = $pairs.ToArray(); phases = $script:PhaseTimings.ToArray()
         measurement = @{
             clock = 'System.Diagnostics.Stopwatch'
-            scope = 'NSIS process launch through exit; downloads, hashes, registration checks and cleanup are separate phases.'
+            scope = 'NSIS process launch through exit, including synchronous previous-version cleanup; downloads, hashes, registration checks and owned test cleanup are separate phases.'
             sampleCountPerOperation = 1
             order = @('baseline fresh install', 'target upgrade', 'owned cleanup', 'target fresh install')
             cachePolicy = 'Same disposable runner; operating-system and filesystem caches are not flushed.'
@@ -523,6 +563,7 @@ try {
             windowsVersion = [Environment]::OSVersion.VersionString
             powerShellVersion = $PSVersionTable.PSVersion.ToString()
             runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT
+            sourceSHA = $env:LIFE_SOURCE_SHA
         }
     }
     $outputPath = [IO.Path]::GetFullPath($ProofPath)

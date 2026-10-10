@@ -1,11 +1,97 @@
 import { describe, expect, it } from 'vitest'
 import {
   addUsageTokens,
+  createUsageReader,
+  formatUsageMinorCurrency,
+  remainingUsagePercent,
   savedUsageSessions,
   usageSummary,
   usageTokens,
+  usageWindowName,
 } from '../src/renderer/usage'
+import type { ProviderUsageSnapshot } from '../src/shared/usage'
 import type { Message, Thread } from '../src/renderer/state'
+
+describe('native account allowance presentation', () => {
+  it('derives remaining allowance only from an explicitly reported utilization', () => {
+    expect(remainingUsagePercent(12.5)).toBe(87.5)
+    expect(remainingUsagePercent(0)).toBe(100)
+    expect(remainingUsagePercent(100)).toBe(0)
+    expect(remainingUsagePercent(110)).toBe(0)
+    for (const unknown of [undefined, NaN, Infinity, -1])
+      expect(remainingUsagePercent(unknown)).toBeUndefined()
+  })
+  it('uses native durations rather than assuming every primary quota is five hours', () => {
+    expect(usageWindowName(300, 'Primary allowance')).toBe('5-hour allowance')
+    expect(usageWindowName(10080, 'Primary allowance')).toBe('Weekly allowance')
+    expect(usageWindowName(15, 'Primary allowance')).toBe('15-minute allowance')
+    expect(usageWindowName(undefined, 'Primary allowance')).toBe('Primary allowance')
+  })
+  it('converts native spend-cap minor units using the reported currency precision', () => {
+    expect(formatUsageMinorCurrency(125, 'USD')).toContain('1.25')
+    expect(formatUsageMinorCurrency(125, 'JPY')).toContain('125')
+    expect(formatUsageMinorCurrency(125, 'KWD')).toContain('0.125')
+    expect(formatUsageMinorCurrency(125)).toBe('125 minor currency units (currency not reported)')
+    expect(formatUsageMinorCurrency(125, 'ABC')).toBe('125 minor currency units (ABC)')
+  })
+  it('shares only pending reads for the same native machine and provider', async () => {
+    const read = createUsageReader()
+    let requests = 0
+    const resolvers: ((value: ProviderUsageSnapshot) => void)[] = []
+    const native = () => {
+      requests++
+      return new Promise<ProviderUsageSnapshot>((done) => {
+        resolvers.push(done)
+      })
+    }
+    const first = read('host-a', 'codex', native)
+    expect(read('host-a', 'codex', native)).toBe(first)
+    await Promise.resolve()
+    expect(requests).toBe(1)
+    resolvers.shift()!({ provider: 'codex', status: 'available', fetchedAt: 1, limits: [] })
+    await first
+    const refreshed = read('host-a', 'codex', native)
+    expect(refreshed).not.toBe(first)
+    const otherMachine = read('host-b', 'codex', native)
+    const otherProvider = read('host-a', 'claude', native)
+    expect(otherMachine).not.toBe(refreshed)
+    expect(otherProvider).not.toBe(refreshed)
+    await Promise.resolve()
+    expect(requests).toBe(4)
+    for (const resolve of resolvers)
+      resolve({ provider: 'codex', status: 'available', fetchedAt: 1, limits: [] })
+    await Promise.all([refreshed, otherMachine, otherProvider])
+  })
+  it('allows retry after a native read rejects without retaining a rejected cache', async () => {
+    const read = createUsageReader()
+    let requests = 0
+    const failed = () => {
+      requests++
+      return Promise.reject(new Error('Native quota unavailable'))
+    }
+    const first = read('host-a', 'codex', failed)
+    expect(read('host-a', 'codex', failed)).toBe(first)
+    await expect(first).rejects.toThrow('Native quota unavailable')
+    await expect(read('host-a', 'codex', failed)).rejects.toThrow('Native quota unavailable')
+    expect(requests).toBe(2)
+  })
+  it('starts a fresh read after reconnect and an obsolete completion cannot clear it', async () => {
+    const read = createUsageReader()
+    const resolvers: ((value: ProviderUsageSnapshot) => void)[] = []
+    const native = () => new Promise<ProviderUsageSnapshot>((resolve) => resolvers.push(resolve))
+    const obsolete = read('host-a', 'codex', native)
+    await Promise.resolve()
+    read.clear()
+    const reconnected = read('host-a', 'codex', native)
+    expect(reconnected).not.toBe(obsolete)
+    await Promise.resolve()
+    resolvers[0]({ provider: 'codex', status: 'available', fetchedAt: 1, limits: [] })
+    await obsolete
+    expect(read('host-a', 'codex', native)).toBe(reconnected)
+    resolvers[1]({ provider: 'codex', status: 'available', fetchedAt: 2, limits: [] })
+    await reconnected
+  })
+})
 
 function message(
   details: Record<string, unknown>,

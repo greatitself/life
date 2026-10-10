@@ -1,11 +1,60 @@
 import type { Provider } from '../shared/types'
 import type {
+  ProviderUsageSnapshot,
   UsageContext,
   UsageModelTotals,
   UsageSessionTotals,
   UsageTokenTotals,
 } from '../shared/usage'
 import type { Message, Thread } from './state'
+
+/** Native quota utilization is percent used; absence never means a full allowance. */
+export function remainingUsagePercent(usedPercent: number | undefined): number | undefined {
+  return typeof usedPercent === 'number' && Number.isFinite(usedPercent) && usedPercent >= 0
+    ? Math.max(0, Math.min(100, 100 - usedPercent))
+    : undefined
+}
+export function usageWindowName(minutes: number | undefined, fallback: string): string {
+  if (!minutes || !Number.isFinite(minutes) || minutes < 0) return fallback
+  if (minutes === 10080) return 'Weekly allowance'
+  if (minutes === 1440) return 'Daily allowance'
+  if (minutes % 10080 === 0) return `${minutes / 10080}-week allowance`
+  if (minutes % 1440 === 0) return `${minutes / 1440}-day allowance`
+  if (minutes % 60 === 0) return `${minutes / 60}-hour allowance`
+  return `${minutes}-minute allowance`
+}
+/** Convert only explicitly currency-denominated native minor units. */
+export function formatUsageMinorCurrency(amount: number, currency?: string): string {
+  const code = currency?.toUpperCase()
+  if (code && Intl.supportedValuesOf('currency').includes(code)) {
+    const formatter = new Intl.NumberFormat(undefined, { style: 'currency', currency: code })
+    const digits = formatter.resolvedOptions().maximumFractionDigits ?? 0
+    return formatter.format(amount / 10 ** digits)
+  }
+  return `${amount.toLocaleString()} minor currency units${code ? ` (${code})` : ' (currency not reported)'}`
+}
+/** Share a pending native read across StrictMode effect replay, then allow refresh. */
+export function createUsageReader() {
+  const pending = new Map<string, Promise<ProviderUsageSnapshot>>()
+  const readPending = (
+    machineIdentity: string,
+    provider: Provider,
+    read: (provider: Provider) => Promise<ProviderUsageSnapshot>,
+  ): Promise<ProviderUsageSnapshot> => {
+    const key = JSON.stringify([machineIdentity, provider])
+    const existing = pending.get(key)
+    if (existing) return existing
+    const request = Promise.resolve().then(() => read(provider))
+    pending.set(key, request)
+    const settled = () => {
+      if (pending.get(key) === request) pending.delete(key)
+    }
+    void request.then(settled, settled)
+    return request
+  }
+  readPending.clear = () => pending.clear()
+  return readPending
+}
 
 const tokenKeys = [
   'inputTokens',

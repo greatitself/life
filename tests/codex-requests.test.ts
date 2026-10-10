@@ -245,6 +245,7 @@ class Channel extends EventEmitter {
   stderr = new EventEmitter()
   destroyed = false
   sent: Wire[] = []
+  holdAccountUsage = false
   models: Wire[] = [
     {
       model: 'test-model',
@@ -265,6 +266,7 @@ class Channel extends EventEmitter {
   write(raw: string) {
     const message = JSON.parse(raw)
     this.sent.push(message)
+    if (this.holdAccountUsage && message.method === 'account/rateLimits/read') return true
     if (message.id != null && message.method)
       queueMicrotask(() => {
         const result =
@@ -496,6 +498,50 @@ describe('Codex account usage and input capabilities', () => {
         ordinaryUsageAllowed: true,
         limits: [{ planType: 'pro', primary: { usedPercent: 30 }, credits: { balance: '5' } }],
       },
+    })
+  })
+
+  it('clears old quota metadata when native authentication changes', async () => {
+    const { agents, channel, events } = await fixture()
+    await agents.usage('codex')
+    channel.reply({ method: 'account/updated', params: { authMode: 'chatgpt', planType: 'plus' } })
+    expect(events.findLast((event) => event.type === 'account-usage')?.details).toMatchObject({
+      provider: 'codex',
+      machineIdentity: 'test-machine',
+      status: 'unavailable',
+      accountType: 'plus',
+      limits: [],
+    })
+    channel.reply({
+      method: 'account/rateLimits/updated',
+      params: { rateLimits: { limitId: 'codex', primary: { usedPercent: 0 } } },
+    })
+    const latest = events.findLast((event) => event.type === 'account-usage')?.details as Wire
+    expect(latest.limits[0].primary).toEqual({ usedPercent: 0 })
+    expect(latest.limits[0].credits).toBeUndefined()
+    expect(latest.ordinaryUsageAllowed).toBeUndefined()
+  })
+
+  it('rejects an obsolete quota read after an account change without losing machine scope', async () => {
+    const { agents, channel } = await fixture()
+    channel.holdAccountUsage = true
+    const reading = agents.usage('codex')
+    await vi.waitFor(() =>
+      expect(channel.sent.some((message) => message.method === 'account/rateLimits/read')).toBe(
+        true,
+      ),
+    )
+    const request = channel.sent.findLast(
+      (message) => message.method === 'account/rateLimits/read',
+    )!
+    channel.reply({ method: 'account/updated', params: { authMode: null, planType: null } })
+    channel.reply({ id: request.id, result: channel.accountUsage })
+    expect(await reading).toMatchObject({
+      provider: 'codex',
+      machineIdentity: 'test-machine',
+      status: 'unavailable',
+      limits: [],
+      message: 'Codex account changed while reading limits. Refresh account limits.',
     })
   })
 

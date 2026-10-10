@@ -36,6 +36,8 @@ class Channel extends EventEmitter {
   held = new Set<string>()
   errors = new Map<string, string>()
   transportState?: 'connected' | 'suspended' | 'closed'
+  account: Record<string, unknown> = {}
+  usage: Record<string, unknown> = accountUsage
 
   write(raw: string) {
     const message = JSON.parse(raw) as ControlRequest
@@ -50,8 +52,8 @@ class Channel extends EventEmitter {
         this.controlReply(
           message,
           subtype === 'get_usage'
-            ? accountUsage
-            : { claude_code_version: '2.1.296', session_state: 'idle' },
+            ? this.usage
+            : { claude_code_version: '2.1.296', session_state: 'idle', account: this.account },
         )
     })
     return true
@@ -153,6 +155,112 @@ async function flush() {
 }
 
 describe('Claude native account usage transport', () => {
+  it('returns safe account identity and machine scope from promptless initialization', async () => {
+    const { agents, ssh, channels } = fixture((channel) => {
+      channel.account = {
+        email: 'researcher@example.test',
+        organization: 'Research team',
+        subscriptionType: 'max',
+        apiProvider: 'firstParty',
+        tokenSource: 'claude.ai',
+        accessToken: 'must-not-cross-ipc',
+        refreshToken: 'must-not-cross-ipc',
+      }
+    })
+    const snapshot = await agents.usage('claude')
+    expect(snapshot).toMatchObject({
+      accountType: 'max',
+      machineIdentity: JSON.stringify(['machine-a', 22, 'researcher']),
+      account: {
+        email: 'researcher@example.test',
+        organization: 'Research team',
+        apiProvider: 'firstParty',
+        tokenSource: 'claude.ai',
+      },
+    })
+    expect(snapshot.account).not.toHaveProperty('accessToken')
+    expect(snapshot.account).not.toHaveProperty('refreshToken')
+    expect(channels[0].users()).toEqual([])
+    expect(ssh.exec).not.toHaveBeenCalled()
+  })
+
+  it('uses the live conversation account without re-initializing it or adding a user turn', async () => {
+    const { agents, channels, start } = fixture((channel) => {
+      channel.account = {
+        email: 'active@example.test',
+        organization: 'Active organization',
+        apiProvider: 'firstParty',
+      }
+    })
+    await start()
+    const channel = channels[0]
+    const before = [...channel.messages]
+    expect(await agents.usage('claude')).toMatchObject({
+      account: { email: 'active@example.test', organization: 'Active organization' },
+      machineIdentity: JSON.stringify(['machine-a', 22, 'researcher']),
+    })
+    expect(channel.messages.slice(before.length).map((message) => message.request)).toEqual([
+      { subtype: 'get_usage', skip_behaviors: true },
+    ])
+    expect(channel.of('initialize')).toHaveLength(1)
+    expect(channel.users()).toHaveLength(1)
+    expect(channel.closes).toBe(0)
+  })
+
+  it('preserves a native reset with unknown account allowance and no token-based substitute', async () => {
+    const { agents } = fixture((channel) => {
+      channel.usage = {
+        subscription_type: 'pro',
+        rate_limits_available: true,
+        rate_limits: { five_hour: { utilization: null, resets_at: '2026-10-10T08:00:00Z' } },
+        session: { total_cost_usd: 20, model_usage: { opus: { inputTokens: 100000 } } },
+      }
+    })
+    const snapshot = await agents.usage('claude')
+    expect(snapshot).toMatchObject({
+      status: 'available',
+      limits: [{ id: 'five_hour', primary: { windowDurationMins: 300, resetsAt: 1791619200 } }],
+    })
+    expect(snapshot.limits[0].primary).not.toHaveProperty('usedPercent')
+    expect(snapshot).not.toHaveProperty('estimatedCostUsd')
+    expect(snapshot).not.toHaveProperty('remainingTokens')
+  })
+
+  it('keeps cloud-provider account identity while reporting native subscription quota unavailable', async () => {
+    const { agents } = fixture((channel) => {
+      channel.account = { apiProvider: 'bedrock', tokenSource: 'none' }
+      channel.usage = { subscription_type: null, rate_limits_available: false, rate_limits: null }
+    })
+    expect(await agents.usage('claude')).toMatchObject({
+      status: 'unavailable',
+      limits: [],
+      account: { apiProvider: 'bedrock' },
+      message: expect.stringMatching(/Bedrock|bedrock/),
+      machineIdentity: JSON.stringify(['machine-a', 22, 'researcher']),
+    })
+  })
+
+  it('uses safe live plan metadata only when native usage omits the plan, preserving explicit null', async () => {
+    const { agents, channels, start } = fixture((channel) => {
+      channel.account = { subscriptionType: 'pro', apiProvider: 'firstParty' }
+      channel.usage = {
+        rate_limits_available: true,
+        rate_limits: { five_hour: { utilization: 12.5, resets_at: null } },
+      }
+    })
+    await start()
+    expect(await agents.usage('claude')).toMatchObject({ accountType: 'pro' })
+    channels[0].usage = {
+      subscription_type: null,
+      rate_limits_available: false,
+      rate_limits: null,
+    }
+    const snapshot = await agents.usage('claude')
+    expect(snapshot.status).toBe('unavailable')
+    expect(snapshot).not.toHaveProperty('accountType')
+    expect(snapshot.limits).toEqual([])
+  })
+
   it('reports offline account data as unavailable without opening a provider process', async () => {
     const { agents, ssh, channels } = fixture()
     ssh.state.status = 'disconnected'

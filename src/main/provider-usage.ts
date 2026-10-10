@@ -10,14 +10,15 @@ const number = (value: unknown) =>
 function rateWindow(value: unknown, previous?: UsageRateWindow): UsageRateWindow | undefined {
   const wire = object(value)
   const usedPercent = number(wire.usedPercent)
-  if (usedPercent === undefined) return previous
+  const windowDurationMins = number(wire.windowDurationMins)
+  const resetsAt = number(wire.resetsAt)
+  if (usedPercent === undefined && windowDurationMins === undefined && resetsAt === undefined)
+    return previous
   return {
     ...(previous || {}),
-    usedPercent,
-    ...(number(wire.windowDurationMins) !== undefined
-      ? { windowDurationMins: number(wire.windowDurationMins) }
-      : {}),
-    ...(number(wire.resetsAt) !== undefined ? { resetsAt: number(wire.resetsAt) } : {}),
+    ...(usedPercent !== undefined ? { usedPercent } : {}),
+    ...(windowDurationMins !== undefined ? { windowDurationMins } : {}),
+    ...(resetsAt !== undefined ? { resetsAt } : {}),
   }
 }
 
@@ -76,19 +77,25 @@ export function codexUsageSnapshot(
   rollingUpdate = false,
   fetchedAt = Date.now(),
 ): ProviderUsageSnapshot {
+  const accountId = string(result.accountId) || undefined
+  // A reported account switch must not inherit another account's sparse metadata.
+  if (rollingUpdate && accountId && previous?.accountId && accountId !== previous.accountId)
+    previous = undefined
   const limits = new Map<string, UsageRateLimit>(
     rollingUpdate ? (previous?.limits || []).map((limit) => [limit.id, limit]) : [],
   )
+  const updatedBuckets = new Set<string>()
   for (const [key, value] of Object.entries(object(result.rateLimitsByLimitId))) {
     if (!value || typeof value !== 'object') continue
     const id = string(object(value).limitId) || key
     limits.set(id, rateLimit(value, id, rollingUpdate ? limits.get(id) : undefined))
+    updatedBuckets.add(id)
   }
   const legacy = object(result.rateLimits)
   if (Object.keys(legacy).length) {
     const id = string(legacy.limitId) || 'codex'
     // The modern map is authoritative when both views contain the same bucket.
-    if (rollingUpdate || !limits.has(id))
+    if (!updatedBuckets.has(id))
       limits.set(id, rateLimit(legacy, id, rollingUpdate ? limits.get(id) : undefined))
   }
   const ordinaryUsageAllowed =
@@ -118,6 +125,7 @@ export function codexUsageSnapshot(
     limits: [...limits.values()],
     error: undefined,
     message: undefined,
+    ...(accountId ? { accountId } : {}),
     ...(accountType ? { accountType } : {}),
     ...(ordinaryUsageAllowed !== undefined ? { ordinaryUsageAllowed } : {}),
     ...(availableResetCredits !== undefined ? { availableResetCredits } : {}),

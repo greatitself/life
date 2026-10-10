@@ -282,6 +282,20 @@ async function runUsageChecks(context) {
     proof.filters.push({ selection: label, expected: totals })
   }
   await open()
+  assert.equal(
+    await dialog().evaluate((root) => {
+      const allowance = root.querySelector('.usage-account-section')
+      const saved = root.querySelector('.usage-summary')
+      return Boolean(
+        allowance &&
+        saved &&
+        allowance.compareDocumentPosition(saved) & Node.DOCUMENT_POSITION_FOLLOWING,
+      )
+    }),
+    true,
+    'Provider account allowance appears before retained session statistics',
+  )
+  proof.accountAllowanceFirst = true
   await dialog().getByLabel('Usage machine', { exact: true }).selectOption('all')
   await dialog().getByLabel('Usage provider', { exact: true }).selectOption('all')
   await assertTotals(expectedSessions, 'All machines and providers')
@@ -347,6 +361,7 @@ async function runUsageChecks(context) {
       )
       assert.deepEqual(snapshot.extraUsage, {
         isEnabled: true,
+        amountUnit: 'minor-currency',
         monthlyLimit: 2500,
         usedCredits: 125,
         usedPercent: 5,
@@ -373,25 +388,58 @@ async function runUsageChecks(context) {
       assert.equal(await card.getByText('Credits balance: 18.00', { exact: true }).count(), 1)
       assert.equal(await card.getByText('Available reset credits: 2', { exact: true }).count(), 1)
     } else {
-      assert.match(
-        await card.textContent(),
-        /125 credits used of 2[,.]500 \(USD\)/,
-        'Claude extra usage retains reported credit units without inventing a dollar cost',
+      assert.equal(
+        await card
+          .getByText(`${await formatted(1.25, true)} used of ${await formatted(25, true)}`, {
+            exact: false,
+          })
+          .count(),
+        1,
+        'Claude extra usage converts native minor USD currency amounts to dollars',
       )
+      assert.equal(
+        await card
+          .getByText(`${await formatted(23.75, true)} left before the monthly spend cap`, {
+            exact: true,
+          })
+          .count(),
+        1,
+        'Claude extra usage shows the reported monthly spend cap remaining',
+      )
+      assert.equal(await card.getByText('95% left', { exact: true }).count(), 1)
     }
     for (const limit of snapshot.limits) {
       for (const kind of ['primary', 'secondary']) {
         if (!limit[kind]) continue
+        const remaining = Math.min(100, Math.max(0, 100 - limit[kind].usedPercent))
         const progress = card.getByRole('progressbar', {
-          name: `${limit.label || limit.id} ${kind} window utilization`,
+          name: `${limit.label || limit.id} ${kind} window remaining allowance`,
           exact: true,
         })
         assert.equal(
           Number(await progress.getAttribute('value')),
-          limit[kind].usedPercent,
-          `${providers[provider]} account meter shows provider-reported utilization`,
+          remaining,
+          `${providers[provider]} account meter shows remaining native allowance`,
         )
         assert.equal(await progress.getAttribute('max'), '100')
+        const expectedLabels = await page().evaluate(
+          ({ used, remaining }) => {
+            const format = (value) => value.toLocaleString(undefined, { maximumFractionDigits: 1 })
+            return { used: `${format(used)}% used`, left: `${format(remaining)}% left` }
+          },
+          { used: limit[kind].usedPercent, remaining },
+        )
+        const window = progress.locator('..')
+        assert.equal(
+          await window.getByText(expectedLabels.left, { exact: true }).count(),
+          1,
+          `${providers[provider]} account headline reports allowance left`,
+        )
+        assert.equal(
+          await window.getByText(expectedLabels.used, { exact: false }).count(),
+          1,
+          `${providers[provider]} account caption preserves provider-reported usage`,
+        )
       }
     }
   }
@@ -411,6 +459,9 @@ async function runUsageChecks(context) {
   }, 'Refresh limits reads both provider accounts through real SSH')
   await context.waitUntil(() => refresh().isEnabled(), 'Refreshed native account limits settle')
   await assertTotals(expectedSessions, 'Account refresh preserves retained session spend')
+  await dialog().evaluate((root) => {
+    root.scrollTop = 0
+  })
   if (context.screenshot) await context.screenshot('life-usage.png')
   else await page().screenshot({ path: join(context.screenshots, 'life-usage.png') })
   const unavailableMarker = join(context.fixture.root, 'usage-limits-error')
@@ -451,7 +502,7 @@ async function runUsageChecks(context) {
         .getByRole('article', { name: `${providers[provider]} account usage`, exact: true })
         .getByRole('progressbar')
         .count()) > 0,
-      `${providers[provider]} native utilization windows return after recovery`,
+      `${providers[provider]} native allowance windows return after recovery`,
     )
   }
   await dialog().getByRole('button', { name: 'Close dialog', exact: true }).click()
@@ -468,7 +519,7 @@ async function runUsageChecks(context) {
     JSON.stringify(proof, null, 2),
   )
   context.checks.push(
-    'Native usage retains Codex and Claude counters and cost once, filters machine/provider, shows current context and refreshes both account limits over SSH',
+    'Native usage puts remaining account allowance first, retains Codex and Claude counters and cost once, filters machine/provider, shows current context and refreshes both provider limits over SSH',
   )
 }
 

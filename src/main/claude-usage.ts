@@ -35,14 +35,52 @@ function rateWindow(value: unknown, windowDurationMins: number): UsageRateWindow
   const wire = object(value)
   if (!wire) return undefined
   const usedPercent = percent(wire.utilization)
-  // A reset timestamp alone does not say how much of the window was used.
-  if (usedPercent === undefined) return undefined
   const resetsAt = resetSeconds(wire.resets_at)
+  if (usedPercent === undefined && resetsAt === undefined) return undefined
+  // A reset timestamp identifies the window without establishing any remaining quota.
   return {
-    usedPercent,
+    ...(usedPercent !== undefined ? { usedPercent } : {}),
     windowDurationMins,
     ...(resetsAt !== undefined ? { resetsAt } : {}),
   }
+}
+
+/** Account source names are metadata; credential values and unrelated native fields stay private. */
+export function claudeAccountInfo(account: unknown): ProviderUsageSnapshot['account'] {
+  const wire = object(account)
+  if (!wire) return undefined
+  const entries = [
+    'email',
+    'organization',
+    'authMethod',
+    'apiProvider',
+    'tokenSource',
+    'apiKeySource',
+  ].flatMap((key) => {
+    const value = text(wire[key])
+    return value ? [[key, value]] : []
+  })
+  return entries.length ? Object.fromEntries(entries) : undefined
+}
+
+function unavailableMessage(
+  account: ProviderUsageSnapshot['account'],
+  accountType: string | undefined,
+) {
+  if (account?.apiProvider && account.apiProvider !== 'firstParty')
+    return `Claude subscription quota is unavailable for the active ${account.apiProvider} provider.`
+  const source = account?.apiKeySource?.toLowerCase()
+  const apiKeyActive =
+    account?.authMethod === 'api_key' ||
+    account?.authMethod === 'api_key_helper' ||
+    (!account?.authMethod &&
+      account?.tokenSource === 'none' &&
+      Boolean(source && !['none', 'unknown'].includes(source)))
+  if (apiKeyActive && !accountType)
+    return 'Claude subscription quota is unavailable for API-key authentication; API usage is billed separately.'
+  if (accountType)
+    return 'Claude account quota information is unavailable. The native usage request returned no plan limits; profile scope may be missing or the usage endpoint could not be read.'
+  return 'Claude account quota information is unavailable for this session.'
 }
 
 const windows = [
@@ -57,9 +95,15 @@ const windows = [
 export function normalizeClaudeUsageSnapshot(
   response: unknown,
   fetchedAt = Date.now(),
+  nativeAccount?: unknown,
 ): ProviderUsageSnapshot {
   const wire = object(response)
-  const accountType = text(wire?.subscription_type)
+  const account = claudeAccountInfo(nativeAccount)
+  // Native null explicitly identifies an API/third-party session, unlike an omitted field.
+  const accountType =
+    wire?.subscription_type === undefined
+      ? text(object(nativeAccount)?.subscriptionType)
+      : text(wire.subscription_type)
   const rateLimits = wire?.rate_limits_available === true ? object(wire.rate_limits) : undefined
   const limits: UsageRateLimit[] = []
 
@@ -88,13 +132,14 @@ export function normalizeClaudeUsageSnapshot(
   const extra = object(rateLimits?.extra_usage)
   const monthlyLimit = nonNegativeNumber(extra?.monthly_limit)
   const usedCredits = nonNegativeNumber(extra?.used_credits)
-  const usedPercent = percent(extra?.utilization)
+  const usedPercent = nonNegativeNumber(extra?.utilization)
   const currency = text(extra?.currency)
-  // Keep provider-reported units. Utilization does not establish a credit balance or access.
+  // Native /usage amounts are minor currency units, not an account credit balance.
   const extraUsage =
     typeof extra?.is_enabled === 'boolean'
       ? {
           isEnabled: extra.is_enabled,
+          amountUnit: 'minor-currency' as const,
           ...(monthlyLimit !== undefined ? { monthlyLimit } : {}),
           ...(usedCredits !== undefined ? { usedCredits } : {}),
           ...(usedPercent !== undefined ? { usedPercent } : {}),
@@ -109,9 +154,8 @@ export function normalizeClaudeUsageSnapshot(
     fetchedAt,
     limits,
     ...(accountType ? { accountType } : {}),
+    ...(account ? { account } : {}),
     ...(extraUsage ? { extraUsage } : {}),
-    ...(!available
-      ? { message: 'Claude account quota information is unavailable for this session.' }
-      : {}),
+    ...(!available ? { message: unavailableMessage(account, accountType) } : {}),
   }
 }

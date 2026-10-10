@@ -129,9 +129,19 @@
 .usage-window progress::-webkit-progress-value {
   background: var(--accent);
 }
-.usage-session-section,
-.usage-account-section {
+.usage-session-section {
   margin-top: 26px;
+}
+.usage-account-section {
+  margin-top: 20px;
+}
+.usage-history-heading {
+  margin: 30px 0 14px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 550;
 }
 .usage-session-section h3,
 .usage-account-section h3 {
@@ -298,9 +308,16 @@
   font-size: 11px;
 }
 .usage-window strong {
-  color: var(--text);
-  font-weight: 500;
+  color: var(--text-strong);
+  font-size: 22px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.usage-extra-remaining {
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 500;
 }
 .usage-footnote {
   margin: 20px 0 0;

@@ -2,7 +2,8 @@ import type { Provider } from './types'
 
 /** Native provider account data. Percentages and reset times never imply access. */
 export interface UsageRateWindow {
-  usedPercent: number
+  /** Absent when the provider reports only a reset time or other metadata. */
+  usedPercent?: number
   windowDurationMins?: number
   /** Unix seconds, as reported by the provider. */
   resetsAt?: number
@@ -34,12 +35,24 @@ export interface ProviderUsageSnapshot {
   availableResetCredits?: number
   extraUsage?: {
     isEnabled: boolean
+    /** Native Claude spend-cap amounts are minor units of the reported currency. */
+    amountUnit?: 'minor-currency'
     monthlyLimit?: number
     usedCredits?: number
     usedPercent?: number
     currency?: string
   }
   accountType?: string
+  /** Opaque native account identity; never infer it from the machine profile. */
+  accountId?: string
+  account?: {
+    email?: string
+    organization?: string
+    authMethod?: string
+    apiProvider?: string
+    tokenSource?: string
+    apiKeySource?: string
+  }
   message?: string
   error?: string
 }

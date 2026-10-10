@@ -245,7 +245,7 @@ describe('exact built-in source extension migration', () => {
     expect(await updated.exportExtension(bundle.id)).toEqual(modified)
   })
 
-  it('keeps unknown extensions disabled and readable, then explicitly adapts them without duplicating baked creates', async () => {
+  it('automatically rebuilds compatible unknown extensions after archiving baked creates', async () => {
     const { store, options, sourceDir } = await fixture()
     const bundle = await bakeHeading(store)
     const extra = await store.apply({
@@ -258,9 +258,14 @@ describe('exact built-in source extension migration', () => {
     await store.close()
     await updateBuiltIn(sourceDir)
     const updated = await restart({ ...options, incorporatedExtensions: [identity(bundle)] })
-    expect(updated.get()).toMatchObject({ enabled: false, baseChanged: true })
-    expect(updated.get().error).toContain('additional source extensions')
-    expect(updated.get().active).toBeUndefined()
+    expect(updated.get().enabled).toBe(true)
+    expect(updated.get().baseChanged).toBeUndefined()
+    expect(updated.get().error).toBeUndefined()
+    expect(await execute(updated)).toMatchObject({
+      heading: 'Research',
+      density: 'compact',
+      greeting: 'Research lab',
+    })
     expect(updated.get().extensions.map(({ id }) => id)).toEqual([bundle.id, unknownId])
     expect(await updated.exportExtension(unknownId)).toEqual(unknownBundle)
     expect(
@@ -270,7 +275,7 @@ describe('exact built-in source extension migration', () => {
     await updated.close()
     const stable = await restart({ ...options, incorporatedExtensions: [identity(bundle)] })
     expect(await readFile(join(updated.path, 'state.json'), 'utf8')).toBe(savedBeforeRestart)
-    expect(stable.get().error).toContain('additional source extensions')
+    expect(stable.get().error).toBeUndefined()
     await stable.apply({
       summary: 'Adapt additional terminology',
       baseRevision: stable.get().revision,

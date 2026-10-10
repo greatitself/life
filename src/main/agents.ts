@@ -35,7 +35,7 @@ import {
 } from './codex-requests'
 import { claudeElicitationQuestions, claudeElicitationResponse } from './claude-requests'
 import { codexUsageSnapshot } from './provider-usage'
-import { normalizeClaudeUsageSnapshot } from './claude-usage'
+import { claudeAccountInfo, normalizeClaudeUsageSnapshot } from './claude-usage'
 
 type DurableChannel = ClientChannel & { transportState?: 'connected' | 'suspended' | 'closed' }
 
@@ -169,6 +169,8 @@ interface Session {
   claudeRestartForSettings?: boolean
   claudeUsageCallId?: string
   claudeCodeVersion?: string
+  claudeAccount?: ProviderUsageSnapshot['account']
+  claudeSubscriptionType?: string
   claudeActiveChildren?: Map<string, { itemId: string; title?: string; parentItemId?: string }>
   claudeTaskRuns?: Map<string, string>
   phase: 'initializing' | 'startingTurn' | 'running'
@@ -191,6 +193,7 @@ export class Agents {
   private codexDefaultTiers = new Map<string, string | null>()
   private codexDiskConfig?: Wire
   private codexUsageSnapshots = new WeakMap<RPC, ProviderUsageSnapshot>()
+  private codexAccountRevisions = new WeakMap<RPC, number>()
   private codexConfigStarting?: Promise<Wire>
   private claudeModels?: ModelOption[]
   private claudeModelsStarting?: Promise<ModelOption[]>
@@ -467,8 +470,10 @@ export class Agents {
     return this.codexModels
   }
   async usage(provider: Provider): Promise<ProviderUsageSnapshot> {
+    const machine = this.machineIdentity()
     const unavailable = (message: string): ProviderUsageSnapshot => ({
       provider,
+      machineIdentity: machine,
       status: 'unavailable',
       fetchedAt: Date.now(),
       limits: [],
@@ -482,13 +487,15 @@ export class Agents {
       } catch (error) {
         return unavailable(error instanceof Error ? error.message : String(error))
       }
-    const machine = this.machineIdentity()
     const generation = this.generation
     try {
       const rpc = await this.getCodex()
+      const accountRevision = this.codexAccountRevisions.get(rpc) || 0
       const response = await rpc.request('account/rateLimits/read', {}, 15000)
       if (machine !== this.machineIdentity() || generation !== this.generation)
         throw new Error('The connected machine changed while reading account limits.')
+      if (accountRevision !== (this.codexAccountRevisions.get(rpc) || 0))
+        throw new Error('Codex account changed while reading limits. Refresh account limits.')
       const snapshot = { ...codexUsageSnapshot(response), machineIdentity: machine }
       this.codexUsageSnapshots.set(rpc, snapshot)
       return snapshot
@@ -529,7 +536,13 @@ export class Agents {
           controller.signal,
         )
         current()
-        return normalizeClaudeUsageSnapshot(response)
+        return {
+          ...normalizeClaudeUsageSnapshot(response, Date.now(), {
+            ...session.claudeAccount,
+            subscriptionType: session.claudeSubscriptionType,
+          }),
+          machineIdentity: machine,
+        }
       } finally {
         this.ssh.off('disconnected', cancelled)
         this.ssh.off('workspace-changing', cancelled)
@@ -566,11 +579,14 @@ export class Agents {
     this.ssh.on('workspace-changing', cancelled)
     try {
       current()
-      await controls.request({ subtype: 'initialize', hooks: null }, 60000)
+      const initialized = await controls.request({ subtype: 'initialize', hooks: null }, 60000)
       current()
       const response = await controls.request({ subtype: 'get_usage', skip_behaviors: true })
       current()
-      return normalizeClaudeUsageSnapshot(response)
+      return {
+        ...normalizeClaudeUsageSnapshot(response, Date.now(), initialized.account),
+        machineIdentity: machine,
+      }
     } finally {
       this.ssh.off('disconnected', cancelled)
       this.ssh.off('workspace-changing', cancelled)
@@ -852,6 +868,8 @@ export class Agents {
       claudeState: old?.claudeState,
       claudeUsageCallId: old?.claudeUsageCallId,
       claudeCodeVersion: old?.claudeCodeVersion,
+      claudeAccount: old?.claudeAccount,
+      claudeSubscriptionType: old?.claudeSubscriptionType,
       claudeActiveChildren: old?.claudeActiveChildren,
       claudeTaskRuns: old?.claudeTaskRuns,
       claudeFastModeNeedsOptIn: old?.claudeFastModeNeedsOptIn,
@@ -1345,6 +1363,29 @@ export class Agents {
   private receiveCodex(message: Wire, rpc: RPC) {
     const method = string(message.method)
     const params = object(message.params)
+    if (method === 'account/updated') {
+      this.codexAccountRevisions.set(rpc, (this.codexAccountRevisions.get(rpc) || 0) + 1)
+      const snapshot: ProviderUsageSnapshot = {
+        provider: 'codex',
+        status: 'unavailable',
+        fetchedAt: Date.now(),
+        limits: [],
+        ...(string(params.planType) ? { accountType: string(params.planType) } : {}),
+        message: 'Codex account changed. Refresh account limits.',
+      }
+      this.codexUsageSnapshots.set(rpc, snapshot)
+      if (this.codexByMachine.get(this.machineIdentity()) === rpc) {
+        const ownedSnapshot = { ...snapshot, machineIdentity: this.machineIdentity() }
+        this.codexUsageSnapshots.set(rpc, ownedSnapshot)
+        this.emit({
+          sessionId: '',
+          provider: 'codex',
+          type: 'account-usage',
+          details: ownedSnapshot,
+        })
+      }
+      return
+    }
     if (method === 'account/rateLimits/updated') {
       const snapshot = codexUsageSnapshot(params, this.codexUsageSnapshots.get(rpc), true)
       this.codexUsageSnapshots.set(rpc, snapshot)
@@ -1935,6 +1976,9 @@ export class Agents {
         { subtype: 'initialize', hooks: null, forwardSubagentText: true },
         60000,
       )
+      session.claudeAccount = claudeAccountInfo(initialized.account)
+      session.claudeSubscriptionType =
+        string(object(initialized.account).subscriptionType) || undefined
       session.claudeFastModeNeedsOptIn =
         initialized.fast_mode_disabled_reason === 'sdk_opt_in_required'
       session.claudeCodeVersion = string(initialized.claude_code_version) || this.ssh.state.claude

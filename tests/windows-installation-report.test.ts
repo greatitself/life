@@ -46,6 +46,61 @@ const proof = () => ({
 })
 
 describe('Windows installation benchmark report', () => {
+  const gatedProof = (duration: number) => {
+    const input = proof()
+    input.pairs[0].timings.targetUpgrade = timing(duration)
+    const passed = duration < 10_000
+    return {
+      ...input,
+      ok: passed,
+      failure: passed ? null : 'Upgrade exceeded the strict time requirement',
+      functionalValidationPassed: true,
+      performanceGate: {
+        maximumMilliseconds: 10_000,
+        strictlyBelow: true,
+        passed,
+        trials: [
+          {
+            baselineVersion: input.pairs[0].baselineVersion,
+            targetVersion: input.pairs[0].targetVersion,
+            elapsedMilliseconds: duration,
+            passed,
+          },
+        ],
+      },
+    }
+  }
+
+  it.each([
+    [9_999.999, 'passed'],
+    [10_000, 'failed'],
+    [10_000.001, 'failed'],
+  ])('enforces a strict ten-second gate using the raw %s ms trial', (duration, result) => {
+    const input = gatedProof(Number(duration))
+    const report = installationReport(input)
+    expect(report).toContain('strictly below 10.000 s')
+    expect(report).toContain(`Performance gate: **${result}**`)
+    expect(report).toContain(`Raw upgrade trial: **${duration} ms**`)
+    expect(report).toContain('saved-data validation: **passed**')
+    expect(report).toContain('| Upgrade 0.10.0 → 0.11.0 | 10.000 s |')
+    expect(report).toContain('including synchronous previous-version cleanup')
+  })
+
+  it('rejects gate evidence that subtracts time or claims a boundary trial passed', () => {
+    const input = gatedProof(10_000)
+    input.performanceGate.trials[0].elapsedMilliseconds = 9_000
+    expect(() => installationReport(input)).toThrow('complete raw installer timing')
+    input.performanceGate.trials[0].elapsedMilliseconds = 10_000
+    input.performanceGate.trials[0].passed = true
+    expect(() => installationReport(input)).toThrow('complete raw installer timing')
+  })
+
+  it('rejects successful overall results when the performance gate failed', () => {
+    const input = gatedProof(12_000)
+    input.ok = true
+    expect(() => installationReport(input)).toThrow('contradicts its trials')
+  })
+
   it('compares process timings and reports upgrade duration separately from overhead', () => {
     const result = installationReport(proof())
     expect(result).toContain('| Baseline 0.10.0 fresh install | 80.000 s | 170.68 MiB |')
@@ -58,6 +113,7 @@ describe('Windows installation benchmark report', () => {
     expect(result).toContain('| Baseline | 22000 | 476.84 MiB |')
     expect(result).toContain('| Upgraded target | 100 | 381.47 MiB |')
     expect(result).toContain('exclude user data')
+    expect(result).toContain('previous-version cleanup performed by the installer remains included')
   })
 
   it('reports slower targets without labeling them as improvements', () => {

@@ -594,7 +594,7 @@ const rendered = renderToStaticMarkup(<Select.Root defaultValue="high"><Select.T
     expect((await executeControl(restarted)).props.children).toBe('Recompiled after missing asset')
   })
 
-  it('uses the updated built-in interface after an app source update while preserving user changes for migration', async () => {
+  it('automatically rebuilds compatible user changes after an app source update', async () => {
     const { store, options } = await createStore()
     await patchedControl(store, 'Custom control from the previous app version')
     const before = await store.getContext({ paths: ['src/renderer/ResearchControl.tsx'] })
@@ -606,33 +606,31 @@ const rendered = renderToStaticMarkup(<Select.Root defaultValue="high"><Select.T
     const updated = new SourceCodeStore(options)
     stores.push(updated)
     await updated.init()
-    expect(updated.get().enabled).toBe(false)
-    expect(updated.get().active).toBeUndefined()
-    expect(updated.get().error).toMatch(/updat|base|new|chang/i)
+    expect(updated.get().enabled).toBe(true)
+    expect(updated.get().active!.revision).toBeGreaterThan(before.revision)
+    expect(updated.get().error).toBeUndefined()
     expect(
       (await updated.getContext({ paths: ['src/renderer/ResearchControl.tsx'] })).files,
     ).toEqual(before.files)
-    expect(updated.get().baseChanged).toBe(true)
+    expect(updated.get().baseChanged).toBeUndefined()
     const changedBase = await updated.getContext({ paths: ['src/shared/greeting.ts'] })
-    expect(changedBase.files[0].content).toContain('Original workspace')
-    expect(changedBase.baselineFiles).toEqual([
-      {
-        path: 'src/shared/greeting.ts',
-        content: "export const greeting: string = 'Updated Life workspace'\n",
-      },
-    ])
-    await patchedControl(updated, 'Migrated workspace control')
-    expect(updated.get().baseChanged).toBeFalsy()
-    expect(
-      (await updated.getContext({ paths: ['src/shared/greeting.ts'] })).files[0].content,
-    ).toContain('Updated Life workspace')
+    expect(changedBase.files[0].content).toContain('Updated Life workspace')
+    expect(changedBase.baselineFiles).toBeUndefined()
+    const migrated = updated.get()
+    expect((await executeControl(updated)).props.children).toBe(
+      'Custom control from the previous app version',
+    )
     await updated.close()
     const restarted = new SourceCodeStore(options)
     stores.push(restarted)
     await restarted.init()
     expect(restarted.get().enabled).toBe(true)
     expect(restarted.get().baseChanged).toBeFalsy()
-    expect((await executeControl(restarted)).props.children).toBe('Migrated workspace control')
+    expect(restarted.get().active).toEqual(migrated.active)
+    expect(restarted.get().revision).toBe(migrated.revision)
+    expect((await executeControl(restarted)).props.children).toBe(
+      'Custom control from the previous app version',
+    )
   })
 
   it('refreshes unchanged and newly shipped source during an upgrade while retaining user modifications and deletions', async () => {
@@ -708,14 +706,11 @@ import { version } from '../../package.json'
     const updated = new SourceCodeStore(options)
     stores.push(updated)
     await updated.init()
-    expect(updated.get()).toMatchObject({ enabled: false, baseChanged: true })
+    expect(updated.get().enabled).toBe(true)
+    expect(updated.get().baseChanged).toBeUndefined()
+    expect(updated.get().error).toBeUndefined()
     const preserved = await updated.getContext({ paths: ['src/renderer/main.tsx'] })
     expect(preserved.files[0].content).toBe(entry)
-    await updated.apply({
-      summary: 'Rebuild the customized interface for the updated Life installation',
-      baseRevision: preserved.revision,
-      files: [{ path: 'src/renderer/main.tsx', content: entry }],
-    })
     expect((await executeControl(updated)).props.children).toBe('2.0.0')
     expect(updated.get().baseChanged).toBeFalsy()
   })

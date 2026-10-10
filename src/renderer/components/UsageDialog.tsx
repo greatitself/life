@@ -4,7 +4,16 @@ import type { ConnectionProfile, Provider } from '../../shared/types'
 import type { ProviderUsageSnapshot, UsageRateLimit, UsageRateWindow } from '../../shared/usage'
 import type { Thread } from '../state'
 import { errorText } from '../api'
-import { formatUsageCost, formatUsageCount, savedUsageSessions, usageSummary } from '../usage'
+import {
+  createUsageReader,
+  formatUsageCost,
+  formatUsageCount,
+  formatUsageMinorCurrency,
+  remainingUsagePercent,
+  savedUsageSessions,
+  usageSummary,
+  usageWindowName,
+} from '../usage'
 import { Modal } from './Modal'
 import './usage.css'
 
@@ -12,14 +21,6 @@ const providerNames: Record<Provider, string> = { codex: 'Codex', claude: 'Claud
 const providers: Provider[] = ['codex', 'claude']
 type AccountState = { pending: boolean; snapshot?: ProviderUsageSnapshot; error?: string }
 
-function windowName(window: UsageRateWindow, fallback: string) {
-  const minutes = window.windowDurationMins
-  if (!minutes) return fallback
-  if (minutes % 10080 === 0) return `${minutes / 10080}-week window`
-  if (minutes % 1440 === 0) return `${minutes / 1440}-day window`
-  if (minutes % 60 === 0) return `${minutes / 60}-hour window`
-  return `${minutes}-minute window`
-}
 function resetTime(seconds: number | undefined): string | undefined {
   if (seconds === undefined || !Number.isFinite(seconds)) return undefined
   const date = new Date(seconds * 1000)
@@ -29,24 +30,33 @@ function resetTime(seconds: number | undefined): string | undefined {
         day: 'numeric',
         hour: 'numeric',
         minute: '2-digit',
+        timeZoneName: 'short',
       }).format(date)
     : undefined
 }
 function UsageWindow({ window, label }: { window: UsageRateWindow; label: string }) {
   const reset = resetTime(window.resetsAt)
+  const remaining = remainingUsagePercent(window.usedPercent)
   return (
     <div className="usage-window">
       <div>
-        <span>{windowName(window, label)}</span>
-        <strong>
-          {window.usedPercent.toLocaleString(undefined, { maximumFractionDigits: 1 })}% used
+        <span>{usageWindowName(window.windowDurationMins, label)}</span>
+        <strong data-quota="remaining">
+          {remaining === undefined
+            ? 'Not reported'
+            : `${remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })}% left`}
         </strong>
       </div>
-      <progress
-        max={100}
-        value={Math.min(100, Math.max(0, window.usedPercent))}
-        aria-label={`${label} utilization`}
-      />
+      {remaining === undefined ? (
+        <small>Remaining allowance not reported</small>
+      ) : (
+        <>
+          <progress max={100} value={remaining} aria-label={`${label} remaining allowance`} />
+          <small>
+            {window.usedPercent!.toLocaleString(undefined, { maximumFractionDigits: 1 })}% used
+          </small>
+        </>
+      )}
       {reset ? <small>Resets {reset}</small> : <small>Reset time not reported</small>}
     </div>
   )
@@ -67,7 +77,7 @@ function RateLimit({ limit }: { limit: UsageRateLimit }) {
           label={`${limit.label || limit.id} secondary window`}
         />
       ) : null}
-      {limit.credits ? (
+      {limit.credits?.hasCredits ? (
         <p>
           {limit.credits.unlimited
             ? 'Unlimited credits reported'
@@ -82,7 +92,7 @@ function RateLimit({ limit }: { limit: UsageRateLimit }) {
         <p className="usage-restriction">Provider reports that spend control has been reached.</p>
       ) : null}
       {limit.rateLimitReachedType ? <p>Limit status: {limit.rateLimitReachedType}</p> : null}
-      {limit.normalModelSlug ? <p>Model: {limit.normalModelSlug}</p> : null}
+      {limit.normalModelSlug ? <p>Normal model: {limit.normalModelSlug}</p> : null}
       {limit.individualLimit ? (
         <p>
           Spend control: {limit.individualLimit.used} used of {limit.individualLimit.limit}
@@ -118,6 +128,12 @@ function AccountUsage({
   connected: boolean
 }) {
   const snapshot = state?.snapshot
+  const extra = snapshot?.extraUsage
+  const extraRemaining = remainingUsagePercent(extra?.usedPercent)
+  const spendAmount = (amount: number) =>
+    extra?.amountUnit === 'minor-currency'
+      ? formatUsageMinorCurrency(amount, extra.currency)
+      : `${amount.toLocaleString()} credits`
   return (
     <article
       className="usage-account"
@@ -132,6 +148,9 @@ function AccountUsage({
           <span>{snapshot.accountType}</span>
         ) : null}
       </div>
+      {snapshot?.account?.email ? (
+        <p className="usage-account-identity">{snapshot.account.email}</p>
+      ) : null}
       {state?.error ? (
         <p role="alert" className="usage-error">
           {state.error}
@@ -147,25 +166,26 @@ function AccountUsage({
       {snapshot?.limits.map((limit) => (
         <RateLimit key={limit.id} limit={limit} />
       ))}
-      {snapshot?.extraUsage ? (
+      {extra ? (
         <div className="usage-limit">
-          <strong>Extra usage</strong>
+          <strong>Extra usage · monthly spend cap</strong>
           <p>
-            {snapshot.extraUsage.isEnabled ? 'Enabled' : 'Disabled'}
-            {snapshot.extraUsage.usedCredits !== undefined
-              ? ` · ${snapshot.extraUsage.usedCredits.toLocaleString()} credits used`
-              : ''}
-            {snapshot.extraUsage.monthlyLimit !== undefined
-              ? ` of ${snapshot.extraUsage.monthlyLimit.toLocaleString()}`
-              : ''}
-            {snapshot.extraUsage.currency ? ` (${snapshot.extraUsage.currency})` : ''}
+            {extra.isEnabled ? 'Enabled' : 'Disabled'}
+            {extra.usedCredits !== undefined ? ` · ${spendAmount(extra.usedCredits)} used` : ''}
+            {extra.monthlyLimit !== undefined ? ` of ${spendAmount(extra.monthlyLimit)}` : ''}
+            {extra.amountUnit !== 'minor-currency' && extra.currency ? ` (${extra.currency})` : ''}
           </p>
-          {snapshot.extraUsage.usedPercent !== undefined ? (
+          {extraRemaining !== undefined ? (
+            <strong className="usage-extra-remaining">
+              {extraRemaining.toLocaleString(undefined, { maximumFractionDigits: 1 })}% left
+            </strong>
+          ) : null}
+          {extra.amountUnit === 'minor-currency' &&
+          extra.monthlyLimit !== undefined &&
+          extra.usedCredits !== undefined ? (
             <p>
-              {snapshot.extraUsage.usedPercent.toLocaleString(undefined, {
-                maximumFractionDigits: 1,
-              })}
-              % used
+              {spendAmount(Math.max(0, extra.monthlyLimit - extra.usedCredits))} left before the
+              monthly spend cap
             </p>
           ) : null}
         </div>
@@ -191,7 +211,8 @@ function AccountUsage({
       ) : null}
       {snapshot ? (
         <small>
-          Reported {new Date(snapshot.fetchedAt).toLocaleString()}
+          {state?.error || !connected ? 'Last-known usage · ' : 'Reported '}
+          {new Date(snapshot.fetchedAt).toLocaleString()}
           {!connected ? ' · Connect to refresh' : ''}
         </small>
       ) : null}
@@ -227,6 +248,7 @@ export function UsageDialog({
   const [machine, setMachine] = useState('all')
   const [provider, setProvider] = useState<Provider | 'all'>('all')
   const [refresh, setRefresh] = useState(0)
+  const [coalescedRead] = useState(createUsageReader)
   const machineIdentity = activeMachineIdentity || activeProfileId
   const [accounts, setAccounts] = useState<{
     profileId?: string
@@ -235,13 +257,18 @@ export function UsageDialog({
   }>({ values: {} })
   const readUsage = useRef(onReadUsage)
   const opener = useRef<HTMLElement | null>(null)
+  const wasOpen = useRef(false)
   useLayoutEffect(() => {
-    if (open && document.activeElement instanceof HTMLElement)
+    if (open && !wasOpen.current && document.activeElement instanceof HTMLElement)
       opener.current = document.activeElement
+    wasOpen.current = open
   }, [open])
   useEffect(() => {
     readUsage.current = onReadUsage
   }, [onReadUsage])
+  useEffect(() => {
+    if (!connected) coalescedRead.clear()
+  }, [connected, coalescedRead])
   const sessions = useMemo(() => (open ? savedUsageSessions(threads) : []), [open, threads])
   const filtered = useMemo(
     () =>
@@ -308,7 +335,7 @@ export function UsageDialog({
     void Promise.allSettled(
       providers.map(async (name) => {
         try {
-          const snapshot = await read(name)
+          const snapshot = await coalescedRead(machineIdentity || activeProfileId, name, read)
           if (
             activeMachineIdentity &&
             snapshot.machineIdentity &&
@@ -345,7 +372,15 @@ export function UsageDialog({
     return () => {
       disposed = true
     }
-  }, [open, connected, activeProfileId, machineIdentity, activeMachineIdentity, refresh])
+  }, [
+    open,
+    connected,
+    activeProfileId,
+    machineIdentity,
+    activeMachineIdentity,
+    refresh,
+    coalescedRead,
+  ])
   useEffect(() => {
     if (!open || !connected || !onReadUsage) return
     const timer = window.setInterval(() => setRefresh((value) => value + 1), 60000)
@@ -355,7 +390,7 @@ export function UsageDialog({
     const value = accounts.machineIdentity === machineIdentity ? accounts.values[name] : undefined
     const live = liveAccounts[name]
     return live && (!value?.snapshot || live.fetchedAt > value.snapshot.fetchedAt)
-      ? { ...value, pending: value?.pending || false, snapshot: live }
+      ? { pending: value?.pending || false, snapshot: live }
       : value
   }
   return (
@@ -363,7 +398,7 @@ export function UsageDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Usage"
-      description="Native provider usage from your saved Life sessions and the connected machine’s account."
+      description="Remaining Codex and Claude Code allowance for the connected machine."
       className="usage-modal"
       onCloseAutoFocus={(event) => {
         event.preventDefault()
@@ -372,7 +407,7 @@ export function UsageDialog({
     >
       <div className="usage-filters">
         <label>
-          Machine
+          Saved session machine
           <select
             aria-label="Usage machine"
             value={machine}
@@ -398,8 +433,47 @@ export function UsageDialog({
             <option value="claude">Claude Code</option>
           </select>
         </label>
-        <span>All retained sessions</span>
+        <span>Account allowance uses the connected machine</span>
       </div>
+      <section className="usage-account-section" aria-label="Account limits">
+        <div className="usage-section-heading">
+          <div>
+            <h3>Account allowance remaining</h3>
+            <p>
+              {activeProfileId
+                ? `Connected machine · ${machineNames.get(activeProfileId) || 'Selected machine'}`
+                : 'Connect to a machine to read its provider limits.'}
+            </p>
+          </div>
+          <button
+            className="button secondary"
+            disabled={
+              !connected || !onReadUsage || providers.some((name) => accountFor(name)?.pending)
+            }
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            <RefreshCw size={14} />
+            Refresh limits
+          </button>
+        </div>
+        <div className="usage-accounts">
+          {providers
+            .filter((name) => provider === 'all' || provider === name)
+            .map((name) => (
+              <AccountUsage
+                key={name}
+                provider={name}
+                state={accountFor(name)}
+                connected={connected}
+              />
+            ))}
+        </div>
+        <p className="usage-explanation">
+          Allowance is reported by the provider. Reset times do not replenish these figures until a
+          new native report arrives; provider access restrictions remain separate.
+        </p>
+      </section>
+      <h3 className="usage-history-heading">Saved session activity</h3>
       <section className="usage-summary" aria-label="Saved usage totals" aria-live="polite">
         <div>
           <span>Reported tokens</span>
@@ -564,44 +638,6 @@ export function UsageDialog({
             No usage has been reported for this selection. Run an agent turn to begin tracking.
           </p>
         )}
-      </section>
-      <section className="usage-account-section" aria-label="Account limits">
-        <div className="usage-section-heading">
-          <div>
-            <h3>Account limits</h3>
-            <p>
-              {activeProfileId
-                ? `Connected machine · ${machineNames.get(activeProfileId) || 'Selected machine'}`
-                : 'Connect to a machine to read its provider limits.'}
-            </p>
-          </div>
-          <button
-            className="button secondary"
-            disabled={
-              !connected || !onReadUsage || providers.some((name) => accountFor(name)?.pending)
-            }
-            onClick={() => setRefresh((value) => value + 1)}
-          >
-            <RefreshCw size={14} />
-            Refresh limits
-          </button>
-        </div>
-        <div className="usage-accounts">
-          {providers
-            .filter((name) => provider === 'all' || provider === name)
-            .map((name) => (
-              <AccountUsage
-                key={name}
-                provider={name}
-                state={accountFor(name)}
-                connected={connected}
-              />
-            ))}
-        </div>
-        <p className="usage-explanation">
-          Utilization and reset times are observations, not a guarantee that another request will be
-          accepted.
-        </p>
       </section>
       <p className="usage-footnote">
         Saved-session totals include the native usage retained in Life, including earlier spend

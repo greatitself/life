@@ -526,12 +526,12 @@ try {
     $expected = $(if ($name -eq 'Get-CimInstance') { 'CimCmdlets' } else { 'Microsoft.PowerShell.Security' })
     if ($command.CommandType -ne [System.Management.Automation.CommandTypes]::Cmdlet) { throw ('Unexpected command type for ' + $name) }
     if ($command.ModuleName -cne $expected) { throw ('Unexpected native module for ' + $name) }
-    $home = [IO.Path]::GetFullPath($PSHOME)
+    $nativePowerShellHome = [IO.Path]::GetFullPath($PSHOME)
     $expectedBase = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'Modules', $expected))
     $actualBase = [IO.Path]::GetFullPath($command.Module.ModuleBase)
-    if (-not $actualBase.Equals($expectedBase, [StringComparison]::OrdinalIgnoreCase) -and -not $actualBase.Equals($home, [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module base for ' + $name + ': ' + $actualBase) }
+    if (-not $actualBase.Equals($expectedBase, [StringComparison]::OrdinalIgnoreCase) -and -not $actualBase.Equals($nativePowerShellHome, [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module base for ' + $name + ': ' + $actualBase) }
     $actualPath = [IO.Path]::GetFullPath($command.Module.Path)
-    if (-not $actualPath.StartsWith(($home + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
+    if (-not $actualPath.StartsWith(($nativePowerShellHome + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
     $records += [pscustomobject]@{ Command = $name; Module = $expected; ModuleBase = $actualBase; ModulePath = $actualPath }
   }
   [IO.File]::WriteAllText([Environment]::GetEnvironmentVariable('LIFE_FIXTURE_ORIGINS_OUTPUT'), [System.Management.Automation.PSSerializer]::Serialize([pscustomobject]@{ PSHOME = $PSHOME; PointerSize = [IntPtr]::Size; Modules = $records }, 6), [Text.UTF8Encoding]::new($false))

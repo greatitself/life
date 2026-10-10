@@ -29,6 +29,47 @@ namespace {
 constexpr DWORD kTerminalExit = 77;
 constexpr DWORD kMaxPathCharacters = 32768;
 
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+struct Diagnostics {
+  const wchar_t* stage = L"entry";
+  const wchar_t* role = L"none";
+  DWORD component = 0;
+  DWORD error = 0;
+  NTSTATUS native_status = 0;
+  NTSTATUS io_status = 0;
+  ULONG_PTR io_information = 0;
+  DWORD decoder_exit = STILL_ACTIVE;
+  bool failed = false;
+
+  bool boolean(BOOL value, const wchar_t* step) noexcept {
+    const DWORD immediate = value ? ERROR_SUCCESS : GetLastError();
+    if (!failed) { stage = step; error = immediate; failed = !value; }
+    return value != FALSE;
+  }
+  bool predicate(bool value, const wchar_t* step) noexcept {
+    if (!failed) { stage = step; error = ERROR_SUCCESS; failed = !value; }
+    return value;
+  }
+  void native(NTSTATUS status, const IO_STATUS_BLOCK& io, const wchar_t* step) noexcept {
+    if (failed) return;
+    stage = step; error = ERROR_SUCCESS; native_status = status;
+    io_status = io.Status; io_information = io.Information;
+    failed = status != 0 || io.Status != 0;
+  }
+};
+#define LIFE_BOOL(call, step) (diagnostic ? diagnostic->boolean((call), (step)) : static_cast<bool>(call))
+#define LIFE_PRED(call, step) (diagnostic ? diagnostic->predicate((call), (step)) : (call))
+#define LIFE_NATIVE(status, io, step) do { if (diagnostic) diagnostic->native((status), (io), (step)); } while (false)
+#define LIFE_ROLE(call, name) (diagnostic ? (diagnostic->role = (name), diagnostic->component = 0, (call)) : (call))
+#define LIFE_DIAG_ARGUMENT , diagnostic
+#else
+#define LIFE_BOOL(call, step) (call)
+#define LIFE_PRED(call, step) (call)
+#define LIFE_NATIVE(status, io, step) ((void)0)
+#define LIFE_ROLE(call, name) (call)
+#define LIFE_DIAG_ARGUMENT
+#endif
+
 struct OwnedHandle {
   HANDLE value = nullptr;
   OwnedHandle() = default;
@@ -50,6 +91,9 @@ struct Attributes {
   std::vector<unsigned char> storage;
   LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
   bool initialized = false;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Diagnostics* diagnostic = nullptr;
+#endif
   ~Attributes() { clear(); }
   void clear() {
     if (initialized) DeleteProcThreadAttributeList(list);
@@ -61,10 +105,16 @@ struct Attributes {
     SetLastError(ERROR_SUCCESS);
     const BOOL first = InitializeProcThreadAttributeList(nullptr, 2, 0, &bytes);
     const DWORD error = GetLastError();
-    if (first || error != ERROR_INSUFFICIENT_BUFFER || !bytes || bytes > 65536) return false;
+    if (!LIFE_PRED(!first && error == ERROR_INSUFFICIENT_BUFFER && bytes && bytes <= 65536,
+        L"attributes-size")) {
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+      if (diagnostic) diagnostic->error = error;
+#endif
+      return false;
+    }
     storage.resize(bytes);
     list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-    if (!InitializeProcThreadAttributeList(list, 2, 0, &bytes)) return false;
+    if (!LIFE_BOOL(InitializeProcThreadAttributeList(list, 2, 0, &bytes), L"attributes-initialize")) return false;
     initialized = true;
     return true;
   }
@@ -100,57 +150,75 @@ bool ordinary_ancestors(const std::wstring& path, bool directory) {
   return true;
 }
 
-bool open_ordinary(const std::wstring& path, bool directory, OwnedHandle& result) {
+bool open_ordinary(const std::wstring& path, bool directory, OwnedHandle& result
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    , Diagnostics* diagnostic = nullptr
+#endif
+) {
   result.value = CreateFileW(path.c_str(), directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ,
       FILE_SHARE_READ, nullptr, OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
-  if (!result.valid()) return false;
+  if (!LIFE_BOOL(result.valid(), L"drive-open")) return false;
   BY_HANDLE_FILE_INFORMATION information{};
-  if (!GetFileInformationByHandle(result.value, &information)) return false;
+  if (!LIFE_BOOL(GetFileInformationByHandle(result.value, &information), L"drive-information")) return false;
   const DWORD attributes = information.dwFileAttributes;
-  return !(attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_COMPRESSED)) &&
-      (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == directory);
+  return LIFE_PRED(!(attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_COMPRESSED)) &&
+      (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == directory), L"drive-ordinary-type");
 }
 
 struct NativeFiles {
   decltype(&NtCreateFile) create_file = nullptr;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Diagnostics* diagnostic = nullptr;
+#endif
   bool resolve() {
     const HMODULE module = GetModuleHandleW(L"ntdll.dll");
-    if (!module) return false;
+    if (!LIFE_BOOL(module != nullptr, L"ntdll-module")) return false;
     const FARPROC procedure = GetProcAddress(module, "NtCreateFile");
-    if (!procedure) return false;
+    if (!LIFE_BOOL(procedure != nullptr, L"ntcreatefile-procedure")) return false;
     static_assert(sizeof(procedure) == sizeof(create_file));
     std::memcpy(&create_file, &procedure, sizeof(create_file));
     return true;
   }
   bool open_relative(HANDLE parent, const std::wstring& component, bool directory, OwnedHandle& result) const {
-    if (component.empty() || component.size() >= 32768 || component.find_first_of(L"\\/:") != std::wstring::npos) return false;
+    if (!LIFE_PRED(!component.empty() && component.size() < 32768 && component.find_first_of(L"\\/:") == std::wstring::npos,
+        L"relative-component")) return false;
     UNICODE_STRING unicode{static_cast<USHORT>(component.size() * sizeof(wchar_t)),
         static_cast<USHORT>(component.size() * sizeof(wchar_t)), const_cast<wchar_t*>(component.c_str())};
     OBJECT_ATTRIBUTES attributes{sizeof(OBJECT_ATTRIBUTES), parent, &unicode,
         OBJ_CASE_INSENSITIVE | 0x1000, nullptr, nullptr}; // OBJ_DONT_REPARSE
     IO_STATUS_BLOCK io{};
     BY_HANDLE_FILE_INFORMATION parent_info{};
-    if (!GetFileInformationByHandle(parent, &parent_info) || (parent_info.dwFileAttributes & 0x4c10) != 0x10) return false;
+    if (!LIFE_BOOL(GetFileInformationByHandle(parent, &parent_info), L"relative-parent-information") ||
+        !LIFE_PRED((parent_info.dwFileAttributes & 0x4c10) == 0x10, L"relative-parent-ordinary")) return false;
     const NTSTATUS status = create_file(&result.value,
         (directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ) | SYNCHRONIZE,
         &attributes, &io, nullptr, 0, FILE_SHARE_READ, FILE_OPEN,
         (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
         nullptr, 0);
-    if (status != 0 || io.Status != 0 || io.Information != 1 || !result.valid()) return false;
+    LIFE_NATIVE(status, io, L"relative-open");
+    if (!LIFE_PRED(status == 0 && io.Status == 0 && io.Information == 1 && result.valid(),
+        L"relative-open-result")) return false;
     BY_HANDLE_FILE_INFORMATION info{};
     DWORD flags = 0;
-    return GetHandleInformation(result.value, &flags) && !(flags & HANDLE_FLAG_INHERIT) &&
-        GetFileType(result.value) == FILE_TYPE_DISK && GetFileInformationByHandle(result.value, &info) &&
-        !(info.dwFileAttributes & 0x4c00) && (((info.dwFileAttributes & 0x10) != 0) == directory) &&
-        GetFileInformationByHandle(parent, &parent_info) && (parent_info.dwFileAttributes & 0x4c10) == 0x10;
+    return LIFE_BOOL(GetHandleInformation(result.value, &flags), L"relative-handle-information") &&
+        LIFE_PRED(!(flags & HANDLE_FLAG_INHERIT), L"relative-noninheriting") &&
+        LIFE_PRED(GetFileType(result.value) == FILE_TYPE_DISK, L"relative-disk") &&
+        LIFE_BOOL(GetFileInformationByHandle(result.value, &info), L"relative-file-information") &&
+        LIFE_PRED(!(info.dwFileAttributes & 0x4c00) && (((info.dwFileAttributes & 0x10) != 0) == directory),
+          L"relative-ordinary-type") &&
+        LIFE_BOOL(GetFileInformationByHandle(parent, &parent_info), L"relative-parent-recheck-information") &&
+        LIFE_PRED((parent_info.dwFileAttributes & 0x4c10) == 0x10, L"relative-parent-recheck-ordinary");
   }
 };
 
 bool pin_path(const std::wstring& path, bool directory, const NativeFiles& native,
     std::vector<OwnedHandle>& pins, OwnedHandle& leaf) {
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Diagnostics* diagnostic = native.diagnostic;
+#endif
   OwnedHandle drive;
-  if (!open_ordinary(path.substr(0, 3), true, drive)) return false;
+  if (!open_ordinary(path.substr(0, 3), true, drive LIFE_DIAG_ARGUMENT)) return false;
   pins.emplace_back(std::move(drive));
   HANDLE parent = pins.back().value;
   size_t start = 3;
@@ -158,6 +226,9 @@ bool pin_path(const std::wstring& path, bool directory, const NativeFiles& nativ
     const size_t separator = path.find(L'\\', start);
     const bool last = separator == std::wstring::npos;
     const std::wstring component = path.substr(start, last ? std::wstring::npos : separator - start);
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    if (diagnostic && !diagnostic->failed) ++diagnostic->component;
+#endif
     if (last) return native.open_relative(parent, component, directory, leaf);
     pins.emplace_back();
     if (!native.open_relative(parent, component, true, pins.back())) return false;
@@ -200,6 +271,9 @@ struct OutputGuard {
   HANDLE root = nullptr;
   decltype(&NtCreateFile) create_file = nullptr;
   bool created = false;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Diagnostics* diagnostic = nullptr;
+#endif
   static constexpr wchar_t name[] = L".life-installer-extractor-guard";
   static constexpr ULONG dont_reparse = 0x1000;
   static constexpr NTSTATUS name_missing = static_cast<NTSTATUS>(0xc0000034UL);
@@ -218,7 +292,8 @@ struct OutputGuard {
 
   bool ordinary_root() const {
     BY_HANDLE_FILE_INFORMATION info{};
-    return GetFileInformationByHandle(root, &info) && (info.dwFileAttributes & 0x4c10) == FILE_ATTRIBUTE_DIRECTORY;
+    return LIFE_BOOL(GetFileInformationByHandle(root, &info), L"guard-root-information") &&
+        LIFE_PRED((info.dwFileAttributes & 0x4c10) == FILE_ATTRIBUTE_DIRECTORY, L"guard-root-ordinary");
   }
 
   bool create(HANDLE directory, const NativeFiles& native) {
@@ -228,16 +303,21 @@ struct OutputGuard {
     const NTSTATUS status = open(file.value, io, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
         FILE_SHARE_READ, FILE_CREATE,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_DELETE_ON_CLOSE);
+    LIFE_NATIVE(status, io, L"guard-create");
     if (file.valid()) created = true; // A FILE_CREATE handle must own a new entry.
-    if (status != 0 || io.Status != 0 || io.Information != 2 || !file.valid()) return false;
+    if (!LIFE_PRED(status == 0 && io.Status == 0 && io.Information == 2 && file.valid(), L"guard-create-result")) return false;
     DWORD flags = 0;
     BY_HANDLE_FILE_INFORMATION info{};
     char byte = 'L';
     DWORD written = 0;
-    return GetHandleInformation(file.value, &flags) && !(flags & HANDLE_FLAG_INHERIT) &&
-        GetFileType(file.value) == FILE_TYPE_DISK && GetFileInformationByHandle(file.value, &info) &&
-        !(info.dwFileAttributes & 0x4c10) && WriteFile(file.value, &byte, 1, &written, nullptr) && written == 1 &&
-        FlushFileBuffers(file.value) && ordinary_root();
+    return LIFE_BOOL(GetHandleInformation(file.value, &flags), L"guard-handle-information") &&
+        LIFE_PRED(!(flags & HANDLE_FLAG_INHERIT), L"guard-noninheriting") &&
+        LIFE_PRED(GetFileType(file.value) == FILE_TYPE_DISK, L"guard-disk") &&
+        LIFE_BOOL(GetFileInformationByHandle(file.value, &info), L"guard-file-information") &&
+        LIFE_PRED(!(info.dwFileAttributes & 0x4c10), L"guard-ordinary-file") &&
+        LIFE_BOOL(WriteFile(file.value, &byte, 1, &written, nullptr), L"guard-write") &&
+        LIFE_PRED(written == 1, L"guard-write-length") &&
+        LIFE_BOOL(FlushFileBuffers(file.value), L"guard-flush") && ordinary_root();
   }
 
   bool remove() {
@@ -264,6 +344,7 @@ struct Child {
   bool membership = false;
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
   bool force_accounting_failure = false;
+  Diagnostics* diagnostic = nullptr;
 #endif
   ~Child() { if (launched && !drained) terminal_failure(job.value); }
 
@@ -273,8 +354,9 @@ struct Child {
 #endif
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
     DWORD returned = 0;
-    if (!QueryInformationJobObject(job.value, JobObjectBasicAccountingInformation,
-        &info, sizeof(info), &returned) || returned != sizeof(info)) return false;
+    if (!LIFE_BOOL(QueryInformationJobObject(job.value, JobObjectBasicAccountingInformation,
+        &info, sizeof(info), &returned), L"job-accounting") ||
+        !LIFE_PRED(returned == sizeof(info), L"job-accounting-length")) return false;
     active = info.ActiveProcesses;
     return true;
   }
@@ -311,7 +393,33 @@ struct Child {
 struct Fixture {
   std::wstring marker;
   std::wstring mode;
+  Diagnostics* diagnostic = nullptr;
 };
+
+bool fixture_diagnostics(const Fixture& fixture, const wchar_t* result) {
+  std::wstring path;
+  if (!fixture.diagnostic || !absolute_path(fixture.marker, path)) return false;
+  const size_t parent_end = path.rfind(L'\\');
+  if (parent_end == std::wstring::npos ||
+      !ordinary_ancestors(parent_end == 2 ? path.substr(0, 3) : path.substr(0, parent_end), true)) return false;
+  OwnedHandle marker;
+  marker.value = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (!marker.valid()) return false;
+  const Diagnostics& diagnostic = *fixture.diagnostic;
+  wchar_t text[1024]{};
+  const int length = swprintf_s(text,
+      L"stage=%ls\r\nrole=%ls\r\ncomponent=%lu\r\nwin32-error=%lu\r\nnative-status=0x%08lx\r\nio-status=0x%08lx\r\nio-information=%llu\r\ndecoder-exit=%lu\r\nresult=%ls\r\n",
+      diagnostic.stage, diagnostic.role, static_cast<unsigned long>(diagnostic.component),
+      static_cast<unsigned long>(diagnostic.error), static_cast<unsigned long>(diagnostic.native_status),
+      static_cast<unsigned long>(diagnostic.io_status), static_cast<unsigned long long>(diagnostic.io_information),
+      static_cast<unsigned long>(diagnostic.decoder_exit), result);
+  const DWORD bytes = static_cast<DWORD>(length > 0 ? length * sizeof(wchar_t) : 0);
+  DWORD written = 0;
+  const bool good = bytes && WriteFile(marker.value, text, bytes, &written, nullptr) && written == bytes &&
+      FlushFileBuffers(marker.value);
+  return marker.close() && good;
+}
 
 bool fixture_acknowledged(const std::wstring& marker) {
   const std::wstring path = marker + L".ack";
@@ -373,19 +481,26 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
     , const Fixture* fixture
 #endif
 ) {
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Diagnostics* diagnostic = fixture ? fixture->diagnostic : nullptr;
+#endif
   std::wstring exe, archive, output;
-  if (!absolute_path(input_exe, exe) || !absolute_path(input_archive, archive) ||
-      !absolute_path(input_output, output) || output.size() == 3 || !ordinary_ancestors(exe, false) ||
-      !ordinary_ancestors(archive, false) || !ordinary_ancestors(output, true)) return L"unavailable";
+  if (!LIFE_PRED(absolute_path(input_exe, exe), L"exe-absolute") ||
+      !LIFE_PRED(absolute_path(input_archive, archive), L"archive-absolute") ||
+      !LIFE_PRED(absolute_path(input_output, output), L"output-absolute") ||
+      !LIFE_PRED(output.size() != 3, L"output-not-drive-root") ||
+      !LIFE_PRED(ordinary_ancestors(exe, false), L"exe-ordinary-ancestry") ||
+      !LIFE_PRED(ordinary_ancestors(archive, false), L"archive-ordinary-ancestry") ||
+      !LIFE_PRED(ordinary_ancestors(output, true), L"output-ordinary-ancestry")) return L"unavailable";
   const size_t parent_end = exe.rfind(L'\\');
-  if (parent_end == std::wstring::npos) return L"unavailable";
+  if (!LIFE_PRED(parent_end != std::wstring::npos, L"decoder-parent")) return L"unavailable";
   const std::wstring cwd = parent_end == 2 ? exe.substr(0, 3) : exe.substr(0, parent_end);
-  if (_wcsicmp(cwd.c_str(), output.c_str()) == 0 ||
+  if (!LIFE_PRED(!(_wcsicmp(cwd.c_str(), output.c_str()) == 0 ||
       (cwd.size() > output.size() && cwd[output.size()] == L'\\' &&
-       _wcsnicmp(cwd.c_str(), output.c_str(), output.size()) == 0)) return L"unavailable";
+       _wcsnicmp(cwd.c_str(), output.c_str(), output.size()) == 0)), L"cwd-outside-payload")) return L"unavailable";
   std::wstring command = quote(exe) + L" x -t7z -y -aoa -bd -bb0 -bso0 -bse0 -bsp0 " +
       quote(L"-o" + output) + L" -- " + quote(archive);
-  if (command.size() >= kMaxPathCharacters) return L"unavailable";
+  if (!LIFE_PRED(command.size() < kMaxPathCharacters, L"command-bounded")) return L"unavailable";
 
   OwnedHandle exe_file, archive_file, output_directory, null_io;
   OutputGuard guard;
@@ -393,36 +508,46 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
   std::vector<OwnedHandle> ancestor_pins;
   Child child;
   Attributes attributes;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  native.diagnostic = diagnostic;
+  guard.diagnostic = diagnostic;
+  child.diagnostic = diagnostic;
+  attributes.diagnostic = diagnostic;
+#endif
   const wchar_t* result = L"unavailable";
   // All allocations and throwing string work precede successful CreateProcess.
   auto operation = [&]() {
-    if (!native.resolve() || !pin_path(exe, false, native, ancestor_pins, exe_file) ||
-        !pin_path(archive, false, native, ancestor_pins, archive_file) ||
-        !pin_path(output, true, native, ancestor_pins, output_directory)) return;
+    if (!native.resolve() || !LIFE_ROLE(pin_path(exe, false, native, ancestor_pins, exe_file), L"exe") ||
+        !LIFE_ROLE(pin_path(archive, false, native, ancestor_pins, archive_file), L"archive") ||
+        !LIFE_ROLE(pin_path(output, true, native, ancestor_pins, output_directory), L"output")) return;
     // Relative FILE_CREATE cannot follow a junction installed while the root
     // was empty. A retained, nonzero child keeps it nonempty during extraction;
     // NTFS rejects junction/symlink conversion of nonempty directories. No ACL
     // or token changes are made, and the entry is removed before verification.
     if (!guard.create(output_directory.value, native)) return;
     child.job.value = CreateJobObjectW(nullptr, nullptr);
-    if (!child.job.valid()) return;
+    if (!LIFE_BOOL(child.job.valid(), L"job-create")) return;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(child.job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) return;
+    if (!LIFE_BOOL(SetInformationJobObject(child.job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)),
+        L"job-kill-on-close")) return;
     DWORD flags = 0;
-    if (!GetHandleInformation(child.job.value, &flags) || (flags & HANDLE_FLAG_INHERIT)) return;
+    if (!LIFE_BOOL(GetHandleInformation(child.job.value, &flags), L"job-handle-information") ||
+        !LIFE_PRED(!(flags & HANDLE_FLAG_INHERIT), L"job-noninheriting")) return;
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     null_io.value = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (!null_io.valid() || !GetHandleInformation(null_io.value, &flags) || !(flags & HANDLE_FLAG_INHERIT)) return;
+    if (!LIFE_BOOL(null_io.valid(), L"nul-open") ||
+        !LIFE_BOOL(GetHandleInformation(null_io.value, &flags), L"nul-handle-information") ||
+        !LIFE_PRED((flags & HANDLE_FLAG_INHERIT) != 0, L"nul-inheriting")) return;
     if (!attributes.create()) return;
     // These values remain alive through attribute-list deletion below.
     HANDLE jobs[] = {child.job.value};
     HANDLE inherited[] = {null_io.value};
-    if (!UpdateProcThreadAttribute(attributes.list, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-        jobs, sizeof(jobs), nullptr, nullptr) ||
-        !UpdateProcThreadAttribute(attributes.list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        inherited, sizeof(inherited), nullptr, nullptr)) { attributes.clear(); return; }
+    if (!LIFE_BOOL(UpdateProcThreadAttribute(attributes.list, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+        jobs, sizeof(jobs), nullptr, nullptr), L"attributes-job-list") ||
+        !LIFE_BOOL(UpdateProcThreadAttribute(attributes.list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherited, sizeof(inherited), nullptr, nullptr), L"attributes-handle-list")) { attributes.clear(); return; }
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -436,37 +561,44 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
     const BOOL created = CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, TRUE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd.c_str(),
         &startup.StartupInfo, &process);
+    const BOOL created_checked = LIFE_BOOL(created, L"process-create");
     attributes.clear();
-    if (!created) return;
+    if (!created_checked) return;
     child.launched = true;
     child.process.value = process.hProcess;
     child.thread.value = process.hThread;
     result = L"error";
     BOOL in_job = FALSE;
-    if (!child.process.valid() || !child.thread.valid() ||
-        !IsProcessInJob(child.process.value, child.job.value, &in_job) || !in_job) {
+    if (!LIFE_PRED(child.process.valid() && child.thread.valid(), L"process-owned-handles") ||
+        !LIFE_BOOL(IsProcessInJob(child.process.value, child.job.value, &in_job), L"process-job-query") ||
+        !LIFE_PRED(in_job != FALSE, L"process-job-member")) {
       child.terminate_and_drain(); return;
     }
     child.membership = true;
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
-    if (fixture && !fixture_created(fixture, process.dwProcessId)) { child.terminate_and_drain(); return; }
+    if (fixture && fixture->mode != L"diagnostic" && !fixture_created(fixture, process.dwProcessId)) { child.terminate_and_drain(); return; }
 #endif
-    if (ResumeThread(child.thread.value) != 1) { child.terminate_and_drain(); return; }
+    if (!LIFE_PRED(ResumeThread(child.thread.value) == 1, L"process-resume")) { child.terminate_and_drain(); return; }
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
     child.force_accounting_failure = fixture && fixture->mode == L"fail-job-query";
 #endif
-    if (WaitForSingleObject(child.process.value, INFINITE) != WAIT_OBJECT_0) {
+    if (!LIFE_PRED(WaitForSingleObject(child.process.value, INFINITE) == WAIT_OBJECT_0, L"process-wait")) {
       child.terminate_and_drain(); return;
     }
     DWORD exit_code = STILL_ACTIVE;
     DWORD active = 0;
-    if (!GetExitCodeProcess(child.process.value, &exit_code) || exit_code != 0 ||
-        !child.accounting(active) || active != 0) { child.terminate_and_drain(); return; }
+    const BOOL exited = LIFE_BOOL(GetExitCodeProcess(child.process.value, &exit_code), L"process-exit-query");
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    if (diagnostic) diagnostic->decoder_exit = exit_code;
+#endif
+    if (!exited || !LIFE_PRED(exit_code == 0, L"process-exit-zero") ||
+        !child.accounting(active) || !LIFE_PRED(active == 0, L"job-drained")) { child.terminate_and_drain(); return; }
     child.drained = true;
     result = L"ok";
   };
   try { operation(); }
   catch (...) {
+    (void)LIFE_PRED(false, L"setup-exception");
     if (child.launched) { child.terminate_and_drain(); result = L"error"; }
   }
   attributes.clear();
@@ -506,16 +638,21 @@ void invoke(int string_size, NsisStack** stacktop, bool fixture_mode) noexcept {
     next = next->next;
   }
   const wchar_t* result = L"unavailable";
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  Fixture fixture;
+  Diagnostics diagnostic;
+#endif
   try {
     std::wstring exe, archive, output;
     bool valid = bounded_copy(nodes[0], string_size, exe) && bounded_copy(nodes[1], string_size, archive) &&
         bounded_copy(nodes[2], string_size, output);
 #ifdef LIFE_LAUNCHER_FIXTURE_ONLY
-    Fixture fixture;
     if (fixture_mode) valid = valid && bounded_copy(nodes[3], string_size, fixture.marker) &&
         bounded_copy(nodes[4], string_size, fixture.mode) &&
-        (fixture.mode == L"pause-after-create" || fixture.mode == L"fail-job-query");
+        (fixture.mode == L"pause-after-create" || fixture.mode == L"fail-job-query" || fixture.mode == L"diagnostic");
+    if (fixture_mode && fixture.mode == L"diagnostic") fixture.diagnostic = &diagnostic;
     if (valid) result = run(exe, archive, output, fixture_mode ? &fixture : nullptr);
+    if (valid && fixture.diagnostic && !fixture_diagnostics(fixture, result)) result = L"error";
 #else
     if (valid) result = run(exe, archive, output);
 #endif

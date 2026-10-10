@@ -30,6 +30,7 @@ const fixture = String.raw`
 #include <string>
 #include <utility>
 #include <vector>
+#define LIFE_DIAG_ARGUMENT
 using DWORD = unsigned long;
 using HANDLE = unsigned long;
 constexpr DWORD FILE_ATTRIBUTE_DIRECTORY = 0x10;

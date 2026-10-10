@@ -2509,11 +2509,15 @@ Section
     StrCmp $fixtureMode "launch-once" fixture_warm_launch
     StrCmp $fixtureMode "launch-locked" fixture_warm_launch fixture_warm_complete
     fixture_warm_launch:
+      StrCpy $fixtureStage "warm-launch-expected-ok"
+      !insertmacro FixtureObserveError $fixtureErrorAtEntry
       Push "$fixtureWarmOutput"
       Push "${nsisString(good)}"
       Push "${nsisString(modern?.decoder || '')}"
       LifeInstallerLauncher::Launch /NOUNLOAD
       Pop $fixtureScratch
+      StrCpy $fixtureResult $fixtureScratch
+      !insertmacro FixtureObserveError $fixtureErrorAtExit
       StrCmp $fixtureScratch "ok" 0 fixture_failed
     fixture_warm_complete:
   !endif

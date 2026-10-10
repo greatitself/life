@@ -531,8 +531,22 @@ try {
     $actualBase = [IO.Path]::GetFullPath($command.Module.ModuleBase)
     if (-not $actualBase.Equals($expectedBase, [StringComparison]::OrdinalIgnoreCase) -and -not $actualBase.Equals($nativePowerShellHome, [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module base for ' + $name + ': ' + $actualBase) }
     $actualPath = [IO.Path]::GetFullPath($command.Module.Path)
-    if (-not $actualPath.StartsWith(($nativePowerShellHome + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
-    $records += [pscustomobject]@{ Command = $name; Module = $expected; ModuleBase = $actualBase; ModulePath = $actualPath }
+    $assemblyIdentity = $null
+    if (-not $actualPath.StartsWith(($nativePowerShellHome + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+      if ($name -ne 'Get-CimInstance') { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
+      $assembly = $command.ImplementingType.Assembly
+      $assemblyName = $assembly.GetName()
+      $token = [BitConverter]::ToString($assemblyName.GetPublicKeyToken()).Replace('-', '').ToLowerInvariant()
+      if ($assemblyName.Name -cne 'Microsoft.Management.Infrastructure.CimCmdlets' -or $token -cne '31bf3856ad364e35' -or -not $assembly.GlobalAssemblyCache -or -not [string]::IsNullOrEmpty($assemblyName.CultureName)) { throw 'Unexpected native CIM implementing assembly identity.' }
+      $location = [IO.Path]::GetFullPath($assembly.Location)
+      if (-not $location.Equals($actualPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native CIM module and implementing assembly paths differ.' }
+      $windowsDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+      if ([string]::IsNullOrEmpty($windowsDirectory)) { throw 'Could not resolve the native Windows directory.' }
+      $expectedAssemblyPath = [IO.Path]::GetFullPath([IO.Path]::Combine($windowsDirectory, 'Microsoft.Net', 'assembly', 'GAC_MSIL', 'Microsoft.Management.Infrastructure.CimCmdlets', ('v4.0_' + $assemblyName.Version.ToString() + '__31bf3856ad364e35'), 'Microsoft.Management.Infrastructure.CimCmdlets.dll'))
+      if (-not $location.Equals($expectedAssemblyPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native CIM assembly is outside its exact Windows GAC identity path.' }
+      $assemblyIdentity = [pscustomobject]@{ Name = $assemblyName.Name; Version = $assemblyName.Version.ToString(); PublicKeyToken = $token; Culture = $assemblyName.CultureName; GlobalAssemblyCache = $assembly.GlobalAssemblyCache; Location = $location }
+    }
+    $records += [pscustomobject]@{ Command = $name; Module = $expected; ModuleBase = $actualBase; ModulePath = $actualPath; ImplementingAssembly = $assemblyIdentity }
   }
   [IO.File]::WriteAllText([Environment]::GetEnvironmentVariable('LIFE_FIXTURE_ORIGINS_OUTPUT'), [System.Management.Automation.PSSerializer]::Serialize([pscustomobject]@{ PSHOME = $PSHOME; PointerSize = [IntPtr]::Size; Modules = $records }, 6), [Text.UTF8Encoding]::new($false))
 } catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 75 }

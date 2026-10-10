@@ -40,7 +40,8 @@ jobs:
       - name: Verify strict timing and latest-baseline validation
         shell: pwsh
         run: ./tests/windows-upgrade-performance.ps1
-      - run: npm ci
+      - id: dependency_install
+        run: npm ci
       - name: Verify native installer process and policy guards
         shell: pwsh
         run: ./tests/windows-installer-process.ps1
@@ -54,6 +55,7 @@ jobs:
       - name: Verify native NSIS marker append and register preservation
         run: node scripts/verify-nsis-trace-fixture.cjs
       - name: Verify native installer payload integrity and guarded deployment
+        if: "!cancelled() && steps.dependency_install.outcome == 'success'"
         run: node scripts/verify-nsis-payload-fixture.cjs
       - run: npm run build
       - run: npx electron-builder --win --x64 --publish never

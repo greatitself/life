@@ -123,7 +123,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - id: dependency_install
+        run: npm ci
       - name: Verify native installer process and policy guards
         if: matrix.platform == 'windows-x64' && hashFiles('tests/windows-installer-process.ps1') != ''
         shell: pwsh
@@ -138,7 +139,7 @@ jobs:
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
       - name: Verify native installer payload integrity and guarded deployment
-        if: matrix.platform == 'windows-x64' && hashFiles('scripts/verify-nsis-payload-fixture.cjs') != ''
+        if: "!cancelled() && steps.dependency_install.outcome == 'success' && matrix.platform == 'windows-x64' && hashFiles('scripts/verify-nsis-payload-fixture.cjs') != ''"
         run: node scripts/verify-nsis-payload-fixture.cjs
       - name: Verify packaged Windows live customization
         if: matrix.platform == 'windows-x64'

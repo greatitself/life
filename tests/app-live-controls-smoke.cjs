@@ -659,9 +659,17 @@ async function fluidityChecks(page, checks, settle) {
     await page.getByRole('combobox', { name: 'Model: Updated model', exact: true }).count(),
     1,
   )
+  // A pointer hover on another row may remain open alongside this row's focus card.
+  await page.getByRole('button', { name: /^Thread Alpha,/ }).hover()
+  await page
+    .locator('.life-thread-hover-title')
+    .getByText('Thread Alpha', { exact: true })
+    .waitFor()
   await composer.focus()
   await arranged.getByRole('button', { name: /^Saved thread 42,/ }).focus()
-  const hover = page.locator('.life-thread-hover')
+  const hover = page.locator('.life-thread-hover').filter({
+    has: page.locator('.life-thread-hover-title').filter({ hasText: /^Saved thread 42$/ }),
+  })
   await hover.getByText('updated-test-model', { exact: true }).waitFor()
   assert.match(await hover.textContent(), /Reasoning: high/)
   await arranged.getByRole('button', { name: 'Restore', exact: true }).click()

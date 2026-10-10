@@ -3,10 +3,11 @@ const { createHash } = require('node:crypto')
 const { stat, writeFile } = require('node:fs/promises')
 const { createRequire } = require('node:module')
 const { join } = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 module.exports = async function packageDependencies(context) {
   const builderRequire = createRequire(require.resolve('app-builder-lib'))
-  const asar = await import(builderRequire.resolve('@electron/asar'))
+  const asar = await import(pathToFileURL(builderRequire.resolve('@electron/asar')).href)
   const resources = context.packager.getResourcesDir(context.appOutDir)
   const archive = join(resources, 'app.asar')
   const files = []

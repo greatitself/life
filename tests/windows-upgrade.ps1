@@ -40,7 +40,7 @@ function Get-ValidatedBaselineVersions([string[]]$Versions, [string]$TargetVersi
     }
     if (-not $Versions -or $Versions.Count -eq 0) {
         # The default matches release CI: test only the latest published predecessor.
-        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0', '0.11.0') |
+        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0', '0.11.0', '0.11.1') |
             Where-Object { [version]$_ -lt [version]$TargetVersion } |
             Sort-Object { [version]$_ } -Descending |
             Select-Object -First 1

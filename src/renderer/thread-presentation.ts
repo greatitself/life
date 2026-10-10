@@ -87,33 +87,159 @@ export function threadTurnStartedAt(thread: Pick<Thread, 'messages' | 'turn'>): 
   return first?.createdAt
 }
 
+export function toolLifecycle(
+  status?: string,
+): 'active' | 'failed' | 'interrupted' | 'completed' | 'unknown' {
+  if (!status) return 'completed'
+  const value = status.replace(/[_-]/g, '').toLowerCase()
+  if (
+    [
+      'running',
+      'inprogress',
+      'waiting',
+      'pending',
+      'pendinginit',
+      'queued',
+      'spawning',
+      'initializing',
+      'started',
+    ].includes(value)
+  )
+    return 'active'
+  if (['failed', 'errored', 'error'].includes(value)) return 'failed'
+  if (
+    ['interrupted', 'cancelled', 'canceled', 'stopped', 'killed', 'shutdown', 'declined'].includes(
+      value,
+    )
+  )
+    return 'interrupted'
+  if (
+    ['completed', 'complete', 'done', 'success', 'succeeded', 'exited', 'finished'].includes(value)
+  )
+    return 'completed'
+  return 'unknown'
+}
+
 function hasOutstandingActivity(group: TurnGroup): boolean {
-  return group.messages.some(
-    (message) =>
-      (message.kind === 'event' && message.status === 'waiting') ||
-      ((message.agentId || message.parentItemId || message.kind === 'subagent') &&
-        ['running', 'inProgress', 'in_progress', 'waiting', 'spawning', 'initializing'].includes(
-          message.status || '',
-        )),
+  return (
+    threadRunningChildIds(group.messages).size > 0 ||
+    group.messages.some(
+      (message) =>
+        (message.kind === 'event' && message.status === 'waiting') ||
+        (message.role === 'tool' &&
+          message.kind !== 'status' &&
+          message.kind !== 'event' &&
+          toolLifecycle(message.status) !== 'completed') ||
+        ((message.agentId || message.parentItemId || message.kind === 'subagent') &&
+          toolLifecycle(message.status) === 'active'),
+    )
+  )
+}
+
+/** Native child lifecycles supersede historical collab-tool snapshots retained in the transcript. */
+export function threadRunningChildIds(messages: Message[]): Set<string> {
+  const states = new Map<string, string>()
+  const lifecycles = new Map<string, string>()
+  for (const message of messages) {
+    if (message.activityStateUnknown) continue
+    if (!message.agentId && !message.parentItemId && message.kind !== 'subagent') continue
+    const id = message.agentId || message.parentItemId || message.id
+    // A completed child command does not settle the agent that ran it.
+    if (
+      message.status &&
+      (message.kind === 'subagent' || toolLifecycle(message.status) === 'active')
+    )
+      states.set(id, message.status)
+    if (message.kind === 'subagent') {
+      // Restored interrupted rows retain old provider details for inspection, not live state.
+      if (toolLifecycle(message.status) !== 'interrupted')
+        for (const participant of subagentPresentation(message).participants)
+          if (participant.status) states.set(participant.id, participant.status)
+      if (
+        (message.details?.lifecycle === 'turn' ||
+          (typeof message.details?.run_id === 'string' && message.details.run_id)) &&
+        message.status
+      )
+        lifecycles.set(id, message.status)
+    }
+  }
+  for (const [id, status] of lifecycles) states.set(id, status)
+  return new Set(
+    [...states].filter(([, status]) => toolLifecycle(status) === 'active').map(([id]) => id),
   )
 }
 
 export function threadHasRunningChildren(thread: Pick<Thread, 'messages' | 'pending'>): boolean {
   return (
     thread.pending.some((request) => Boolean(request.agentId)) ||
-    thread.messages.some(
-      (message) =>
-        Boolean(message.agentId || message.parentItemId || message.kind === 'subagent') &&
-        ['running', 'inProgress', 'in_progress', 'waiting', 'spawning', 'initializing'].includes(
-          message.status || '',
-        ),
-    )
+    threadRunningChildIds(thread.messages).size > 0
   )
 }
 
 /** Never move a response past a tool, steering request, or error. */
 export function threadOutputSequence(group: TurnGroup): Message[] {
   return group.messages
+}
+
+export type CompletedTurnRow =
+  { kind: 'message'; message: Message } | { kind: 'activity'; messages: Message[] }
+
+/** Fold consecutive work in place: expanding it restores the exact original chronology. */
+export function completedTurnRows(group: TurnGroup, response: Message): CompletedTurnRow[] {
+  const rows: CompletedTurnRow[] = []
+  let activity: Extract<CompletedTurnRow, { kind: 'activity' }> | undefined
+  for (const message of group.messages) {
+    if (
+      message.role === 'user' ||
+      message === response ||
+      (message.role === 'assistant' &&
+        !message.kind &&
+        message.phase === 'final_answer' &&
+        !message.agentId &&
+        !message.parentItemId)
+    ) {
+      activity = undefined
+      rows.push({ kind: 'message', message })
+    } else {
+      if (!activity) {
+        activity = { kind: 'activity', messages: [] }
+        rows.push(activity)
+      }
+      activity.messages.push(message)
+    }
+  }
+  return rows
+}
+
+/** Use only reported command input or the provider's tool title for a compact live action. */
+export function toolActionSummary(message: Message): string {
+  let input: Record<string, unknown> = {}
+  try {
+    input = record(JSON.parse(message.input || 'null'))
+  } catch {
+    /* Raw input stays in details. */
+  }
+  const title = message.title?.trim() || 'Agent tool'
+  const command = /^(Bash|Shell|Terminal|exec_command|execute_command|commandExecution)$/i.test(
+    title,
+  )
+    ? text(input.cmd) || text(input.command)
+    : undefined
+  const action = (command || title).split(/\r?\n/, 1)[0].trim()
+  const label = `${action.slice(0, 160)}${action.length > 160 ? '…' : ''}`
+  const lifecycle = toolLifecycle(message.status)
+  const verb = ['waiting', 'pending', 'queued'].includes((message.status || '').toLowerCase())
+    ? 'Waiting for'
+    : lifecycle === 'active'
+      ? 'Running'
+      : lifecycle === 'failed'
+        ? 'Failed'
+        : lifecycle === 'interrupted'
+          ? 'Interrupted'
+          : lifecycle === 'completed'
+            ? 'Ran'
+            : 'Tool'
+  return `${verb} ${label}`
 }
 
 /** Keep live and unsuccessful work visible; only a completed parent response replaces activity. */
@@ -196,7 +322,9 @@ export function previewNavigableMessages(thread: Thread): Message[] {
     return [
       ...(group.user ? [group.user] : []),
       ...(response
-        ? [...group.messages.filter((message) => message.role === 'user'), response]
+        ? completedTurnRows(group, response).flatMap((row) =>
+            row.kind === 'message' ? [row.message] : [],
+          )
         : group.messages.filter(
             (message) =>
               message.role === 'user' ||

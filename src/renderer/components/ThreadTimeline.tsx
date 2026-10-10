@@ -8,6 +8,7 @@ import { ProviderIcon } from './Icons'
 import { ThreadActivityRows } from './ThreadActivityRows'
 import {
   completedTurnResponse,
+  completedTurnRows,
   createTurnGroupProjector,
   threadOutputSequence,
   type TurnGroup,
@@ -24,6 +25,35 @@ function duration(milliseconds: number): string {
       ? `${minutes}m ${seconds % 60}s`
       : `${seconds}s`
 }
+
+const CompletedWork = memo(function CompletedWork({
+  messages,
+  provider,
+  label,
+}: {
+  messages: Message[]
+  provider: Thread['provider']
+  label: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <details
+      className="thread-turn-disclosure"
+      aria-label="Completed turn activity"
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary>
+        <span>{label}</span>
+        <ChevronRight size={14} aria-hidden="true" />
+      </summary>
+      {expanded ? (
+        <div className="thread-completed-activity">
+          <ThreadActivityRows messages={messages} provider={provider} />
+        </div>
+      ) : null}
+    </details>
+  )
+})
 
 function WorkTiming({ started, ended, busy }: { started?: number; ended?: number; busy: boolean }) {
   const [now, setNow] = useState(Date.now)
@@ -66,21 +96,39 @@ function WorkActivity({
   const activity = threadOutputSequence(group)
   const elapsed = started && ended ? duration(Math.max(0, ended - started)) : undefined
   const files = useMemo(
-    () =>
-      streamlinedWorkspace ? [] : reportedFileChanges(group.messages, group.user?.fileChanges),
+    () => reportedFileChanges(group.messages, group.user?.fileChanges),
     [group.messages, group.user?.fileChanges],
   )
   const response = streamlinedWorkspace ? completedTurnResponse(group, busy, turnStatus) : undefined
+  const completedRows = useMemo(
+    () => (response ? completedTurnRows(group, response) : []),
+    [group, response],
+  )
   if (response) {
+    let activityIndex = 0
     return (
       <div className="thread-completed-work">
-        {group.messages
-          .filter((message) => message.role === 'user')
-          .map((message) => (
-            <MessageView key={message.id} message={message} provider={provider} />
-          ))}
-        <MessageView message={response} provider={provider} minimal settled />
-        <p className="thread-work-summary">{elapsed ? `Worked for ${elapsed}` : 'Worked'}</p>
+        {completedRows.map((row) => {
+          if (row.kind === 'message')
+            return (
+              <MessageView key={row.message.id} message={row.message} provider={provider} settled />
+            )
+          const first = activityIndex++ === 0
+          return (
+            <CompletedWork
+              key={row.messages[0].id}
+              messages={row.messages}
+              provider={provider}
+              label={first ? (elapsed ? `Worked for ${elapsed}` : 'Worked') : 'More activity'}
+            />
+          )
+        })}
+        {!activityIndex ? (
+          <p className="thread-work-summary">{elapsed ? `Worked for ${elapsed}` : 'Worked'}</p>
+        ) : null}
+        {files.length ? (
+          <ChangedFiles files={files} source={Boolean(group.user?.fileChanges?.length)} />
+        ) : null}
       </div>
     )
   }
@@ -117,7 +165,7 @@ function WorkActivity({
           </div>
         </section>
       ) : null}
-      {!streamlinedWorkspace && files.length ? (
+      {files.length ? (
         <ChangedFiles files={files} source={Boolean(group.user?.fileChanges?.length)} />
       ) : null}
     </>

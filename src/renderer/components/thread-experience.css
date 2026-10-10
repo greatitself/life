@@ -41,6 +41,74 @@
 .thread-timeline-turn {
   min-width: 0;
 }
+.thread-turn-disclosure {
+  margin: 3px 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.thread-turn-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 2px 0 7px;
+  border-bottom: 1px solid var(--border);
+  list-style: none;
+  cursor: pointer;
+  width: 100%;
+}
+.thread-turn-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.thread-turn-disclosure[open] > summary > svg {
+  transform: rotate(90deg);
+}
+.thread-turn-disclosure > summary:hover {
+  color: var(--text);
+}
+.thread-turn-disclosure > summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.thread-completed-activity {
+  padding: 10px 0 0;
+}
+.thread-completed-activity pre {
+  max-height: 320px;
+}
+.app-shell.life-refined-layout .main-workspace .thread-completed-work > .message.assistant {
+  position: relative;
+  padding: 0 28px 18px 0;
+}
+.app-shell.life-refined-layout
+  .main-workspace
+  .thread-completed-work
+  > .message.assistant
+  > .message-label {
+  min-height: 0;
+  height: 0;
+  margin: 0;
+}
+.thread-completed-work > .message.assistant > .message-label > .agent-avatar,
+.thread-completed-work > .message.assistant > .message-label > strong,
+.thread-completed-work > .message.assistant > .message-label > .thread-message-phase {
+  display: none;
+}
+.thread-completed-work > .message.assistant > .message-label > .copy-message {
+  position: absolute;
+  right: 0;
+  top: 1px;
+}
+.thread-current-tool {
+  color: var(--dim);
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+}
 .thread-timeline-turn[data-settled] {
   content-visibility: auto;
   contain-intrinsic-size: auto 600px;

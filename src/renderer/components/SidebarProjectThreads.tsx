@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useMemo, useRef } from 'react'
-import { Folder } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { ChevronRight, Folder } from 'lucide-react'
 import type { ConnectionProfile } from '../../shared/types'
 import type { Thread } from '../state'
 import {
@@ -12,6 +12,8 @@ import {
 } from '../sidebar-ordering'
 import { SidebarThread } from './SidebarThread'
 import { useSidebarDay } from '../sidebar-clock'
+import type { ThreadAction } from '../thread-management'
+import type { ThreadActionHandler } from './ThreadActionsMenu'
 import './sidebar-project-threads.css'
 export type { SidebarThreadSort, SidebarThreadGroup } from '../sidebar-ordering'
 
@@ -22,15 +24,31 @@ interface ThreadGroup {
   threads: Thread[]
   rank?: number
 }
+const collapsedStorageKey = 'life.sidebar.collapsed-projects.v1'
+function readCollapsedGroups(): Set<string> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(collapsedStorageKey) || '[]')
+    return new Set(
+      Array.isArray(value)
+        ? value.filter((key): key is string => typeof key === 'string').slice(0, 1000)
+        : [],
+    )
+  } catch {
+    return new Set()
+  }
+}
 
 export function SidebarProjectThreads({
   threads,
   profiles,
-  sort = 'recent',
+  sort = 'manual',
   group = 'project',
   activeId,
   onSelect,
   onArrange,
+  onAction,
+  compact = false,
+  draftThreadIds,
 }: {
   threads: Thread[]
   profiles: ConnectionProfile[]
@@ -39,17 +57,34 @@ export function SidebarProjectThreads({
   activeId?: string
   onSelect: (thread: Thread) => void
   onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
+  onAction?: ThreadActionHandler
+  compact?: boolean
+  draftThreadIds?: ReadonlySet<string>
 }) {
-  const callbacks = useRef({ onSelect, onArrange })
+  const callbacks = useRef({ onSelect, onArrange, onAction })
   useLayoutEffect(() => {
-    callbacks.current = { onSelect, onArrange }
-  }, [onSelect, onArrange])
+    callbacks.current = { onSelect, onArrange, onAction }
+  }, [onSelect, onArrange, onAction])
   const select = useCallback((thread: Thread) => callbacks.current.onSelect(thread), [])
   const arrange = useCallback(
     (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) =>
       callbacks.current.onArrange?.(thread, patch),
     [],
   )
+  const action = useCallback(
+    (thread: Thread, action: ThreadAction, value?: number | string) =>
+      callbacks.current.onAction?.(thread, action, value),
+    [],
+  )
+  const [collapsed, setCollapsed] = useState(readCollapsedGroups)
+  const groupId = useId()
+  useEffect(() => {
+    try {
+      localStorage.setItem(collapsedStorageKey, JSON.stringify([...collapsed].slice(-1000)))
+    } catch {
+      /* Group visibility remains usable when storage is unavailable. */
+    }
+  }, [collapsed])
   const profilesById = useMemo(
     () => new Map(profiles.map((profile) => [profile.id, profile])),
     [profiles],
@@ -116,48 +151,82 @@ export function SidebarProjectThreads({
 
   return (
     <>
-      {groups.map((section) => (
-        <section
-          key={section.id}
-          className="sidebar-project-thread-group"
-          aria-label={
-            section.description ? `${section.name}: ${section.description}` : section.name
-          }
-        >
-          {group !== 'none' ? (
-            <>
-              <div className="sidebar-project-thread-heading">
-                <Folder size={15} aria-hidden="true" />
-                <h3 title={section.description || section.name}>{section.name}</h3>
-                <span
-                  className="sidebar-project-thread-count"
-                  title={`${section.threads.length} threads`}
+      {groups.map((section, index) => {
+        const key = `${group}:${section.id}`
+        const closed = group !== 'none' && collapsed.has(key)
+        const visible = closed
+          ? section.threads.filter((thread) => thread.id === activeId || thread.pending.length > 0)
+          : section.threads
+        return (
+          <section
+            key={section.id}
+            className="sidebar-project-thread-group"
+            aria-label={
+              section.description ? `${section.name}: ${section.description}` : section.name
+            }
+          >
+            {group !== 'none' ? (
+              <>
+                <button
+                  type="button"
+                  className="sidebar-project-thread-heading"
+                  aria-expanded={!closed}
+                  aria-controls={`${groupId}-${index}`}
+                  aria-label={`${closed ? 'Expand' : 'Collapse'} ${section.name} threads`}
+                  onClick={() =>
+                    setCollapsed((previous) => {
+                      const next = new Set(previous)
+                      if (next.has(key)) next.delete(key)
+                      else next.add(key)
+                      return next
+                    })
+                  }
                 >
-                  {section.threads.length}
-                </span>
-              </div>
-              {section.description ? (
-                <p className="sidebar-project-thread-description" title={section.description}>
-                  {section.description}
-                </p>
-              ) : null}
-            </>
-          ) : null}
-          <div className="sidebar-project-thread-list">
-            {section.threads.map((thread) => (
-              <SidebarThread
-                key={thread.id}
-                thread={thread}
-                projectName={threadProjectName(thread)}
-                host={profilesById.get(thread.profileId)?.host}
-                active={activeId === thread.id}
-                onSelect={select}
-                onArrange={onArrange ? arrange : undefined}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
+                  <ChevronRight
+                    size={12}
+                    className="sidebar-project-thread-chevron"
+                    aria-hidden="true"
+                  />
+                  <Folder size={15} aria-hidden="true" />
+                  <span
+                    className="sidebar-project-thread-name"
+                    title={section.description || section.name}
+                  >
+                    {section.name}
+                  </span>
+                  <span
+                    className="sidebar-project-thread-count"
+                    title={`${section.threads.length} threads`}
+                  >
+                    {section.threads.length}
+                  </span>
+                </button>
+                {section.description && !closed ? (
+                  <p className="sidebar-project-thread-description" title={section.description}>
+                    {section.description}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+            <div className="sidebar-project-thread-list" id={`${groupId}-${index}`}>
+              {visible.map((thread) => (
+                <SidebarThread
+                  key={thread.id}
+                  thread={thread}
+                  projectName={threadProjectName(thread)}
+                  host={profilesById.get(thread.profileId)?.host}
+                  active={activeId === thread.id}
+                  onSelect={select}
+                  onArrange={onArrange ? arrange : undefined}
+                  onAction={onAction ? action : undefined}
+                  compact={compact}
+                  hasDraft={draftThreadIds?.has(thread.id)}
+                />
+              ))}
+            </div>
+          </section>
+        )
+      })}
     </>
   )
 }

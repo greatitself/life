@@ -1,0 +1,197 @@
+.sidebar {
+  --life-thread-approval: #e5b965;
+  --life-thread-input: #afa4ef;
+  --life-thread-failed: #e88787;
+  --life-thread-done: #77c6a2;
+}
+:root[data-theme='light'] .sidebar {
+  --life-thread-approval: #8c5c07;
+  --life-thread-input: #6750aa;
+  --life-thread-failed: #b43737;
+  --life-thread-done: #247b54;
+}
+.life-thread-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.life-thread-status[data-status='approval'] {
+  color: var(--life-thread-approval);
+}
+.life-thread-status[data-status='input'] {
+  color: var(--life-thread-input);
+}
+.life-thread-status[data-status='failed'] {
+  color: var(--life-thread-failed);
+}
+.life-thread-status[data-status='done'] {
+  color: var(--life-thread-done);
+}
+.life-thread-pin,
+.life-thread-draft {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.life-thread-draft {
+  color: var(--text);
+}
+.sidebar .thread-run-ring {
+  animation: none;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 82px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell:not(.thread-card-compact) .thread-card {
+  min-height: 78px;
+  padding-block: 8px;
+  margin-block: 2px;
+  gap: 5px;
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-shell:is([data-unread], [data-needs-input])
+  .thread-card-title {
+  color: var(--text-strong);
+  font-weight: 550;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell .life-thread-actions {
+  top: auto;
+  bottom: 8px;
+  right: 8px;
+  background: var(--sidebar);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell.active .life-thread-actions {
+  background: var(--accent-bg);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell:hover .life-thread-actions {
+  background: var(--surface);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell[data-menu-open] .life-thread-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-shell:is(:hover, :focus-within, [data-menu-open])
+  .thread-card-meta {
+  padding-right: 110px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-shell:hover .thread-card-project > time,
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-shell:focus-within
+  .thread-card-project
+  > time {
+  opacity: 1;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact {
+  contain-intrinsic-size: auto 36px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .thread-card {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  height: 36px;
+  margin-block: 1px;
+  padding: 4px 9px;
+  border-radius: 6px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .thread-card-project {
+  width: auto;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .thread-card-title {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact.active .thread-card-title,
+.app-shell.life-refined-layout .sidebar .thread-card-compact:hover .thread-card-title {
+  color: var(--text);
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .thread-card-compact-status {
+  width: auto;
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 11px;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .life-thread-actions {
+  top: 6px;
+  bottom: auto;
+  right: 5px;
+  padding: 0 2px;
+}
+.app-shell.life-refined-layout
+  .sidebar
+  .thread-card-compact:is(:hover, :focus-within, [data-menu-open])
+  .thread-card-compact-status {
+  visibility: hidden;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .life-thread-settle > span {
+  display: none;
+}
+.app-shell.life-refined-layout .sidebar .thread-card-compact .life-thread-settle {
+  width: 24px;
+}
+.sidebar-pinned-threads {
+  margin-bottom: 16px;
+}
+.sidebar-pinned-threads > h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 5px 0;
+  padding: 4px 11px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.sidebar-pinned-threads > h3 > span {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11px;
+}
+.sidebar .life-thread-shelf-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  border-radius: 4px;
+}
+.sidebar .life-thread-shelf-toggle:hover {
+  color: var(--text);
+}
+.sidebar .life-thread-shelf-toggle > i {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.sidebar .life-thread-shelf-toggle[aria-expanded='true'] > svg {
+  transform: rotate(90deg);
+}
+.sidebar .life-thread-arrangement-section > .sidebar-project-thread-group {
+  margin: 0;
+}
+.sidebar .life-thread-arrangement-section > p {
+  margin: 4px 0 9px;
+  color: var(--dim);
+  font-size: 11px;
+}

@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  Pin,
   Search,
   Server,
   SlidersHorizontal,
@@ -18,7 +19,11 @@ import {
   type SidebarThreadGroup,
 } from './SidebarProjectThreads'
 import { arrangementStorageKey, readSidebarArrangement } from '../sidebar-ordering'
+import { threadSection } from '../thread-management'
+import { useSidebarMinute } from '../sidebar-clock'
+import type { ThreadActionHandler } from './ThreadActionsMenu'
 import './sidebar-navigation.css'
+import './thread-inbox.css'
 
 interface SidebarFilters {
   provider: 'all' | Provider
@@ -29,8 +34,85 @@ interface SidebarFilters {
 const initialFilters: SidebarFilters = {
   provider: 'all',
   status: 'all',
-  sort: 'recent',
-  group: 'project',
+  sort: 'manual',
+  group: 'none',
+}
+
+function ParkedThreads({
+  name,
+  threads,
+  profiles,
+  sort,
+  activeId,
+  onSelect,
+  onArrange,
+  onAction,
+  draftThreadIds,
+  searching,
+}: {
+  name: 'Settled' | 'Snoozed' | 'Archived'
+  threads: Thread[]
+  profiles: ConnectionProfile[]
+  sort: SidebarThreadSort
+  activeId?: string
+  onSelect: (thread: Thread) => void
+  onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
+  onAction?: ThreadActionHandler
+  draftThreadIds?: ReadonlySet<string>
+  searching: boolean
+}) {
+  const key = `life.sidebar.${name.toLowerCase()}-expanded.v1`
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      return localStorage.getItem(key) === 'true'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, String(expanded))
+    } catch {
+      /* The shelf remains usable when storage is unavailable. */
+    }
+  }, [key, expanded])
+  const open = expanded || searching
+  const visible = open ? threads : threads.filter((thread) => thread.id === activeId)
+  return (
+    <section className="life-thread-arrangement-section" data-expanded={open || undefined}>
+      <button
+        type="button"
+        className="life-thread-shelf-toggle"
+        aria-expanded={open}
+        aria-label={`${name} (${threads.length})`}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span>
+          {name} ({threads.length})
+        </span>
+        <i />
+        <ChevronRight size={13} />
+      </button>
+      <SidebarProjectThreads
+        threads={visible}
+        profiles={profiles}
+        sort={sort}
+        group="none"
+        activeId={activeId}
+        onSelect={onSelect}
+        onArrange={onArrange}
+        onAction={onAction}
+        draftThreadIds={draftThreadIds}
+        compact
+      />
+      {open && !threads.length ? (
+        <p>
+          Use {name === 'Settled' ? 'Settle' : name === 'Snoozed' ? 'Snooze' : 'Archive'} to move a
+          thread here.
+        </p>
+      ) : null}
+    </section>
+  )
 }
 
 export function SidebarProjects({
@@ -47,6 +129,8 @@ export function SidebarProjects({
   onFiltersOpenChange,
   children,
   onArrange,
+  onAction,
+  draftThreadIds,
   footerTarget,
 }: {
   threads: Thread[]
@@ -55,6 +139,8 @@ export function SidebarProjects({
   activeId?: string
   onSelect: (thread: Thread) => void
   onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
+  onAction?: ThreadActionHandler
+  draftThreadIds?: ReadonlySet<string>
   onNewThread: () => void
   onAddProject: () => void
   onOpenProfile: (profileId: string) => void
@@ -67,6 +153,11 @@ export function SidebarProjects({
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState<SidebarFilters>(readSidebarArrangement)
   useEffect(() => {
+    const arranged = () => setFilters((current) => ({ ...current, sort: 'manual', group: 'none' }))
+    window.addEventListener('life:thread-arranged', arranged)
+    return () => window.removeEventListener('life:thread-arranged', arranged)
+  }, [])
+  useEffect(() => {
     try {
       localStorage.setItem(arrangementStorageKey, JSON.stringify(filters))
     } catch {
@@ -76,7 +167,7 @@ export function SidebarProjects({
   const searchValue = search.trim().toLowerCase()
   const query = useDeferredValue(searchValue)
   const filtering = filters.provider !== 'all' || filters.status !== 'all'
-  const customized = filtering || filters.sort !== 'recent' || filters.group !== 'project'
+  const customized = filtering || filters.sort !== 'manual' || filters.group !== 'none'
   const narrowed = Boolean(searchValue) || filtering
   const profileNames = useMemo(
     () => new Map(profiles.map((profile) => [profile.id, profile.name])),
@@ -119,17 +210,57 @@ export function SidebarProjects({
     setFilters({ ...initialFilters })
   }
   const firstProject = !profiles.length && !threads.length && !narrowed
-  const { activeThreads, settledThreads, snoozedThreads } = useMemo(() => {
-    const activeThreads: Thread[] = []
-    const settledThreads: Thread[] = []
-    const snoozedThreads: Thread[] = []
-    for (const thread of visibleThreads) {
-      if (thread.snoozedUntil) snoozedThreads.push(thread)
-      else if (thread.settled) settledThreads.push(thread)
-      else activeThreads.push(thread)
-    }
-    return { activeThreads, settledThreads, snoozedThreads }
-  }, [visibleThreads])
+  const minute = useSidebarMinute()
+  const { activeThreads, pinnedThreads, settledThreads, snoozedThreads, archivedThreads } =
+    useMemo(() => {
+      const activeThreads: Thread[] = []
+      const pinnedThreads: Thread[] = []
+      const settledThreads: Thread[] = []
+      const snoozedThreads: Thread[] = []
+      const archivedThreads: Thread[] = []
+      for (const thread of visibleThreads) {
+        const section = threadSection(thread)
+        if (section === 'archived') archivedThreads.push(thread)
+        else if (section === 'snoozed') snoozedThreads.push(thread)
+        else if (section === 'settled') settledThreads.push(thread)
+        else if (section === 'pinned') pinnedThreads.push(thread)
+        else activeThreads.push(thread)
+      }
+      return { activeThreads, pinnedThreads, settledThreads, snoozedThreads, archivedThreads }
+    }, [visibleThreads, minute])
+  const parked = (
+    <div
+      className="sidebar-arrangement-footer"
+      role="region"
+      aria-label="Settled, snoozed and archived threads"
+      aria-busy={query !== searchValue}
+    >
+      {(['Settled', 'Snoozed', 'Archived'] as const).map((name) => {
+        const items =
+          name === 'Settled'
+            ? settledThreads
+            : name === 'Snoozed'
+              ? snoozedThreads
+              : archivedThreads
+        if (name !== 'Settled' && !items.length) return null
+        return (
+          <ParkedThreads
+            key={name}
+            name={name}
+            threads={items}
+            profiles={profiles}
+            sort={filters.sort}
+            activeId={activeId}
+            onSelect={onSelect}
+            onArrange={onArrange}
+            onAction={onAction}
+            draftThreadIds={draftThreadIds}
+            searching={Boolean(query)}
+          />
+        )
+      })}
+    </div>
+  )
 
   return (
     <>
@@ -215,6 +346,25 @@ export function SidebarProjects({
             <ChevronRight size={14} />
           </button>
         ) : null}
+        {pinnedThreads.length ? (
+          <section className="sidebar-pinned-threads" aria-label="Pinned threads">
+            <h3>
+              <Pin size={13} aria-hidden="true" />
+              Pinned<span>{pinnedThreads.length}</span>
+            </h3>
+            <SidebarProjectThreads
+              threads={pinnedThreads}
+              profiles={profiles}
+              sort="manual"
+              group="none"
+              activeId={activeId}
+              onSelect={onSelect}
+              onArrange={onArrange}
+              onAction={onAction}
+              draftThreadIds={draftThreadIds}
+            />
+          </section>
+        ) : null}
         <SidebarProjectThreads
           threads={activeThreads}
           profiles={profiles}
@@ -223,6 +373,8 @@ export function SidebarProjects({
           activeId={activeId}
           onSelect={onSelect}
           onArrange={onArrange}
+          onAction={onAction}
+          draftThreadIds={draftThreadIds}
         />
         {emptyProfiles.map((profile) => (
           <button
@@ -250,56 +402,7 @@ export function SidebarProjects({
           </div>
         ) : null}
       </div>
-      {footerTarget
-        ? createPortal(
-            <div
-              className="sidebar-arrangement-footer"
-              role="region"
-              aria-label="Settled and snoozed threads"
-              aria-busy={query !== searchValue}
-            >
-              <details className="life-thread-arrangement-section" open={query ? true : undefined}>
-                <summary>
-                  <span>Settled ({settledThreads.length})</span>
-                  <i />
-                  <ChevronRight size={13} />
-                </summary>
-                <SidebarProjectThreads
-                  threads={settledThreads}
-                  profiles={profiles}
-                  sort={filters.sort}
-                  group="none"
-                  activeId={activeId}
-                  onSelect={onSelect}
-                  onArrange={onArrange}
-                />
-                {!settledThreads.length ? <p>Use Settle to move a thread here.</p> : null}
-              </details>
-              {snoozedThreads.length ? (
-                <details
-                  className="life-thread-arrangement-section"
-                  open={query ? true : undefined}
-                >
-                  <summary>
-                    <span>Snoozed ({snoozedThreads.length})</span>
-                    <i />
-                    <ChevronRight size={13} />
-                  </summary>
-                  <SidebarProjectThreads
-                    threads={snoozedThreads}
-                    profiles={profiles}
-                    sort={filters.sort}
-                    group="none"
-                    activeId={activeId}
-                    onSelect={onSelect}
-                    onArrange={onArrange}
-                  />
-                </details>
-              ) : null}
-            </div>,
-            footerTarget,
-          )
-        : null}
+      {footerTarget ? createPortal(parked, footerTarget) : parked}
       <Modal
         open={filtersOpen}
         onOpenChange={onFiltersOpenChange}
@@ -372,6 +475,7 @@ export function SidebarProjects({
                 }))
               }
             >
+              <option value="manual">Arranged</option>
               <option value="recent">Most recently used</option>
               <option value="oldest">Oldest activity first</option>
               <option value="title">Alphabetical</option>

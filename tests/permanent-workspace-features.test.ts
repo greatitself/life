@@ -165,7 +165,7 @@ describe('permanent customized workspace data', () => {
     })
     expect(readSidebarArrangement()).toEqual({
       provider: 'claude',
-      sort: 'recent',
+      sort: 'manual',
       group: 'scope',
       status: 'waiting',
     })

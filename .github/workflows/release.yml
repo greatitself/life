@@ -74,6 +74,9 @@ jobs:
           fi
       - run: node tests/app-live-controls-smoke.cjs --fluidity
         if: hashFiles('tests/transcript-performance.cjs') != ''
+      - name: Verify thread organization and draft workflows
+        run: node tests/thread-workflows-smoke.cjs
+        if: hashFiles('tests/thread-workflows-smoke.cjs') != ''
       - run: node tests/transcript-performance.cjs current
         if: hashFiles('tests/transcript-performance.cjs') != ''
       - run: node tests/run-selectors-smoke.cjs

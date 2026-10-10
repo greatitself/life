@@ -552,9 +552,13 @@ async function fluidityChecks(page, checks, settle) {
   }
   const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
   await composer.focus()
+  // The first character adds the new draft indicator to this thread. Measure
+  // subsequent edits after that real sidebar state change has settled.
+  await composer.pressSequentially('F')
+  await settle()
   await page.evaluate(() => window.controlsTest.resetMetrics())
   let started = performance.now()
-  await composer.pressSequentially('Fluid input', { delay: 20 })
+  await composer.pressSequentially('luid input', { delay: 20 })
   await settle()
   const typing = await summarize('Typing with 400 retained conversations', started)
   assert.equal(await composer.inputValue(), 'Fluid input')
@@ -646,6 +650,7 @@ async function fluidityChecks(page, checks, settle) {
   )
   await page.getByRole('button', { name: /^Thread Alpha,/ }).click()
   assert.equal(await composer.inputValue(), 'Fluid input')
+  await arranged.getByRole('button', { name: /^Saved thread 42,/ }).hover()
   await arranged.getByRole('button', { name: 'Settle', exact: true }).click()
   await page.getByText('Settled (1)', { exact: true }).click()
   await arranged.getByRole('button', { name: /^Saved thread 42,/ }).click()
@@ -731,12 +736,17 @@ async function fluidityChecks(page, checks, settle) {
   await match.waitFor()
   // Invoke the actual deletion handler while its open search retains a filtered result.
   await page.evaluate(() => {
-    const action = [...document.querySelectorAll('.thread-menu button')].find(
-      (button) => button.textContent.trim() === 'Delete thread',
-    )
-    if (!action || action.disabled) throw new Error('The native idle thread must be deletable')
+    const action = [
+      ...document.querySelectorAll('.life-thread-actions-menu [role="menuitem"]'),
+    ].find((item) => item.textContent.trim() === 'Delete thread')
+    if (!action || action.getAttribute('aria-disabled') === 'true')
+      throw new Error('The native idle thread must be deletable')
     action.click()
   })
+  await page
+    .getByRole('dialog', { name: 'Delete thread', exact: true })
+    .getByRole('button', { name: 'Delete saved thread', exact: true })
+    .click()
   await search.getByText('No matching threads. Try another search.', { exact: true }).waitFor()
   assert.equal(await match.count(), 0)
   assert.equal(await page.getByRole('button', { name: /^Native renamed thread,/ }).count(), 0)
@@ -817,7 +827,7 @@ async function fluidityChecks(page, checks, settle) {
     await filters.getByRole('combobox', { name: 'Arrange by', exact: true }).selectOption('date')
     await filters.getByRole('button', { name: 'Done', exact: true }).click()
     await page
-      .locator('.sidebar-project-thread-heading h3')
+      .locator('.sidebar-project-thread-heading .sidebar-project-thread-name')
       .filter({ hasText: /^Today$/ })
       .waitFor()
     const tomorrow = new Date(currentTime)
@@ -826,12 +836,12 @@ async function fluidityChecks(page, checks, settle) {
     await page.clock.setFixedTime(tomorrow)
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
     await page
-      .locator('.sidebar-project-thread-heading h3')
+      .locator('.sidebar-project-thread-heading .sidebar-project-thread-name')
       .filter({ hasText: /^Yesterday$/ })
       .waitFor()
     assert.equal(
       await page
-        .locator('.sidebar-project-thread-heading h3')
+        .locator('.sidebar-project-thread-heading .sidebar-project-thread-name')
         .filter({ hasText: /^Today$/ })
         .count(),
       0,
@@ -1629,7 +1639,7 @@ async function run() {
       assert.equal(attachment, 'proof bytes')
       await page.getByRole('button', { name: 'Thread actions', exact: true }).click()
       assert.equal(
-        await page.getByRole('button', { name: 'Delete thread', exact: true }).isEnabled(),
+        await page.getByRole('menuitem', { name: 'Delete thread', exact: true }).isEnabled(),
         true,
       )
       checks.push(

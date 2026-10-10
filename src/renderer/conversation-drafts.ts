@@ -1,25 +1,21 @@
-import { useCallback, useEffect, useRef, useState, type SetStateAction } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type SetStateAction,
+} from 'react'
 import type { DraftAttachment } from './attachments'
-
-interface DraftEntry {
-  draft: string
-  attachments: DraftAttachment[]
-}
+import { ConversationDraftStore } from './conversation-draft-store'
+export type { UnavailableDraftAttachment } from './conversation-draft-store'
 const storageKey = 'life.conversation-drafts.v1'
-const empty = (): DraftEntry => ({ draft: '', attachments: [] })
-function readEntries(): Map<string, DraftEntry> {
-  const entries = new Map<string, DraftEntry>()
+function readSaved(): unknown {
   try {
-    const saved: unknown = JSON.parse(localStorage.getItem(storageKey) || '{}')
-    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-      for (const [key, value] of Object.entries(saved).slice(0, 500)) {
-        if (typeof value === 'string') entries.set(key, { draft: value, attachments: [] })
-      }
-    }
+    return JSON.parse(localStorage.getItem(storageKey) || '{}')
   } catch {
-    /* Drafts remain usable without browser storage. */
+    return {}
   }
-  return entries
 }
 
 export function useConversationDrafts(
@@ -27,33 +23,23 @@ export function useConversationDrafts(
   onError: (message: string) => void,
   enabled = true,
 ) {
-  const [entries] = useState(readEntries)
-  const [revision, setRevision] = useState(0)
   const error = useRef(onError)
+  error.current = onError
+  const [store] = useState(
+    () =>
+      new ConversationDraftStore(readSaved(), {
+        onError: (message) => error.current(message),
+      }),
+  )
+  const revision = useSyncExternalStore(store.subscribe, store.getRevision, store.getRevision)
   const warned = useRef(false)
   const savingEnabled = useRef(enabled)
   savingEnabled.current = enabled
-  error.current = onError
-  let entry = entries.get(key)
-  if (!entry) {
-    entry = empty()
-    entries.set(key, entry)
-  }
-  const selected = entry
-  const changed = useCallback(() => setRevision((value) => value + 1), [])
+  const selected = store.entry(key)
   const persist = useCallback(() => {
     if (!savingEnabled.current) return
     try {
-      localStorage.setItem(
-        storageKey,
-        JSON.stringify(
-          Object.fromEntries(
-            [...entries]
-              .filter(([, item]) => Boolean(item.draft))
-              .map(([name, item]) => [name, item.draft]),
-          ),
-        ),
-      )
+      localStorage.setItem(storageKey, JSON.stringify(store.serialize()))
       warned.current = false
     } catch {
       if (!warned.current)
@@ -62,7 +48,10 @@ export function useConversationDrafts(
         )
       warned.current = true
     }
-  }, [entries])
+  }, [store])
+  useEffect(() => {
+    void store.restoreAttachments()
+  }, [store])
   useEffect(() => {
     if (!enabled) return
     const timer = window.setTimeout(persist, 300)
@@ -75,38 +64,49 @@ export function useConversationDrafts(
   }, [enabled, persist])
   const setDraft = useCallback(
     (value: SetStateAction<string>) => {
-      selected.draft = typeof value === 'function' ? value(selected.draft) : value
-      changed()
+      store.setDraft(selected, value)
     },
-    [selected, changed],
+    [selected, store],
   )
   const setAttachments = useCallback(
     (value: SetStateAction<DraftAttachment[]>) => {
-      selected.attachments = typeof value === 'function' ? value(selected.attachments) : value
-      changed()
+      store.setAttachments(selected, value)
     },
-    [selected, changed],
+    [selected, store],
   )
   const clear = useCallback(
     (name: string) => {
-      const item = entries.get(name)
-      if (item) {
-        item.draft = ''
-        item.attachments = []
-      } else entries.set(name, empty())
-      changed()
+      store.clear(name)
+      persist()
     },
-    [entries, changed],
+    [store, persist],
   )
   const move = useCallback(
     (from: string, to: string) => {
-      const item = entries.get(from)
-      if (item) entries.set(to, item)
-      entries.set(from, empty())
-      changed()
+      store.move(from, to)
+      persist()
     },
-    [entries, changed],
+    [store, persist],
   )
+  const restoreSubmission = useCallback(
+    (prompt: string, files: DraftAttachment[]) => {
+      store.restoreSubmission(selected, prompt, files)
+      persist()
+    },
+    [selected, store, persist],
+  )
+  const removeUnavailable = useCallback(
+    (id: string) => store.removeUnavailable(selected, id),
+    [selected, store],
+  )
+  const snapshot = useCallback((name: string) => store.snapshot(name), [store])
+  const hasContent = useCallback((name: string) => store.hasContent(name), [store])
+  const retainedAttachmentIds = useCallback(() => store.retainedAttachmentIds(), [store])
+  const draftThreadIds = store.draftThreadIds()
+  const flush = useCallback(async () => {
+    await store.flushAttachmentSaves()
+    persist()
+  }, [store, persist])
   return {
     draft: selected.draft,
     attachments: selected.attachments,
@@ -114,5 +114,15 @@ export function useConversationDrafts(
     setAttachments,
     clear,
     move,
+    unavailableAttachments: selected.unavailableAttachments,
+    restoring: selected.pendingAttachments.length > 0,
+    restoreSubmission,
+    removeUnavailable,
+    snapshot,
+    hasContent,
+    retainedAttachmentIds,
+    draftThreadIds,
+    revision,
+    flush,
   }
 }

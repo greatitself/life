@@ -91,6 +91,15 @@ import type { HostHistoryPage } from '../shared/agent-history'
 import type { ConversationHistorySnapshot } from '../shared/conversations'
 import { useBuiltinFeatures } from './builtin-extensions'
 import { SidebarThread } from './components/SidebarThread'
+import { ThreadActionsMenu } from './components/ThreadActionsMenu'
+import {
+  applyThreadAction,
+  captureThreadArrangementChanges,
+  undoThreadArrangement,
+  threadCanArchive,
+  type ThreadAction,
+  type ThreadUndoChange,
+} from './thread-management'
 import './workspace-integration.css'
 import { LifeMap as ResearchView } from './components/LifeMap'
 import { CustomPanels } from './components/CustomPanels'
@@ -162,6 +171,7 @@ import {
 } from './conversation-persistence'
 import './components/research-machine.css'
 import './components/research-interface.css'
+import './components/thread-management-ui.css'
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
 const shortcutModifier = /Mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
@@ -267,6 +277,14 @@ export function App() {
   const threadsCurrent = useRef(threads)
   threadsCurrent.current = threads
   const [toast, setToast] = useState('')
+  const [threadUndo, setThreadUndo] = useState<{
+    message: string
+    changes: ThreadUndoChange[]
+    reopenId?: string
+  }>()
+  const [renamingThread, setRenamingThread] = useState<string>()
+  const [deletingThread, setDeletingThread] = useState<string>()
+  const [threadTitleDraft, setThreadTitleDraft] = useState('')
   const builtin = useBuiltinFeatures()
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -487,6 +505,47 @@ export function App() {
   const appContext = useRef({ preferences, config, extensions, connection })
   appContext.current = { preferences, config, extensions, connection }
   const active = threads.find((t) => t.id === activeId)
+  useEffect(() => {
+    const markVisibleRead = () => {
+      if (
+        !historyReady ||
+        !activeId ||
+        document.visibilityState === 'hidden' ||
+        (view === 'investigation' && !researchAgentOpen)
+      )
+        return
+      const seenAt = Date.now()
+      setThreads((previous) => {
+        const next = previous.map((thread) =>
+          thread.id === activeId &&
+          (!thread.lastReadAt ||
+            thread.lastReadAt < (thread.completedAt || 0) ||
+            thread.lastReadAt < (thread.attentionAt || 0))
+            ? {
+                ...thread,
+                lastReadAt: Math.max(seenAt, thread.completedAt || 0, thread.attentionAt || 0),
+              }
+            : thread,
+        )
+        return next.some((thread, index) => thread !== previous[index]) ? next : previous
+      })
+    }
+    markVisibleRead()
+    document.addEventListener('visibilitychange', markVisibleRead)
+    window.addEventListener('focus', markVisibleRead)
+    return () => {
+      document.removeEventListener('visibilitychange', markVisibleRead)
+      window.removeEventListener('focus', markVisibleRead)
+    }
+  }, [historyReady, activeId, active?.completedAt, active?.attentionAt, view, researchAgentOpen])
+  useEffect(() => {
+    if (!threadUndo) return
+    const timer = window.setTimeout(() => setThreadUndo(undefined), 5000)
+    return () => window.clearTimeout(timer)
+  }, [threadUndo])
+  useEffect(() => {
+    if (threadUndo && toast !== threadUndo.message) setThreadUndo(undefined)
+  }, [toast, threadUndo])
   const { conversation, viewportRef, stickToBottom, setStickToBottom } = useConversationScroll(
     JSON.stringify([
       view,
@@ -1006,17 +1065,57 @@ export function App() {
 
   const newThread = useCallback(() => {
     if (!historyReady) return
+    const selected = threadsCurrent.current.find((thread) => thread.id === activeIdCurrent.current)
+    if (selected) {
+      setProvider(selected.provider)
+      setModel(selected.model)
+      setReasoningEffort(selected.reasoningEffort || '')
+      setServiceTier(selected.serviceTier || '')
+      setMode(selected.mode)
+    }
+    if (draftState.hasContent('agents:new')) {
+      const createdAt = Date.now()
+      const retained: Thread = {
+        id: crypto.randomUUID(),
+        profileId: connection.profile?.id || 'life-local',
+        ...(connection.workspace ? { workspace: connection.workspace } : {}),
+        provider,
+        title: 'Draft thread',
+        messages: [],
+        busy: false,
+        model,
+        reasoningEffort,
+        serviceTier,
+        mode,
+        createdAt,
+        updatedAt: createdAt,
+        lastReadAt: createdAt,
+        turn: 0,
+        pending: [],
+      }
+      draftState.move('agents:new', 'agents:' + retained.id)
+      setThreads((previous) => [retained, ...previous])
+    }
     emergencyReview.current = false
     cancelThreadContext()
     if (!attachmentTransfer.current) submitting.current = undefined
     setView('workspace')
     activeIdCurrent.current = undefined
     setWorkspaceActiveId(undefined)
-    draftState.clear('agents:new')
     setThreadMenu(false)
     setStickToBottom(true)
     textarea.current?.focus()
-  }, [historyReady])
+  }, [
+    historyReady,
+    draftState.hasContent,
+    draftState.move,
+    connection,
+    provider,
+    model,
+    reasoningEffort,
+    serviceTier,
+    mode,
+  ])
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (
@@ -1070,6 +1169,35 @@ export function App() {
           e.preventDefault()
           setSidebarOpen((v) => !v)
         }
+        if (
+          key === 'z' &&
+          !e.shiftKey &&
+          threadUndo &&
+          !(
+            e.target instanceof Element &&
+            e.target.closest('input, textarea, [contenteditable="true"]')
+          )
+        ) {
+          e.preventDefault()
+          undoThreadAction()
+        }
+        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          const rows = Array.from(
+            document.querySelectorAll<HTMLButtonElement>('.sidebar .thread-row'),
+          ).filter((row) => row.offsetParent !== null)
+          const index = rows.findIndex((row) => row.getAttribute('aria-current') === 'page')
+          const next =
+            rows[
+              index < 0
+                ? 0
+                : Math.max(0, Math.min(rows.length - 1, index + (e.key === 'ArrowDown' ? 1 : -1)))
+            ]
+          if (next) {
+            e.preventDefault()
+            next.click()
+            next.focus()
+          }
+        }
       }
       if (e.key === 'Escape') setThreadMenu(false)
     }
@@ -1096,6 +1224,7 @@ export function App() {
     view,
     workbench.goal?.id,
     workbench.editor,
+    threadUndo,
   ])
   function attachFiles(files: File[]) {
     if (!historyReady) return
@@ -1113,7 +1242,15 @@ export function App() {
 
   async function send(queued?: QueuedSubmission, intent?: 'queue'): Promise<boolean | undefined> {
     if (!startupReady) return
-    const active = threadsCurrent.current.find(
+    if (!queued && (draftState.restoring || draftState.unavailableAttachments.length)) {
+      setToast(
+        draftState.restoring
+          ? 'Your draft attachments are being restored. Try again shortly.'
+          : 'Reattach or remove the unavailable files before sending this draft.',
+      )
+      return
+    }
+    let active = threadsCurrent.current.find(
       (thread) => thread.id === (queued?.threadId || activeIdCurrent.current),
     )
     const researchThreadContext =
@@ -1213,6 +1350,22 @@ export function App() {
     }
     if (active && active.profileId !== 'life-local' && !queueConnectionMatches(active, connection))
       return
+    if (active) {
+      const latest = threadsCurrent.current.find((thread) => thread.id === active!.id)
+      if (
+        !latest ||
+        latest.turn !== active.turn ||
+        (latest.busy && !active.busy) ||
+        latest.pending.length
+      ) {
+        if (!queued)
+          setToast(
+            'The thread changed while its project was opening. Your draft is kept; send it again when the thread is ready.',
+          )
+        return
+      }
+      active = latest
+    }
     const userMessageId = crypto.randomUUID()
     const transfer = selectedAttachments.length
       ? { id: '', controller: new AbortController() }
@@ -1220,7 +1373,7 @@ export function App() {
     const submission = { id: active?.id }
     submitting.current = submission
     if (!queued) {
-      setDraft('')
+      setDraft((current) => (current === prompt ? '' : current))
       setStickToBottom(true)
     }
     let thread = active
@@ -1246,6 +1399,8 @@ export function App() {
         serviceTier,
         mode,
         updatedAt: Date.now(),
+        createdAt: Date.now(),
+        lastReadAt: Date.now(),
         turn: 0,
         pending: [],
       }
@@ -1283,6 +1438,9 @@ export function App() {
       turnStatus: 'running',
       settled: false,
       snoozedUntil: undefined,
+      snoozedAt: undefined,
+      settledAt: undefined,
+      archivedAt: undefined,
       updatedAt: Date.now(),
       messages: [
         ...thread.messages,
@@ -1411,7 +1569,7 @@ export function App() {
       }
       return true
     } catch (e) {
-      if (!queued) setDraft((current) => current || prompt)
+      if (!queued) draftState.restoreSubmission(prompt, selectedAttachments)
       if (transfer?.controller.signal.aborted) {
         setThreads((previous) =>
           previous.map((item) =>
@@ -1752,6 +1910,189 @@ export function App() {
     if (thread.profileId === 'life-local') cancelThreadContext()
     else if (profilesLoaded) void restoreThreadContext(thread)
   }
+  function exportThread(thread: Thread) {
+    const text = thread.messages
+      .map((message) => {
+        const role =
+          message.role === 'user'
+            ? 'You'
+            : message.role === 'error'
+              ? 'Error'
+              : message.role === 'tool'
+                ? message.title || 'Tool'
+                : providerName(thread.provider)
+        return `## ${role}\n\n${message.input ? `Input:\n\n${message.input}\n\n` : ''}${message.text}`
+      })
+      .join('\n\n')
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'life-thread.md'
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  function undoThreadAction() {
+    const undo = threadUndo
+    if (!undo) return
+    const current = threadsCurrent.current
+    const restored = undoThreadArrangement(current, undo.changes)
+    setThreads((previous) => undoThreadArrangement(previous, undo.changes))
+    if (restored !== current && undo.reopenId) {
+      const thread = threadsCurrent.current.find((item) => item.id === undo.reopenId)
+      if (thread) selectThread(thread)
+    }
+    setThreadUndo(undefined)
+    setToast(
+      restored !== current
+        ? 'Thread arrangement restored.'
+        : 'The thread has newer activity or edits. Its current arrangement was kept.',
+    )
+  }
+  function handleThreadAction(thread: Thread, action: ThreadAction, value?: number | string) {
+    const current = threadsCurrent.current.find((item) => item.id === thread.id)
+    if (!current || !historyReady) return
+    if (
+      ['archive', 'delete', 'settle', 'snooze'].includes(action) &&
+      submitting.current?.id === current.id
+    ) {
+      setToast(
+        'This message is being prepared. Wait for it to finish before organizing the thread.',
+      )
+      return
+    }
+    if (action === 'rename') {
+      setThreadTitleDraft(current.title)
+      setRenamingThread(current.id)
+      return
+    }
+    if (action === 'export') {
+      exportThread(current)
+      return
+    }
+    if (action === 'settings') {
+      setCustomizeOpen(true)
+      setThreadMenu(false)
+      return
+    }
+    if (action === 'delete') {
+      if (threadCanArchive(current)) setDeletingThread(current.id)
+      setThreadMenu(false)
+      return
+    }
+    if (action === 'copy') {
+      const text =
+        value === 'path' ? current.workspace : value === 'branch' ? current.gitBranch : current.id
+      if (text)
+        void navigator.clipboard
+          .writeText(text)
+          .then(() => setToast('Copied to clipboard.'))
+          .catch((error) => setToast(errorText(error)))
+      return
+    }
+    const now = Date.now()
+    const before = threadsCurrent.current
+    const after = applyThreadAction(
+      before,
+      current.id,
+      action,
+      now,
+      typeof value === 'number' ? value : undefined,
+    )
+    if (after === before) return
+    const changes = captureThreadArrangementChanges(before, after)
+    setThreads((previous) =>
+      applyThreadAction(
+        previous,
+        current.id,
+        action,
+        now,
+        typeof value === 'number' ? value : undefined,
+      ),
+    )
+    const messages: Partial<Record<ThreadAction, string>> = {
+      pin: 'Thread pinned.',
+      unpin: 'Thread unpinned.',
+      'move-up': 'Thread moved up.',
+      'move-down': 'Thread moved down.',
+      settle: 'Thread settled.',
+      restore: 'Thread restored.',
+      wake: 'Thread awakened.',
+      snooze: 'Thread snoozed.',
+      archive: 'Thread archived.',
+      unarchive: 'Thread restored from archive.',
+      'mark-unread': 'Thread marked unread.',
+      'mark-read': 'Thread marked read.',
+    }
+    const message = messages[action] || 'Thread updated.'
+    if (action === 'move-up' || action === 'move-down')
+      window.dispatchEvent(new Event('life:thread-arranged'))
+    const reopenId =
+      action === 'archive' && activeIdCurrent.current === current.id ? current.id : undefined
+    setThreadUndo({ message, changes, reopenId })
+    setToast(message)
+    if (reopenId) newThread()
+    setThreadMenu(false)
+    if (!reopenId && !renamingThread)
+      window.requestAnimationFrame(() => {
+        const row = Array.from(
+          document.querySelectorAll<HTMLButtonElement>('.sidebar [data-thread-row]'),
+        ).find(
+          (element) => element.dataset.threadRow === current.id && element.offsetParent !== null,
+        )
+        row?.focus({ preventScroll: true })
+      })
+  }
+  async function deleteSavedThread() {
+    const target = threadsCurrent.current.find((thread) => thread.id === deletingThread)
+    if (!target || !historyReady || !threadCanArchive(target)) return
+    const researchLinked = workbench.linkedThreadIds.has(target.id)
+    const restoreResearchLinks = researchLinked
+      ? workbench.unlinkThreadWithRollback(target.id)
+      : undefined
+    if (researchLinked && !restoreResearchLinks) return
+    const draft = draftState.snapshot('agents:' + target.id)
+    const candidates = new Set([
+      ...threadAttachmentIds(target),
+      ...draft.attachments.map((file) => file.id),
+      ...draft.unavailableAttachments.map((file) => file.id),
+    ])
+    const next = threadsCurrent.current.filter((thread) => thread.id !== target.id)
+    setThreads((previous) => previous.filter((thread) => thread.id !== target.id))
+    setDeletingThread(undefined)
+    if (activeIdCurrent.current === target.id && view !== 'investigation') newThread()
+    let historyDeleted = false
+    try {
+      const saved = await conversationPersistence.flush(next)
+      if (!saved) {
+        const linksRestored = restoreResearchLinks?.() ?? true
+        setThreads((previous) =>
+          previous.some((thread) => thread.id === target.id) ? previous : [target, ...previous],
+        )
+        setToast(
+          linksRestored
+            ? 'The thread could not be deleted from saved history. It has been restored.'
+            : 'The thread was restored, but its Research link could not be saved. Keep this window open and retry after freeing storage.',
+        )
+        return
+      }
+      historyDeleted = true
+      draftState.clear('agents:' + target.id)
+      const retained = new Set([
+        ...threadsCurrent.current.flatMap(threadAttachmentIds),
+        ...draftState.retainedAttachmentIds(),
+      ])
+      await deleteAttachmentFiles([...candidates].filter((id) => !retained.has(id)))
+      setToast('Thread deleted.')
+    } catch (error) {
+      if (!historyDeleted) {
+        restoreResearchLinks?.()
+        setThreads((previous) =>
+          previous.some((thread) => thread.id === target.id) ? previous : [target, ...previous],
+        )
+      }
+      setToast(errorText(error))
+    }
+  }
   function selectUsageThread(id: string) {
     if (!historyReady) return
     const thread = threadsCurrent.current.find((item) => item.id === id)
@@ -1988,6 +2329,8 @@ export function App() {
                   connection={connection}
                   activeId={activeId}
                   onSelect={selectThread}
+                  onAction={handleThreadAction}
+                  draftThreadIds={draftState.draftThreadIds}
                   onArrange={(thread, patch) => {
                     if (!historyReady) return
                     setThreads((previous) =>
@@ -2411,82 +2754,22 @@ export function App() {
                         </TitleBarContent>
                       ) : null}
                       {active ? (
-                        <div className="thread-menu-container">
-                          <button
-                            className="icon-button"
-                            aria-label="Thread actions"
-                            aria-expanded={threadMenu}
-                            onClick={() => setThreadMenu((v) => !v)}
-                          >
-                            <Ellipsis size={18} />
-                          </button>
-                          {threadMenu ? (
-                            <div className="thread-menu">
-                              <button
-                                onClick={() => {
-                                  const text = active.messages
-                                    .filter((m) => m.role !== 'tool')
-                                    .map(
-                                      (m) =>
-                                        `## ${m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : providerName(active.provider)}\n\n${m.text}`,
-                                    )
-                                    .join('\n\n')
-                                  const url = URL.createObjectURL(
-                                    new Blob([text], { type: 'text/markdown' }),
-                                  )
-                                  const link = document.createElement('a')
-                                  link.href = url
-                                  link.download = 'life-thread.md'
-                                  link.click()
-                                  URL.revokeObjectURL(url)
-                                  setThreadMenu(false)
-                                }}
-                              >
-                                Export thread
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setCustomizeOpen(true)
-                                  setThreadMenu(false)
-                                }}
-                              >
-                                Settings and undo
-                              </button>
-                              <button
-                                disabled={busy || !historyReady}
-                                onClick={() => {
-                                  if (!historyReady) return
-                                  if (
-                                    view === 'investigation' &&
-                                    !workbench.unlinkThread(active.id)
-                                  )
-                                    return
-                                  const retained = new Set(
-                                    threads
-                                      .filter((item) => item.id !== active.id)
-                                      .flatMap(threadAttachmentIds),
-                                  )
-                                  const removed = threadAttachmentIds(active).filter(
-                                    (id) => !retained.has(id),
-                                  )
-                                  const next = threadsCurrent.current.filter(
-                                    (item) => item.id !== active.id,
-                                  )
-                                  setThreads(next)
-                                  if (view !== 'investigation') newThread()
-                                  void conversationPersistence
-                                    .flush(next)
-                                    .then((saved) =>
-                                      saved ? deleteAttachmentFiles(removed) : undefined,
-                                    )
-                                    .catch((error) => setToast(errorText(error)))
-                                }}
-                              >
-                                Delete thread
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
+                        <ThreadActionsMenu
+                          thread={active}
+                          onAction={handleThreadAction}
+                          open={threadMenu}
+                          onOpenChange={setThreadMenu}
+                          trigger={
+                            <button
+                              type="button"
+                              className="icon-button"
+                              aria-label="Thread actions"
+                              aria-expanded={threadMenu}
+                            >
+                              <Ellipsis size={18} />
+                            </button>
+                          }
+                        />
                       ) : null}
                     </div>
                   </header>
@@ -2701,6 +2984,7 @@ export function App() {
                             cancelAttachmentUpload(id)
                             setAttachments((current) => current.filter((item) => item.id !== id))
                             if (
+                              !draftState.retainedAttachmentIds().has(id) &&
                               !threadsCurrent.current.some((thread) =>
                                 threadAttachmentIds(thread).includes(id),
                               )
@@ -2710,6 +2994,31 @@ export function App() {
                               )
                           }}
                         />
+                        {draftState.restoring ? (
+                          <p className="draft-restoration-status" role="status">
+                            Restoring draft attachments…
+                          </p>
+                        ) : null}
+                        {draftState.unavailableAttachments.length ? (
+                          <div className="draft-unavailable-attachments" role="alert">
+                            <p>
+                              These draft files need to be reattached or removed before sending.
+                            </p>
+                            {draftState.unavailableAttachments.map((file) => (
+                              <div key={file.id}>
+                                <span title={file.error}>{file.name}</span>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  aria-label={`Remove unavailable attachment ${file.name}`}
+                                  onClick={() => draftState.removeUnavailable(file.id)}
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
                         {attachmentProgress && attachmentProgress.id === activeId ? (
                           <div className="attachment-upload-status" role="status">
                             <span>Uploading files… {attachmentProgress.percent}%</span>
@@ -3275,9 +3584,79 @@ export function App() {
             </button>
           ) : null}
         </Modal>
+        <Modal
+          open={Boolean(renamingThread)}
+          onOpenChange={(open) => {
+            if (!open) setRenamingThread(undefined)
+          }}
+          title="Rename thread"
+          description="Choose a title for this conversation."
+        >
+          <form
+            className="thread-name-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              const title = threadTitleDraft.trim()
+              if (!title || !renamingThread) return
+              setThreads((previous) =>
+                previous.map((thread) =>
+                  thread.id === renamingThread
+                    ? { ...thread, title, titleSource: 'manual' }
+                    : thread,
+                ),
+              )
+              setRenamingThread(undefined)
+            }}
+          >
+            <label htmlFor="life-thread-title">Thread title</label>
+            <input
+              id="life-thread-title"
+              autoFocus
+              value={threadTitleDraft}
+              maxLength={200}
+              onChange={(event) => setThreadTitleDraft(event.target.value)}
+            />
+            <button type="submit" className="button primary" disabled={!threadTitleDraft.trim()}>
+              Save title
+            </button>
+          </form>
+        </Modal>
+        <Modal
+          open={Boolean(deletingThread)}
+          onOpenChange={(open) => {
+            if (!open) setDeletingThread(undefined)
+          }}
+          title="Delete thread"
+          description="Delete this saved conversation and its draft? Project files and the provider’s own history remain on the connected machine."
+        >
+          <div className="thread-delete-actions">
+            <button
+              type="button"
+              className="button secondary"
+              onClick={() => setDeletingThread(undefined)}
+            >
+              Keep thread
+            </button>
+            <button
+              type="button"
+              className="button primary"
+              disabled={
+                !threads.some((thread) => thread.id === deletingThread && threadCanArchive(thread))
+              }
+              onClick={() => void deleteSavedThread()}
+            >
+              Delete saved thread
+            </button>
+          </div>
+        </Modal>
         {toast ? (
           <div className="toast" role="status">
             <span>{toast}</span>
+            {threadUndo && toast === threadUndo.message ? (
+              <button type="button" className="thread-undo-button" onClick={undoThreadAction}>
+                Undo
+              </button>
+            ) : null}
             <button
               className="icon-button"
               aria-label="Dismiss notification"

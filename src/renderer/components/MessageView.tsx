@@ -19,6 +19,7 @@ import {
   AlertCircle,
   Square,
   FileText,
+  Clock3,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -34,6 +35,7 @@ import {
   outputPreview,
   providerPlanSteps,
   toolOutputSections,
+  toolLifecycle,
 } from '../thread-presentation'
 import { LifeSourceCard } from './LifeSourceCard'
 import { MarkdownRenderCache } from '../markdown-render-cache'
@@ -120,20 +122,23 @@ export const RawOutput = memo(function RawOutput({ text, label }: { text: string
   )
 })
 export function ToolStatus({ status }: { status?: string }) {
-  const running = ['running', 'in_progress', 'spawning', 'initializing'].includes(status || '')
-  const failed = ['failed', 'errored', 'error'].includes(status || '')
-  const interrupted = ['interrupted', 'cancelled', 'canceled', 'stopped', 'shutdown'].includes(
-    status || '',
-  )
+  const lifecycle = toolLifecycle(status)
+  const running =
+    lifecycle === 'active' &&
+    !['waiting', 'pending', 'queued'].includes((status || '').toLowerCase())
+  const failed = lifecycle === 'failed'
+  const interrupted = lifecycle === 'interrupted'
   const label = running
     ? 'Running'
     : failed
       ? 'Failed'
       : interrupted
         ? 'Interrupted'
-        : !status || ['completed', 'complete', 'done', 'success', 'succeeded'].includes(status)
+        : lifecycle === 'completed'
           ? 'Completed'
-          : status.replace(/[_-]/g, ' ').replace(/^./, (letter) => letter.toUpperCase())
+          : (status || 'Unknown')
+              .replace(/[_-]/g, ' ')
+              .replace(/^./, (letter) => letter.toUpperCase())
   return (
     <span className="thread-tool-status" data-status={status || 'completed'}>
       {running ? (
@@ -142,8 +147,10 @@ export function ToolStatus({ status }: { status?: string }) {
         <AlertCircle size={13} />
       ) : interrupted ? (
         <Square size={11} />
-      ) : (
+      ) : lifecycle === 'completed' ? (
         <Check size={13} />
+      ) : (
+        <Clock3 size={13} />
       )}
       <span>{label}</span>
     </span>
@@ -242,7 +249,7 @@ export const MessageView = memo(function MessageView({
   if (message.role === 'tool')
     return (
       <article
-        className={`tool-message thread-tool-card ${message.status === 'failed' ? 'failed' : ''}`}
+        className={`tool-message thread-tool-card ${toolLifecycle(message.status) === 'failed' ? 'failed' : ''}`}
         id={activityAnchor(message.id)}
         data-message-id={message.id}
         tabIndex={-1}

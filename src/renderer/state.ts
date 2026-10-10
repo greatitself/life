@@ -9,7 +9,7 @@ import type {
 import { permissionModes } from '../shared/permissions'
 import { normalizeThreadAttachments, type ThreadAttachment } from './attachments'
 import { normalizeQueuedMessages, pauseQueuedMessages, type QueuedMessage } from './thread-queue'
-import { normalizeFileChanges, type ThreadFileChange } from './thread-activity'
+import { isSubagentActivity, normalizeFileChanges, type ThreadFileChange } from './thread-activity'
 import {
   normalizeMessageMetadata,
   normalizeImportedThreadHistory,
@@ -22,6 +22,8 @@ import {
 } from './thread-metadata'
 import { normalizeSourceChange, type SourceChangeReceipt } from './source-presentation'
 export interface Message extends MessageMetadata {
+  /** Restored child snapshots retain history but need a fresh native event to prove liveness. */
+  activityStateUnknown?: true
   createdAt?: number
   finishedAt?: number
   finishStatus?: string
@@ -37,6 +39,17 @@ export interface Message extends MessageMetadata {
   turn: number
 }
 export interface Thread extends ThreadMetadata {
+  createdAt?: number
+  pinnedAt?: number
+  pinOrder?: number
+  activeOrder?: number
+  lastReadAt?: number
+  /** An explicit completed provider turn, never inferred from old history or streamed text. */
+  completedAt?: number
+  attentionAt?: number
+  settledAt?: number
+  snoozedAt?: number
+  archivedAt?: number
   purpose?: 'research' | 'customization'
   researchContext?: ResearchThreadContext
   importedHistory?: ImportedThreadHistory
@@ -78,6 +91,29 @@ function validModelChoice(value: unknown): string {
   return typeof value === 'string' && value.length <= 100 && !/[\x00-\x1f\x7f-\x9f]/.test(value)
     ? value
     : ''
+}
+function normalizeThreadArrangement(value: Record<string, unknown>): Partial<Thread> {
+  const result: Partial<Thread> = {}
+  for (const key of [
+    'createdAt',
+    'pinnedAt',
+    'lastReadAt',
+    'completedAt',
+    'attentionAt',
+    'settledAt',
+    'snoozedAt',
+    'archivedAt',
+  ] as const) {
+    const timestamp = value[key]
+    if (typeof timestamp === 'number' && Number.isSafeInteger(timestamp) && timestamp >= 0)
+      result[key] = timestamp
+  }
+  for (const key of ['pinOrder', 'activeOrder'] as const) {
+    const rank = value[key]
+    if (typeof rank === 'number' && Number.isFinite(rank) && Math.abs(rank) <= 1e12)
+      result[key] = rank
+  }
+  return result
 }
 function normalizeAgentTurns(value: unknown): Record<string, number> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -139,6 +175,7 @@ export function readThreads(input?: unknown): Thread[] {
           : {}),
         ...(t.workspaceUnknown === true ? { workspaceUnknown: true } : {}),
         ...normalizeThreadMetadata(t),
+        ...normalizeThreadArrangement(t),
         ...(t.purpose === 'research' || t.purpose === 'customization'
           ? { purpose: t.purpose }
           : {}),
@@ -181,6 +218,13 @@ export function readThreads(input?: unknown): Thread[] {
             details: undefined,
             submission: undefined,
             ...normalizeMessageMetadata(message),
+            activityStateUnknown:
+              message.agentId ||
+              message.parentItemId ||
+              message.kind === 'subagent' ||
+              isSubagentActivity(message)
+                ? (true as const)
+                : undefined,
             createdAt:
               typeof message.createdAt === 'number' &&
               Number.isFinite(message.createdAt) &&
@@ -201,8 +245,25 @@ export function readThreads(input?: unknown): Thread[] {
             attachments: normalizeThreadAttachments(message.attachments),
             title: typeof message.title === 'string' ? message.title : undefined,
             status:
-              message.role === 'tool' &&
-              (message.status === 'running' || message.status === 'waiting')
+              (message.role === 'tool' ||
+                message.agentId ||
+                message.parentItemId ||
+                message.kind === 'subagent') &&
+              [
+                'running',
+                'waiting',
+                'inprogress',
+                'spawning',
+                'initializing',
+                'pendinginit',
+                'pending',
+                'queued',
+                'started',
+              ].includes(
+                (typeof message.status === 'string' ? message.status : '')
+                  .replace(/[_-]/g, '')
+                  .toLowerCase(),
+              )
                 ? 'interrupted'
                 : typeof message.status === 'string'
                   ? message.status
@@ -409,6 +470,35 @@ function childNativeRun(details: Record<string, unknown> | undefined): string | 
     return JSON.stringify(['run_id', details.run_id])
   return undefined
 }
+function raiseThreadAttention(thread: Thread, at = Date.now()): Thread {
+  return {
+    ...thread,
+    attentionAt: Math.max(at, thread.attentionAt || 0),
+    archivedAt: undefined,
+    settled: false,
+    settledAt: undefined,
+    snoozedAt: undefined,
+    snoozedUntil: undefined,
+  }
+}
+function confirmsChildActivity(event: AgentEvent, details?: Record<string, unknown>): boolean {
+  if (event.type !== 'subagent' || !details) return false
+  if (
+    details.lifecycle === 'turn' ||
+    (typeof details.nativeTurnId === 'string' && details.nativeTurnId) ||
+    (typeof details.run_id === 'string' && details.run_id)
+  )
+    return true
+  return ['agentsStates', 'agents_states', 'agents'].some((key) => {
+    const states = details[key]
+    return (
+      Object.hasOwn(details, key) &&
+      states !== null &&
+      typeof states === 'object' &&
+      !Array.isArray(states)
+    )
+  })
+}
 export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   if (event.sessionId !== thread.id) return thread
   const recoverableError =
@@ -439,13 +529,15 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     return {
       ...thread,
       remoteId: event.remoteId ?? thread.remoteId,
-      ...(providerTitle(event)
+      ...(providerTitle(event) && thread.titleSource !== 'manual'
         ? { title: providerTitle(event)!, titleSource: 'provider' as const }
         : {}),
     }
   if (event.type === 'title') {
     const title = providerTitle(event)
-    return title ? { ...thread, title, titleSource: 'provider' } : thread
+    return title && thread.titleSource !== 'manual'
+      ? { ...thread, title, titleSource: 'provider' }
+      : thread
   }
   if (event.type === 'settings')
     return {
@@ -499,8 +591,14 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
           : event.status === 'completed' || !event.status
             ? 'completed'
             : 'unknown'
+    const at = Date.now()
+    const alreadyFinished = !thread.busy && thread.turnStatus === status
+    const finished = finishThreadTurn(thread, status, at)
     return {
-      ...finishThreadTurn(thread, status),
+      ...(alreadyFinished || status === 'unknown' ? finished : raiseThreadAttention(finished, at)),
+      ...(status === 'completed' && !alreadyFinished
+        ? { completedAt: at, lastReadAt: thread.lastReadAt ?? Math.max(0, at - 1) }
+        : {}),
       busy: false,
       turnStatus: status,
       agentStatus: status,
@@ -557,7 +655,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       },
     }
     return {
-      ...thread,
+      ...(pending ? thread : raiseThreadAttention(thread)),
       pending: [...thread.pending.filter((p) => p.requestId !== event.requestId), mergedEvent],
       messages: previous
         ? thread.messages.map((message) => (message.id === id ? request : message))
@@ -619,7 +717,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         ],
       }
     }
-    const failed = finishThreadTurn(thread, 'failed')
+    const failed = raiseThreadAttention(finishThreadTurn(thread, 'failed'))
     return {
       ...failed,
       busy: false,
@@ -760,6 +858,10 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   const message: Message = {
     ...previous,
     ...metadata,
+    activityStateUnknown:
+      previous?.activityStateUnknown && !confirmsChildActivity(event, metadata.details)
+        ? true
+        : undefined,
     id,
     createdAt: previous?.createdAt ?? Date.now(),
     finishedAt: terminalTool

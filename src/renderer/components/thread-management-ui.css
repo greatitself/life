@@ -1,0 +1,60 @@
+.thread-name-form {
+  display: grid;
+  gap: 12px;
+}
+.thread-name-form label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.thread-name-form input {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.thread-name-form .button {
+  justify-self: end;
+}
+.thread-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.thread-undo-button {
+  flex: none;
+  padding: 5px 8px;
+  color: var(--text-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  border-radius: 5px;
+}
+.thread-undo-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.draft-restoration-status,
+.draft-unavailable-attachments {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 7px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.draft-unavailable-attachments p {
+  margin: 0 0 5px;
+}
+.draft-unavailable-attachments > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+.draft-unavailable-attachments span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

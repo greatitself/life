@@ -13,6 +13,7 @@ import {
 import { useResearchFiles } from './research-files'
 import { researchDirectory, researchStorageName, type ResearchScope } from './research-storage'
 import { collectLegacyResearch, researchLinkedThreadIds } from './research-legacy'
+import { beginResearchThreadUnlink } from './research-thread-links'
 
 export { makeResearchScope, researchDirectory, researchScopeMatches } from './research-storage'
 export { researchLinkedThreadIds } from './research-legacy'
@@ -496,6 +497,12 @@ export function useResearchWorkbench(
           ),
         })),
       })),
+    unlinkThreadWithRollback: (threadId: string): (() => boolean) | undefined =>
+      beginResearchThreadUnlink(
+        threadId,
+        data.contextForThread(threadId)?.scope.key || data.scopeKey,
+        data.update,
+      ),
     forThread: (threadId?: string): ResearchTarget | undefined =>
       data.contextForThread(threadId)?.target,
   }

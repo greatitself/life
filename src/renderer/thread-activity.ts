@@ -149,7 +149,10 @@ export function reportedFileChanges(
   for (const message of messages) {
     if (
       message.role !== 'tool' ||
-      ['failed', 'interrupted', 'running'].includes(message.status || '')
+      (message.status &&
+        !['completed', 'complete', 'done', 'success', 'succeeded'].includes(
+          message.status.toLowerCase(),
+        ))
     )
       continue
     const cached = cachedToolChanges.get(message)

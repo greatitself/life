@@ -1,8 +1,9 @@
 import type { Provider } from '../shared/types'
 import type { Thread } from './state'
+import { compareManualThreads } from './thread-management'
 
 export type SidebarThreadSort =
-  'recent' | 'oldest' | 'title' | 'project' | 'provider' | 'activity' | 'messages'
+  'manual' | 'recent' | 'oldest' | 'title' | 'project' | 'provider' | 'activity' | 'messages'
 export type SidebarThreadGroup =
   'project' | 'machine' | 'provider' | 'status' | 'date' | 'scope' | 'none'
 export interface SidebarArrangement {
@@ -16,12 +17,22 @@ export function readSidebarArrangement(): SidebarArrangement {
   const defaults: SidebarArrangement = {
     provider: 'all',
     status: 'all',
-    sort: 'recent',
-    group: 'project',
+    sort: 'manual',
+    group: 'none',
   }
   try {
     const value = JSON.parse(localStorage.getItem(arrangementStorageKey) || 'null')
     if (!value || typeof value !== 'object') return defaults
+    // Earlier versions persisted their automatic defaults on first render.
+    // Keep custom arrangements, but let that untouched layout adopt the new inbox.
+    if (
+      Object.keys(value).length === 4 &&
+      value.provider === 'all' &&
+      value.status === 'all' &&
+      value.sort === 'recent' &&
+      value.group === 'project'
+    )
+      return defaults
     return {
       provider: ['all', 'codex', 'claude'].includes(value.provider)
         ? value.provider
@@ -29,9 +40,16 @@ export function readSidebarArrangement(): SidebarArrangement {
       status: ['all', 'running', 'waiting', 'idle'].includes(value.status)
         ? value.status
         : defaults.status,
-      sort: ['recent', 'oldest', 'title', 'project', 'provider', 'activity', 'messages'].includes(
-        value.sort,
-      )
+      sort: [
+        'manual',
+        'recent',
+        'oldest',
+        'title',
+        'project',
+        'provider',
+        'activity',
+        'messages',
+      ].includes(value.sort)
         ? value.sort
         : defaults.sort,
       group: ['project', 'machine', 'provider', 'status', 'date', 'scope', 'none'].includes(
@@ -58,6 +76,9 @@ export function threadStatus(thread: Thread): 'waiting' | 'running' | 'idle' {
   return thread.pending.length ? 'waiting' : thread.busy ? 'running' : 'idle'
 }
 export function compareSidebarThreads(a: Thread, b: Thread, sort: SidebarThreadSort): number {
+  if (Boolean(a.pinnedAt) !== Boolean(b.pinnedAt)) return a.pinnedAt ? -1 : 1
+  if (a.pinnedAt && b.pinnedAt) return compareManualThreads(a, b)
+  if (sort === 'manual') return compareManualThreads(a, b)
   let result = 0
   if (sort === 'oldest') result = a.updatedAt - b.updatedAt
   else if (sort === 'title') result = a.title.localeCompare(b.title)

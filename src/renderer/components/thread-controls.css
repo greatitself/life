@@ -98,11 +98,33 @@
   padding: 5px;
 }
 .life-thread-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   padding: 9px 10px;
   min-height: 34px;
   border-radius: 5px;
   outline: none;
   cursor: pointer;
+}
+.life-thread-menu-item > svg:last-child:not(:first-child) {
+  margin-left: auto;
+}
+.life-thread-menu-item[data-disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+.life-thread-menu-separator {
+  height: 1px;
+  margin: 5px;
+  background: var(--border);
+}
+.life-thread-actions-menu {
+  max-height: min(520px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+}
+.life-thread-menu-destructive {
+  color: var(--life-thread-failed, #e88787);
 }
 .thread-card-shell {
   position: relative;
@@ -151,16 +173,17 @@
 .thread-card-shell:focus-within .thread-card-project > time {
   opacity: 0;
 }
-.thread-card-shell:hover .thread-card-project .thread-card-run-status,
-.thread-card-shell:focus-within .thread-card-project .thread-card-run-status {
-  opacity: 0;
-}
 .app-shell.life-refined-layout .sidebar .thread-card-meta > .thread-cloud-icon {
   flex: 0 0 16px;
   color: var(--muted);
 }
 .app-shell.life-refined-layout .sidebar .thread-card-meta > .thread-card-provider {
   margin-left: 0;
+}
+/* Thread details are read-only; their positioning wrapper must also allow clicks through. */
+[data-radix-popper-content-wrapper]:has(> .life-thread-hover),
+.life-thread-hover {
+  pointer-events: none;
 }
 .life-thread-hover {
   z-index: 70;

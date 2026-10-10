@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { Message } from '../src/renderer/state'
+import { applyEvent, readThreads } from '../src/renderer/state'
 import {
   activityAnchor,
   activitySummary,
   completedTurnResponse,
+  completedTurnRows,
   createTurnGroupProjector,
   groupThreadTurns,
   messagePhaseLabel,
@@ -15,7 +17,10 @@ import {
   threadHasRunningChildren,
   threadTurnStartedAt,
   toolOutputSections,
+  toolLifecycle,
+  toolActionSummary,
 } from '../src/renderer/thread-presentation'
+import { reportedFileChanges } from '../src/renderer/thread-activity'
 
 function message(
   id: string,
@@ -27,6 +32,240 @@ function message(
 }
 
 describe('thread output presentation', () => {
+  it('reopens consecutive completed work in its original position around steering and final replies', () => {
+    const progress = message('progress', 'assistant', 1, { phase: 'commentary' })
+    const command = message('command', 'tool', 1, { status: 'completed' })
+    const steering = message('steering', 'user', 1)
+    const reasoning = message('reasoning', 'assistant', 1, { kind: 'reasoning' })
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    const trailing = message('trailing', 'tool', 1, { status: 'completed' })
+    const group = groupThreadTurns([
+      message('request', 'user', 1),
+      progress,
+      command,
+      steering,
+      reasoning,
+      final,
+      trailing,
+    ])[0]
+    const rows = completedTurnRows(group, final)
+    expect(rows).toEqual([
+      { kind: 'activity', messages: [progress, command] },
+      { kind: 'message', message: steering },
+      { kind: 'activity', messages: [reasoning] },
+      { kind: 'message', message: final },
+      { kind: 'activity', messages: [trailing] },
+    ])
+    expect(rows.flatMap((row) => (row.kind === 'activity' ? row.messages : [row.message]))).toEqual(
+      group.messages,
+    )
+  })
+
+  it('keeps live, unsuccessful and uncertain tools visible after a reported parent completion', () => {
+    const user = message('request', 'user', 1, { finishStatus: 'completed' })
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    for (const status of [
+      'running',
+      'inProgress',
+      'in_progress',
+      'pendingInit',
+      'waiting',
+      'pending',
+      'errored',
+      'failed',
+      'interrupted',
+      'killed',
+      'unknown',
+    ]) {
+      const group = groupThreadTurns([user, message('tool', 'tool', 1, { status }), final])[0]
+      expect(completedTurnResponse(group, false, 'completed'), status).toBeUndefined()
+    }
+  })
+
+  it('settles answered approvals and completed compaction advisories with the parent turn', () => {
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    for (const advisory of [
+      message('approved', 'tool', 1, { kind: 'event', status: 'approved' }),
+      message('answered', 'tool', 1, { kind: 'event', status: 'answered' }),
+      message('compacted', 'tool', 1, { kind: 'status', status: 'compacting' }),
+    ]) {
+      const group = groupThreadTurns([message('request', 'user', 1), advisory, final])[0]
+      expect(completedTurnResponse(group, false, 'completed')).toBe(final)
+    }
+  })
+
+  it('keeps an agent running after a child command finishes and clears old snapshots on restart', () => {
+    const launch = message('launch', 'tool', 1, {
+      kind: 'subagent',
+      status: 'running',
+      agentId: 'worker',
+    })
+    const command = message('command', 'tool', 1, { status: 'completed', agentId: 'worker' })
+    expect(threadHasRunningChildren({ messages: [launch, command], pending: [] })).toBe(true)
+    const restored = readThreads([
+      {
+        id: 'restored',
+        profileId: 'local',
+        provider: 'codex',
+        messages: [
+          { ...launch, details: { agentsStates: { worker: { status: 'running' } } } },
+          command,
+        ],
+        turn: 1,
+      },
+    ])[0]
+    expect(restored.messages[0].status).toBe('interrupted')
+    expect(restored.messages[0].details).toEqual({
+      agentsStates: { worker: { status: 'running' } },
+    })
+    expect(threadHasRunningChildren(restored)).toBe(false)
+    expect(
+      threadHasRunningChildren({
+        ...restored,
+        messages: [
+          ...restored.messages,
+          { ...launch, id: 'new-run', details: { lifecycle: 'turn', nativeTurnId: 'new' } },
+        ],
+      }),
+    ).toBe(true)
+  })
+
+  it('uses current native child lifecycles instead of permanently trusting old collab snapshots', () => {
+    const spawn = message('spawn', 'tool', 1, {
+      kind: 'subagent',
+      agentId: 'worker',
+      status: 'completed',
+      details: { agentsStates: { worker: { status: 'pendingInit' } } },
+    })
+    expect(threadHasRunningChildren({ messages: [spawn], pending: [] })).toBe(true)
+    const done = message('child-done', 'tool', 1, {
+      kind: 'subagent',
+      agentId: 'worker',
+      status: 'completed',
+      details: { lifecycle: 'turn', nativeTurnId: 'first' },
+    })
+    expect(threadHasRunningChildren({ messages: [spawn, done], pending: [] })).toBe(false)
+    const next = message('child-next', 'tool', 1, {
+      kind: 'subagent',
+      agentId: 'worker',
+      status: 'running',
+      details: { lifecycle: 'turn', nativeTurnId: 'second' },
+    })
+    expect(threadHasRunningChildren({ messages: [spawn, done, next], pending: [] })).toBe(true)
+    const claudeDone = { ...done, details: { lifecycle: 'turn', run_id: 'first' } }
+    const claudeNext = { ...next, details: { run_id: 'second' } }
+    expect(
+      threadHasRunningChildren({ messages: [spawn, claudeDone, claudeNext], pending: [] }),
+    ).toBe(true)
+    const group = groupThreadTurns([
+      message('request', 'user', 1),
+      spawn,
+      message('final', 'assistant', 1, { phase: 'final_answer' }),
+    ])[0]
+    expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
+  })
+
+  it('keeps completed collab snapshots inspectable after restart without inventing live children', () => {
+    for (const status of ['running', 'pendingInit']) {
+      const details = { agentsStates: { worker: { status } } }
+      const spawn = message('1:worker:launch', 'tool', 1, {
+        kind: 'subagent',
+        agentId: 'worker',
+        status: 'completed',
+        title: 'spawn_agent',
+        details,
+      })
+      const restored = readThreads([
+        { id: 'restored', profileId: 'local', provider: 'codex', messages: [spawn], turn: 1 },
+      ])[0]
+      expect(restored.messages[0].status).toBe('completed')
+      expect(restored.messages[0].details).toEqual(details)
+      expect(threadHasRunningChildren(restored)).toBe(false)
+      const refreshed = applyEvent(restored, {
+        sessionId: 'restored',
+        type: 'subagent',
+        itemId: 'launch',
+        agentId: 'worker',
+        status: 'completed',
+        details: { agentsStates: { worker: { status } } },
+      })
+      expect(refreshed.messages).toHaveLength(1)
+      expect(refreshed.messages[0].activityStateUnknown).toBeUndefined()
+      expect(refreshed.messages[0].text).toBe(spawn.text)
+      expect(threadHasRunningChildren(refreshed)).toBe(true)
+      const unconfirmed = applyEvent(restored, {
+        sessionId: 'restored',
+        type: 'tool',
+        itemId: 'unrelated-command',
+        agentId: 'worker',
+        status: 'completed',
+        text: 'A child command completed.',
+      })
+      expect(threadHasRunningChildren(unconfirmed)).toBe(false)
+      const confirmed = applyEvent(unconfirmed, {
+        sessionId: 'restored',
+        type: 'subagent',
+        itemId: 'child-lifecycle',
+        agentId: 'worker',
+        status: 'running',
+        details: { lifecycle: 'turn', nativeTurnId: 'confirmed-run' },
+      })
+      expect(threadHasRunningChildren(confirmed)).toBe(true)
+    }
+  })
+
+  it('labels current reported commands and lifecycle variants without substituting tool output', () => {
+    expect(
+      toolActionSummary(
+        message('command', 'tool', 1, {
+          title: 'exec_command',
+          input: JSON.stringify({ cmd: 'npm test\nprintf after' }),
+          status: 'inProgress',
+          text: 'Unrelated output',
+        }),
+      ),
+    ).toBe('Running npm test')
+    expect(
+      toolActionSummary(
+        message('command', 'tool', 1, {
+          title: 'Bash',
+          input: JSON.stringify({ command: 'git status' }),
+          status: 'errored',
+        }),
+      ),
+    ).toBe('Failed git status')
+    expect(
+      toolActionSummary(
+        message('command', 'tool', 1, { title: 'exec_command', status: 'waiting' }),
+      ),
+    ).toBe('Waiting for exec_command')
+    for (const status of ['inProgress', 'in_progress', 'pendingInit'])
+      expect(toolLifecycle(status)).toBe('active')
+    expect(toolLifecycle('killed')).toBe('interrupted')
+    expect(toolLifecycle('unknown')).toBe('unknown')
+  })
+
+  it('reports changed files only after the actual edit tool succeeds', () => {
+    const edit = message('edit', 'tool', 1, {
+      title: 'Edit',
+      input: JSON.stringify({ file_path: 'src/app.ts', old_string: 'before', new_string: 'after' }),
+    })
+    for (const status of [
+      'pendingInit',
+      'inProgress',
+      'in_progress',
+      'errored',
+      'cancelled',
+      'unknown',
+    ])
+      expect(reportedFileChanges([{ ...edit, status }]), status).toEqual([])
+    expect(reportedFileChanges([{ ...edit, status: 'completed' }])[0]).toMatchObject({
+      path: 'src/app.ts',
+      additions: 1,
+      removals: 1,
+    })
+  })
+
   it('keeps Stop available for background children after the parent has finished', () => {
     const parent = message('parent', 'assistant', 1, { status: 'running' })
     expect(threadHasRunningChildren({ messages: [parent], pending: [] })).toBe(false)
@@ -164,6 +403,21 @@ describe('thread output presentation', () => {
         turnStatus: 'completed',
       } as import('../src/renderer/state').Thread),
     ).toEqual([user, steering, final])
+  })
+
+  it('keeps earlier explicit final replies navigable in their chronological position after steering', () => {
+    const user = message('request', 'user', 1, { finishStatus: 'completed' })
+    const earlier = message('earlier', 'assistant', 1, { phase: 'final_answer' })
+    const steering = message('steering', 'user', 1)
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    expect(
+      previewNavigableMessages({
+        messages: [user, earlier, steering, final],
+        busy: false,
+        turn: 1,
+        turnStatus: 'completed',
+      } as import('../src/renderer/state').Thread),
+    ).toEqual([user, earlier, steering, final])
   })
 
   it('uses reported action text rather than a reasoning-summary label', () => {

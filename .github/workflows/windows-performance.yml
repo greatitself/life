@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: 'Full source commit SHA for the unpublished Life 0.11.1 candidate'
+        description: 'Full source commit SHA for the unpublished Life 0.12.0 candidate'
         required: true
         type: string
 
@@ -32,7 +32,7 @@ jobs:
           $source = git rev-parse HEAD
           if ($source -cne $env:LIFE_SOURCE_REF) { throw 'Candidate checkout does not match the requested source commit.' }
           "sha=$source" >> $env:GITHUB_OUTPUT
-          node -e "const assert = require('node:assert/strict'); assert.equal(require('./package.json').version, '0.11.1'); assert.deepEqual(require('./scripts/release-baselines.cjs').releaseBaselines('0.11.1'), ['0.11.0'])"
+          node -e "const assert = require('node:assert/strict'); assert.equal(require('./package.json').version, '0.12.0'); assert.deepEqual(require('./scripts/release-baselines.cjs').releaseBaselines('0.12.0'), ['0.11.1'])"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -125,13 +125,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Measure complete 0.11.0 to 0.11.1 upgrade and preserve saved data
+      - name: Measure complete 0.11.1 to 0.12.0 upgrade and preserve saved data
         id: upgrade
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem release/*.exe)
           if ($installers.Count -ne 1) { throw 'Expected exactly one candidate installer.' }
-          ./tests/windows-upgrade.ps1 -Installer $installers[0].FullName -ExpectedVersion '0.11.1' -BaselineVersions @('0.11.0') -MaxUpgradeMilliseconds 0 -CaptureInstallerTrace
+          ./tests/windows-upgrade.ps1 -Installer $installers[0].FullName -ExpectedVersion '0.12.0' -BaselineVersions @('0.11.1') -MaxUpgradeMilliseconds 0 -CaptureInstallerTrace
       - name: Report complete installation timings and verification results
         if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
         shell: pwsh
@@ -140,7 +140,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: life-windows-performance-upgrade-proof-0.11.0
+          name: life-windows-performance-upgrade-proof-0.11.1
           path: |
             output/windows-upgrade-proof.json
             output/windows-installation-benchmark.md

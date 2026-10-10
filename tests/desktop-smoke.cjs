@@ -1077,19 +1077,8 @@ export function activityLabel(activity: ThreadActivity): string {
       assert.equal(second.workspace, otherProject)
       const selectSidebarThread = async (thread) => {
         await workspace()
-        const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        const projectGroup = page.locator('.sidebar-project-thread-group').filter({
-          has: page
-            .locator('.sidebar-project-thread-description')
-            .filter({ hasText: new RegExp(`${escapeRegex(thread.workspace)}$`) }),
-        })
-        const row = projectGroup
-          .getByRole('button', {
-            name: new RegExp(
-              `^${escapeRegex(thread.title)}, ${thread.provider === 'claude' ? 'Claude Code' : 'OpenAI · Codex'},`,
-            ),
-          })
-          .first()
+        const row = page.locator(`.sidebar [data-thread-row=${JSON.stringify(thread.id)}]`)
+        assert.equal(await row.count(), 1, 'The saved thread has one visible sidebar entry')
         await row.click()
         await waitUntil(
           async () =>

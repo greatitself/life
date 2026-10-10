@@ -28,7 +28,8 @@ function New-Trial([double]$Duration) {
     }
 }
 
-Assert-Equal ((@(Get-ValidatedBaselineVersions @() '0.11.1')) -join ',') '0.11.0' 'Latest candidate baseline'
+Assert-Equal ((@(Get-ValidatedBaselineVersions @() '0.12.0')) -join ',') '0.11.1' 'Latest candidate baseline'
+Assert-Equal ((@(Get-ValidatedBaselineVersions @() '0.11.1')) -join ',') '0.11.0' 'Historical patch baseline'
 Assert-Equal ((@(Get-ValidatedBaselineVersions @() '0.11.0')) -join ',') '0.10.0' 'Historical rebuild baseline'
 foreach ($duration in @(9999.999, 10000.0, 10000.001)) {
     $result = Get-UpgradePerformance @((New-Trial $duration)) 10000

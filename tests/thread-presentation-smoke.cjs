@@ -28,6 +28,7 @@ async function run() {
           import { ThreadTimeline } from './src/renderer/components/ThreadTimeline'
           import { ApprovalCard, ToolStatus } from './src/renderer/components/MessageView'
           import { ThreadRunStatus } from './src/renderer/components/ThreadRunStatus'
+          import { previewNavigableMessages, activityAnchor } from './src/renderer/thread-presentation'
           import './src/renderer/styles.css'
           import './src/renderer/workspace-presentation.css'
           import './src/renderer/components/thread-output.css'
@@ -52,12 +53,24 @@ async function run() {
             { ...base, id: '1:later-tool', role: 'tool', title: 'cat full-output.log', status: 'completed', text: fullOutput },
             { ...base, id: '1:error', role: 'error', text: 'A later check failed after the response; preserve its position.' },
           ]
+          const settledMessages = [
+            { ...base, id: '2:user', role: 'user', text: 'Keep every completed operation available.', finishStatus: 'completed', finishedAt: Date.now() },
+            { ...base, id: '2:progress', role: 'assistant', phase: 'commentary', text: 'Completed progress before steering.' },
+            { ...base, id: '2:command', role: 'tool', title: 'exec_command', status: 'completed', input: JSON.stringify({ cmd: 'npm test' }), text: fullOutput },
+            { ...base, id: '2:earlier-final', role: 'assistant', phase: 'final_answer', text: 'Earlier completed reply remains before steering.' },
+            { ...base, id: '2:steering', role: 'user', text: 'Keep this steering request in its exact position.' },
+            { ...base, id: '2:edit', role: 'tool', title: 'Edit', status: 'completed', input: JSON.stringify({ file_path: 'src/completed.ts', old_string: 'const answer = 41;\\n', new_string: 'const answer = 42;\\n' }), text: 'Applied the reported edit.' },
+            { ...base, id: '2:final', role: 'assistant', phase: 'final_answer', text: 'Completed reply stays visible and copyable.' },
+            { ...base, id: '2:trailing', role: 'tool', title: 'git status', status: 'completed', text: 'Verified the final working tree.' },
+          ]
           window.threadFixture = { original, commandInput, initialOutput, fullOutput, code, finalText, planDetails }
           window.approvalCalls = []
           window.rejectApproval = true
           function Fixture() {
             const [thread, setThread] = useState({ id: 'fixture', profileId: 'fixture-machine', workspace: '/research/life', provider: 'codex', title: 'Review provider output', messages, busy: true, model: 'model', mode: 'review', updatedAt: Date.now(), turn: 1, pending: [] })
             const [approvalSent, setApprovalSent] = useState(false)
+            const [completedMode, setCompletedMode] = useState('hidden')
+            const completedThread = { ...thread, id: 'completed-fixture', busy: false, turnStatus: 'completed', messages: completedMode === 'failed' ? settledMessages.map(message => message.id === '2:command' ? { ...message, status: 'errored' } : message) : completedMode === 'alias' ? settledMessages.map(message => message.id === '2:command' ? { ...message, status: 'inProgress' } : message) : completedMode === 'child' ? [...settledMessages, { ...base, id: '2:child', role: 'tool', kind: 'subagent', title: 'spawn_agent', agentId: 'live-worker', status: 'completed', details: { agentsStates: { 'live-worker': { status: 'pendingInit' } } } }] : settledMessages }
             return <div className="app-shell life-refined-layout" data-theme="dark">
               <main className="main-workspace" style={{ padding: '28px', maxWidth: 1080, margin: '0 auto', overflow: 'visible' }}>
                 <header style={{ display: 'flex', justifyContent: 'space-between', gap: 20, marginBottom: 24 }}><div><h1 style={{ margin: 0, fontSize: 20 }}>life</h1><p style={{ margin: '4px 0', color: 'var(--muted)' }}>Thread output · /research/life</p></div>
@@ -77,6 +90,20 @@ async function run() {
                     setApprovalSent(true)
                   }} />
                   {approvalSent ? <p data-approval="sent">Answer accepted</p> : null}
+                </section>
+                <section aria-label="Completed transcript checks" style={{ marginTop: 32 }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                    <button onClick={() => setCompletedMode('settled')}>Show completed work</button>
+                    <button onClick={() => setCompletedMode('failed')}>Show failed tool</button>
+                    <button onClick={() => setCompletedMode('child')}>Show live child</button>
+                    <button onClick={() => setCompletedMode('alias')}>Show active alias</button>
+                  </div>
+                  {completedMode !== 'hidden' ? <>
+                    <nav aria-label="Completed timeline navigation" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                      {previewNavigableMessages(completedThread).map(message => <a key={message.id} href={'#' + activityAnchor(message.id)}>Jump to {message.id}</a>)}
+                    </nav>
+                    <ThreadTimeline thread={completedThread} />
+                  </> : null}
                 </section>
               </main>
             </div>
@@ -374,6 +401,135 @@ async function run() {
     ])
     checks.push(
       'Approval failure is visible, preserves exact answers and reenables controls for a successful retry without unhandled rejection',
+    )
+    const completed = page.getByRole('region', { name: 'Completed transcript checks', exact: true })
+    await completed.getByRole('button', { name: 'Show completed work', exact: true }).click()
+    await completed.locator('[data-message-id="2:final"]').waitFor()
+    assert.deepEqual(
+      await completed
+        .locator('[data-message-id]')
+        .evaluateAll((nodes) => nodes.map((node) => node.dataset.messageId)),
+      ['2:user', '2:earlier-final', '2:steering', '2:final'],
+    )
+    assert.equal(await completed.locator('.thread-turn-disclosure').count(), 3)
+    assert.equal(await completed.locator('.thread-turn-disclosure[open]').count(), 0)
+    const navigation = completed.getByRole('navigation', {
+      name: 'Completed timeline navigation',
+      exact: true,
+    })
+    assert.equal(
+      await navigation.getByRole('link', { name: 'Jump to 2:progress', exact: true }).count(),
+      0,
+    )
+    await navigation.getByRole('link', { name: 'Jump to 2:earlier-final', exact: true }).click()
+    assert.equal(
+      await page.evaluate(() => document.activeElement.dataset.messageId),
+      '2:earlier-final',
+    )
+    assert.equal(
+      await completed.locator('[data-message-id="2:earlier-final"] .markdown').textContent(),
+      'Earlier completed reply remains before steering.',
+    )
+    await completed
+      .locator('[data-message-id="2:final"]')
+      .getByRole('button', { name: 'Copy message', exact: true })
+      .click()
+    assert.equal(
+      await page.evaluate(() => navigator.clipboard.readText()),
+      'Completed reply stays visible and copyable.',
+    )
+    await completed
+      .locator('.thread-turn-disclosure > summary')
+      .evaluateAll((nodes) => nodes.forEach((node) => node.click()))
+    await completed.locator('[data-message-id="2:trailing"]').waitFor()
+    assert.deepEqual(
+      await completed
+        .locator('[data-message-id]')
+        .evaluateAll((nodes) => nodes.map((node) => node.dataset.messageId)),
+      [
+        '2:user',
+        '2:progress',
+        '2:command',
+        '2:earlier-final',
+        '2:steering',
+        '2:edit',
+        '2:final',
+        '2:trailing',
+      ],
+    )
+    await completed
+      .locator('[data-message-id="2:command"]')
+      .getByRole('button', { name: 'Copy output', exact: true })
+      .click()
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), fixture.fullOutput)
+    const changes = completed.locator('.thread-changes')
+    assert.match(await changes.locator(':scope > summary').textContent(), /1 changed file/)
+    assert.match(await changes.locator(':scope > summary').textContent(), /\+1.*−1/)
+    await changes.locator('.thread-changes-folder > summary').click()
+    await changes.locator('.thread-changed-file > summary').click()
+    assert.match(
+      await changes.locator('.thread-changed-file > pre').textContent(),
+      /-const answer = 41;[\s\S]*\+const answer = 42;/,
+    )
+    await completed.screenshot({ path: join(output, 'thread-presentation-v012-completed.png') })
+    await completed
+      .locator('.thread-turn-disclosure > summary')
+      .evaluateAll((nodes) => nodes.forEach((node) => node.click()))
+    await page.waitForFunction(() => !document.querySelector('[data-message-id="2:command"]'))
+    assert.equal(await completed.locator('[data-message-id="2:final"]').isVisible(), true)
+    checks.push(
+      'Completed work can be reopened and collapsed without losing exact output, moving steering, duplicating the final response or disabling final copy; reported file changes expose real line diffs',
+    )
+    checks.push(
+      'Completed timeline navigation targets every visible parent final reply, including replies before steering, and excludes folded progress',
+    )
+    for (const mode of ['failed', 'child', 'alias']) {
+      await completed
+        .getByRole('button', {
+          name:
+            mode === 'failed'
+              ? 'Show failed tool'
+              : mode === 'child'
+                ? 'Show live child'
+                : 'Show active alias',
+          exact: true,
+        })
+        .click()
+      await page.waitForFunction(
+        () =>
+          document.querySelector(
+            '[aria-label="Completed transcript checks"] .thread-turn-disclosure',
+          ) === null,
+      )
+      assert.equal(await completed.locator('.thread-turn-disclosure').count(), 0)
+      const heading = completed.locator('.thread-action-heading').first()
+      assert.equal(await heading.isVisible(), true)
+      assert.match(
+        await heading.textContent(),
+        mode === 'failed'
+          ? /Failed npm test.*1 failure/
+          : mode === 'alias'
+            ? /Running npm test/
+            : /Ran npm test/,
+      )
+      if (mode === 'child')
+        assert.match(
+          await completed.locator('.thread-action-heading').last().textContent(),
+          /Running 1 subagent/,
+        )
+      if (mode === 'alias') {
+        await heading.click()
+        await completed.locator('[data-message-id="2:command"] .thread-tool-status').waitFor()
+        assert.equal(
+          await completed
+            .locator('[data-message-id="2:command"] .thread-tool-status')
+            .textContent(),
+          'Running',
+        )
+      }
+    }
+    checks.push(
+      'Failed tools and still-live child snapshots never disappear into completed folds; provider inProgress variants expose the actual current command and running status',
     )
     await page.evaluate(() => window.scrollTo(0, 0))
     await page.screenshot({ path: join(output, 'thread-presentation-v07.png') })

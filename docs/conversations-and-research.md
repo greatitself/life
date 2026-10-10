@@ -8,9 +8,25 @@ Connect to a machine first, then select an Agents project when you want to work 
 
 Each Agents thread retains its provider, saved connection, project folder, and remote conversation ID. Selecting a thread restores that context. On the same machine Life can select the folder without reconnecting; saved key, agent, and SSH-config profiles can reconnect when needed. A password or encrypted-key passphrase may require the connection dialog if it is no longer held in memory. Navigation is serialized so a late project selection cannot send a message to the wrong folder.
 
+## Organize threads
+
+**Thread actions** is available from each sidebar row and the conversation header. Pin important threads and use **Move up** or **Move down** to arrange pinned and active threads. **Arranged** sorting shows that saved manual order, which stays stable while provider output, titles, and Git observations update. Search, filters, automatic sorting, and project grouping remain available; existing custom sidebar preferences are preserved.
+
+**Settle thread** parks work without stopping its provider. **Snooze thread** moves it to the compact Snoozed section until the chosen time, unless a new request, completion, or failure needs your attention sooner. Settled, snoozed, and archived conversations remain in expandable sections, with the selected conversation still shown as a compact row. A pending approval or question prevents settling or snoozing. **Archive thread** retains the conversation in Archived, where **Restore from archive** returns it to the active list. Running parent work, a live child agent, a pending request, or an unpaused queue prevents archiving and deletion.
+
+Completion indicators distinguish unread finished work from waiting requests and failures. Opening a conversation marks it read; **Mark unread** and **Mark read** provide explicit control. Ordinary streaming, title changes, Git refreshes, and imported historical messages do not manufacture unread completions. Arrangement actions show **Undo**, which restores their organization fields without discarding newer messages or provider updates. Deletion remains a separate confirmation.
+
+With a sidebar thread row focused, use **Up/Down** to move focus, **Home/End** for the first or last visible row, and **Enter** to open it. **Shift + F10** or right-click opens its actions; **Escape** closes the menu and restores focus.
+
+## Drafts and new conversations
+
+Draft text and attachment metadata are saved in Life's local composer storage, with attachment bytes in its local attachment database. Switching conversations restores each draft. Restarting restores files that remain available; a missing or unreadable attachment stays visible with instructions to reattach or remove it before sending. Restored attachments pass through the current connection's upload checks rather than reusing an old uploaded path. Storage failures report that the draft or files are still held in the current window.
+
+Choosing **New thread** preserves an existing unsent new-thread draft as a **Draft thread**, then opens a fresh composer. The new composer inherits the selected thread's provider, model, effort, speed, and permission choices. Creating or sending a thread preserves the draft's identity while connection restoration or uploads run. Only submitted text and files are consumed; newer edits stay in the composer, and a failed send restores the original input alongside newly typed content.
+
 ## Titles and unchanged messages
 
-Life uses Codex or Claude Code's generated titles rather than truncating the first message. Existing provider titles are preferred. When a new thread needs a title, a separate best-effort metadata task uses the same provider and the original first message unchanged. Its title instructions live in a disposable `AGENTS.md`/`CLAUDE.md` workspace, with tools disabled. It cannot add title instructions to the coding conversation. A failed or unavailable title task leaves the conversation usable with its untitled name; it does not fall back to copying the prompt. Manual title editing remains available.
+Life uses Codex or Claude Code's generated titles rather than truncating the first message. Existing provider titles are preferred. When a new thread needs a title, a separate best-effort metadata task uses the same provider and the original first message unchanged. Its title instructions live in a disposable `AGENTS.md`/`CLAUDE.md` workspace, with tools disabled. It cannot add title instructions to the coding conversation. A failed or unavailable title task leaves the conversation usable with its untitled name; it does not fall back to copying the prompt. **Rename thread** sets a manual title that a later automatic title result cannot overwrite.
 
 For normal, queued, and steering messages, Life preserves submitted text, including leading and trailing whitespace. Research instructions and Studio source context belong in their own native instruction files. Life does not append a generated research prompt, attachment explanation, or source preamble.
 
@@ -20,7 +36,9 @@ Selected attachments are separate inputs. Codex supports raster images natively;
 
 The conversation preserves chronological provider events: responses, provider-emitted reasoning, plans, tools, approvals, errors, and subagent work. Subagents retain their provider identity, name or role, parent relationship, status, tool calls, and emitted text. Their output stays associated with its owning conversation rather than appearing as an unrelated project thread.
 
-While work runs, progress updates stay expanded between collapsed action rows. Reasoning uses the reported action text without a separate reasoning-summary label. Expanded tool rows retain their code views and copying. Successfully completed turns show the final parent response and elapsed work time; submitted prompts and the complete stored transcript are preserved. Large outputs have bounded previews so a long diff or tool response cannot freeze the interface; the full retained output remains available to copy or download. Provider reasoning can be shown only when the provider emits it. Life cannot expose internal information absent from the stream.
+While work runs, progress updates stay expanded between collapsed action rows. Reasoning uses the reported action text without a separate reasoning-summary label. Expanded tool rows retain their code views and copying. Successfully completed turns keep the final parent response visible and fold completed activity under **Worked for …** or **More activity**; expand those disclosures to inspect the original chronological events. Pending requests and live child agents keep their activity visible. Failed, interrupted, and unknown work retains its status and output rather than presenting a successful completion.
+
+The changed-file summary shows successful reported edits, with file paths, line counts, and diff previews when available. Failed or still-running tool calls do not count as successful changes. A path-only report remains path-only; shortened or omitted previews identify their limit and retain the complete tool output in Activity. Submitted prompts and the complete stored transcript remain preserved. Large outputs have bounded previews so a long diff or tool response cannot freeze the interface; the full retained output remains available to copy or download. Provider reasoning can be shown only when the provider emits it. Life cannot expose internal information absent from the stream.
 
 ## Saved conversations and recovery
 

@@ -17,6 +17,9 @@ import {
   activitySummary,
   isProgressUpdate,
   subagentPresentation,
+  toolActionSummary,
+  toolLifecycle,
+  threadRunningChildIds,
   toolOutputSections,
 } from '../thread-presentation'
 import { MessageView, RawOutput, ToolStatus } from './MessageView'
@@ -48,8 +51,7 @@ function ActivityDisclosure({
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
-function describe(messages: Message[], agents: boolean) {
-  const running = messages.some((message) => message.status === 'running')
+function describe(messages: Message[], agents: boolean, running: boolean) {
   if (agents) {
     const launches = messages.filter(isSubagentLaunch).length
     return {
@@ -88,7 +90,10 @@ function describe(messages: Message[], agents: boolean) {
     (fileTools ? (running ? 'Editing files' : 'File activity') : 'Tool activity')
   return {
     Icon: files.length || fileTools ? Hammer : commands ? Terminal : searches ? Globe : Wrench,
-    label: label.charAt(0).toUpperCase() + label.slice(1),
+    label:
+      messages.length === 1
+        ? toolActionSummary(messages[0])
+        : label.charAt(0).toUpperCase() + label.slice(1),
   }
 }
 const SubagentCard = memo(function SubagentCard({ message }: { message: Message }) {
@@ -169,16 +174,26 @@ const ToolBatch = memo(function ToolBatch({
   agents,
   provider,
   compact,
+  agentsRunning,
 }: {
   messages: Message[]
   agents: boolean
   provider: Thread['provider']
   compact: boolean
+  agentsRunning: boolean
 }) {
-  const { Icon, label } = useMemo(() => describe(messages, agents), [messages, agents])
-  const running = messages.some((message) => message.status === 'running')
-  const failures = messages.filter((message) => message.status === 'failed').length
-  const interrupted = messages.some((message) => message.status === 'interrupted')
+  const running = agents
+    ? agentsRunning
+    : messages.some((message) => toolLifecycle(message.status) === 'active')
+  const { Icon, label } = useMemo(
+    () => describe(messages, agents, running),
+    [messages, agents, running],
+  )
+  const failures = messages.filter((message) => toolLifecycle(message.status) === 'failed').length
+  const interrupted = messages.some((message) => toolLifecycle(message.status) === 'interrupted')
+  const current = messages.findLast((message) => toolLifecycle(message.status) === 'active')
+  const currentAction =
+    current && messages.length > 1 && !agents ? toolActionSummary(current) : undefined
   if (compact) {
     return (
       <ActivityDisclosure
@@ -187,6 +202,11 @@ const ToolBatch = memo(function ToolBatch({
           <>
             <Icon size={15} aria-hidden="true" />
             <span>{label}</span>
+            {currentAction ? (
+              <span className="thread-current-tool" title={currentAction}>
+                {currentAction}
+              </span>
+            ) : null}
             {running ? <i className="thread-run-ring" aria-hidden="true" /> : null}
             {failures ? (
               <small>{plural(failures, 'failure')}</small>
@@ -215,6 +235,11 @@ const ToolBatch = memo(function ToolBatch({
       <div className="thread-tool-batch-heading">
         <Icon size={16} aria-hidden="true" />
         <span>{label}</span>
+        {currentAction ? (
+          <span className="thread-current-tool" title={currentAction}>
+            {currentAction}
+          </span>
+        ) : null}
         {running ? <i className="thread-run-ring" aria-hidden="true" /> : null}
         {failures ? (
           <small>{plural(failures, 'failure')}</small>
@@ -245,6 +270,7 @@ export function ThreadActivityRows({
 }) {
   const projectRows = useMemo(createActivityRowsProjector, [])
   const rows = useMemo(() => projectRows(messages), [projectRows, messages])
+  const activeChildren = useMemo(() => threadRunningChildIds(messages), [messages])
   return (
     <div className="thread-activity-sequence">
       {rows.map((row) => {
@@ -256,6 +282,16 @@ export function ThreadActivityRows({
               agents={row.kind === 'agents'}
               provider={provider}
               compact={compact}
+              agentsRunning={
+                row.kind === 'agents' &&
+                row.messages.some(
+                  (message) =>
+                    activeChildren.has(message.agentId || message.parentItemId || message.id) ||
+                    subagentPresentation(message).participants.some((participant) =>
+                      activeChildren.has(participant.id),
+                    ),
+                )
+              }
             />
           )
         if (

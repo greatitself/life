@@ -97,7 +97,7 @@
   System::Call '*$6(i .R6)'
   IntOp $R6 $R6 & 0x410
   StrCmp $R6 "0" 0 ${PREFIX}_cleanup
-  System::Call 'kernel32::GetFileSizeEx(p r1, *l 0 .R3) i .r8 ?r'
+  System::Call 'kernel32::GetFileSizeEx(p r1, *l 0 R3) i .r8 ?r'
   Pop $R0
   StrCmp $R0 "ok" 0 ${PREFIX}_cleanup
   StrCmp $8 "0" ${PREFIX}_cleanup
@@ -107,7 +107,7 @@
 !macroend
 
 !macro LifeHashCheckFinalFile PREFIX
-  System::Call 'kernel32::GetFileSizeEx(p r1, *l 0 .R5) i .r8 ?r'
+  System::Call 'kernel32::GetFileSizeEx(p r1, *l 0 R5) i .r8 ?r'
   Pop $R0
   StrCmp $R0 "ok" 0 ${PREFIX}_cleanup
   StrCmp $8 "0" ${PREFIX}_cleanup
@@ -130,7 +130,7 @@
   Pop $R0
   StrCmp $R0 "ok" 0 ${FAILURE}
   StrCmp $8 "64" 0 ${FAILURE}
-  System::Call 'user32::CharLowerBuffW(w r7 .r7, i 64) i .r8 ?r'
+  System::Call 'user32::CharLowerBuffW(w r7 r7, i 64) i .r8 ?r'
   Pop $R0
   StrCmp $R0 "ok" 0 ${FAILURE}
   StrCmp $8 "64" 0 ${FAILURE}
@@ -190,13 +190,13 @@
         !endif
         ; BCRYPT_SHA256_ALG_HANDLE is the borrowed pseudo-handle 0x41.
         ; BCRYPT_HASH_LENGTH's property name is "HashDigestLength".
-        System::Call 'bcrypt::BCryptGetProperty(p 0x41, w "HashDigestLength", *i 0 .R2, i 4, *i 0 .R1, i 0) i .r8 ?r'
+        System::Call 'bcrypt::BCryptGetProperty(p 0x41, w "HashDigestLength", *i 0 R2, i 4, *i 0 R1, i 0) i .r8 ?r'
         Pop $R0
         StrCmp $R0 "ok" 0 native_hash_unavailable
         StrCmp $8 "0" 0 native_hash_unavailable
         StrCmp $R1 "4" 0 native_hash_unavailable
         StrCmp $R2 "32" 0 native_hash_unavailable
-        System::Call 'bcrypt::BCryptCreateHash(p 0x41, *p 0 .R2, p 0, i 0, p 0, i 0, i 0) i .r8 ?r'
+        System::Call 'bcrypt::BCryptCreateHash(p 0x41, *p 0 R2, p 0, i 0, p 0, i 0, i 0) i .r8 ?r'
         Pop $R0
         StrCmp $R0 "ok" 0 native_hash_unavailable
         StrCmp $8 "0" 0 native_hash_unavailable
@@ -212,7 +212,7 @@
         StrCmp $4 "0" native_hash_cleanup
         StrCpy $R4 "0"
       native_hash_read:
-        System::Call 'kernel32::ReadFile(p r1, p r4, i 1048576, *i 0 .R5, p 0) i .r8 ?re'
+        System::Call 'kernel32::ReadFile(p r1, p r4, i 1048576, *i 0 R5, p 0) i .r8 ?re'
         Pop $R1
         Pop $R0
         StrCmp $R0 "ok" 0 native_hash_cleanup
@@ -246,7 +246,7 @@
         Pop $R0
         StrCmp $R0 "ok" 0 native_hash_cleanup
         StrCmp $8 "0" 0 native_hash_cleanup
-        System::Call 'crypt32::CryptBinaryToStringW(p r4, i 32, i 0x4000000c, w .R8, *i 65 .R1) i .r8 ?r'
+        System::Call 'crypt32::CryptBinaryToStringW(p r4, i 32, i 0x4000000c, w .R8, *i 65 R1) i .r8 ?r'
         Pop $R0
         StrCmp $R0 "ok" 0 native_hash_cleanup
         StrCmp $8 "0" native_hash_cleanup

@@ -211,6 +211,13 @@ Var ResultHandle
 Var PriorModulePath
 Var AfterModulePath
 Var ModulePathPreserved
+Var TracePath
+Var TraceHandle
+Var TracePhase
+
+!macro LifeProcessProbeTrace STAGE DATA
+  FileWrite $TraceHandle "$TracePhase|${STAGE}|${DATA}$\r$\n"
+!macroend
 
 !macro IS_POWERSHELL_AVAILABLE
   IntOp $FallbackAvailability $FallbackAvailability + 1
@@ -285,6 +292,8 @@ Section
   ReadEnvStr $INSTDIR "LIFE_FIXTURE_TARGET"
   ReadEnvStr $ResultPath "LIFE_FIXTURE_OUTPUT"
   ReadEnvStr $ExpectedError "LIFE_FIXTURE_ERROR"
+  StrCpy $TracePath "$ResultPath.trace"
+  FileOpen $TraceHandle $TracePath w
   StrCpy $FallbackAvailability "0"
   StrCpy $FallbackRunning "0"
   StrCpy $EnvironmentPreserved "1"
@@ -301,6 +310,7 @@ Section
   Pop $PriorLastError
   StrCpy $PriorLength $0
 
+  StrCpy $TracePhase "direct"
   !insertmacro SeedRegisters
   Push "direct-stack-sentinel"
   !insertmacro SeedError
@@ -330,6 +340,7 @@ Section
   StrCmpS $PriorModulePath $AfterModulePath +2 0
     StrCpy $ModulePathPreserved "0"
 
+  StrCpy $TracePhase "wrapper"
   !insertmacro SeedRegisters
   Push "wrapper-stack-sentinel"
   !insertmacro SeedError
@@ -358,6 +369,7 @@ Section
     StrCpy $ModulePathPreserved "0"
   System::Free $AfterEnvironment
   System::Free $PriorEnvironment
+  FileClose $TraceHandle
   FileOpen $ResultHandle $ResultPath w
   FileWrite $ResultHandle "proof=$ActualProof$\r$\n"
   FileWrite $ResultHandle "fallbackAvailability=$FallbackAvailability$\r$\n"
@@ -370,6 +382,10 @@ Section
   FileWrite $ResultHandle "wrapperError=$WrapperError$\r$\n"
   FileWrite $ResultHandle "environmentPreserved=$EnvironmentPreserved$\r$\n"
   FileWrite $ResultHandle "modulePathPreserved=$ModulePathPreserved$\r$\n"
+  FileWrite $ResultHandle "priorLength=$PriorLength$\r$\n"
+  FileWrite $ResultHandle "priorLastError=$PriorLastError$\r$\n"
+  FileWrite $ResultHandle "afterLength=$AfterLength$\r$\n"
+  FileWrite $ResultHandle "afterLastError=$AfterLastError$\r$\n"
   FileClose $ResultHandle
   SetErrorLevel 0
 SectionEnd
@@ -396,6 +412,9 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     $proof.activeCase.processExitCode = $run.exitCode
     $proof.activeCase.stdout = $run.stdout
     $proof.activeCase.stderr = $run.stderr
+    if (Test-Path -LiteralPath ($output + '.trace')) {
+        $proof.activeCase.trace = @(Get-Content -LiteralPath ($output + '.trace'))
+    }
     Assert-Fixture ($run.exitCode -eq 0 -and (Test-Path -LiteralPath $output)) "${Name}: native caller failed: $($run.exitCode) $($run.stderr)"
     $values = @{}
     foreach ($line in (Get-Content -LiteralPath $output)) {

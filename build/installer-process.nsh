@@ -45,6 +45,9 @@
       System::Call 'kernel32::GetEnvironmentVariableW(w "${LIFE_PROCESS_PROBE_ENV}", p 0, i 0) i .r2 ?re'
       Pop $3
       Pop $8
+      !ifmacrodef LifeProcessProbeTrace
+        !insertmacro LifeProcessProbeTrace preflight "$2|$3|$8"
+      !endif
       StrCmpS $8 "ok" 0 life_probe_done
       IntCmpU $2 ${NSIS_MAX_STRLEN} life_probe_done 0 life_probe_done
       StrCpy $4 "0"
@@ -63,6 +66,9 @@
         System::Call 'kernel32::GetEnvironmentVariableW(w "${LIFE_PROCESS_PROBE_ENV}", w .r1, i ${NSIS_MAX_STRLEN}) i .r2 ?re'
         Pop $3
         Pop $8
+        !ifmacrodef LifeProcessProbeTrace
+          !insertmacro LifeProcessProbeTrace read "$2|$3|$8|$5"
+        !endif
         StrCmpS $8 "ok" 0 life_probe_done
         ${If} $2 == 0
         ${AndIf} $3 != 0
@@ -78,6 +84,9 @@
       ; never source text interpolated into the PowerShell command.
       System::Call 'kernel32::SetEnvironmentVariableW(w "${LIFE_PROCESS_PROBE_ENV}", w d) i .r5 ?r'
       Pop $8
+      !ifmacrodef LifeProcessProbeTrace
+        !insertmacro LifeProcessProbeTrace target "$5|$8"
+      !endif
       StrCmpS $8 "ok" 0 life_probe_done
       StrCmpS $5 "0" life_probe_done
 
@@ -90,6 +99,9 @@
       nsExec::ExecToStack /TIMEOUT=2000 `"${LIFE_PROCESS_PROBE_EXECUTABLE}" -NoProfile -NonInteractive -Command "try { $$ErrorActionPreference = 'Stop'; $$ProgressPreference = 'SilentlyContinue'; $$env:PSModulePath = [IO.Path]::Combine($$PSHOME, 'Modules'); $$null = Get-Command Get-CimInstance -ErrorAction Stop; if ((Get-ExecutionPolicy -Scope Process -ErrorAction Stop) -eq 'Restricted') { exit 74 }; $$target = [Environment]::GetEnvironmentVariable('${LIFE_PROCESS_PROBE_ENV}', 'Process'); if ([String]::IsNullOrEmpty($$target)) { exit 74 }; $$processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop); if ($$processes.Count -eq 0) { exit 74 }; if (@($$processes | Where-Object { $$_.Path -and $$_.Path.StartsWith($$target, 'CurrentCultureIgnoreCase') }).Count -gt 0) { exit 74 }; [Console]::Out.Write('${LIFE_PROCESS_PROBE_MARKER}'); exit ${LIFE_PROCESS_PROBE_EXIT} } catch { exit 74 }"`
       Pop $6
       Pop $7
+      !ifmacrodef LifeProcessProbeTrace
+        !insertmacro LifeProcessProbeTrace subprocess "$6|$7"
+      !endif
 
       ; Restore the process environment before considering the proof valid.
       ${If} $4 == "1"
@@ -98,6 +110,9 @@
         System::Call 'kernel32::SetEnvironmentVariableW(w "${LIFE_PROCESS_PROBE_ENV}", w r1) i .r8 ?r'
       ${EndIf}
       Pop $5
+      !ifmacrodef LifeProcessProbeTrace
+        !insertmacro LifeProcessProbeTrace restore "$8|$5|$4"
+      !endif
       StrCmpS $5 "ok" 0 life_probe_done
       StrCmpS $8 "0" life_probe_done
       StrCmpS $6 "${LIFE_PROCESS_PROBE_EXIT}" 0 life_probe_done

@@ -1045,7 +1045,16 @@ async function main() {
       .map((register, i) => `StrCpy ${register} "register-${i}"`)
       .join('\n')
     const check = registers
-      .map((register, i) => `StrCmp ${register} "register-${i}" 0 fixture_failed`)
+      .map(
+        (register, i) =>
+          `StrCpy $fixtureStage "register-${i}"\nStrCmp ${register} "register-${i}" 0 fixture_failed`,
+      )
+      .join('\n')
+    const reportRegisters = registers
+      .map(
+        (register, i) =>
+          String.raw`FileWriteUTF16LE $fixtureHandle "register-${i} (${nsisString(register)})=${register}$\r$\n"`,
+      )
       .join('\n')
     fs.writeFileSync(
       source,
@@ -1081,18 +1090,45 @@ Var fixtureLock
 Var fixtureHashCount
 Var fixtureHashKind
 Var fixtureHashLockBuffer
+Var fixtureStage
+Var fixtureErrorAtEntry
+Var fixtureErrorAtExit
+Var fixtureErrorAtFailure
+Var fixtureStackTop
+Var fixtureStackBottom
+Var fixturePendingTop
+Var fixturePendingBottom
+Var fixtureCurrentHandleCount
+
+!macro FixtureObserveError OUTPUT
+  StrCpy ${'${OUTPUT}'} "0"
+  IfErrors 0 +3
+  StrCpy ${'${OUTPUT}'} "1"
+  SetErrors
+!macroend
 
 !macro FixtureBegin
+  !insertmacro FixtureObserveError $fixtureErrorAtEntry
+  StrCpy $fixtureStage "call"
+  StrCpy $fixtureErrorAtExit "unobserved"
+  StrCpy $fixtureStackTop "unobserved"
+  StrCpy $fixtureStackBottom "unobserved"
   ${initialize}
   Push "stack-bottom"
   Push "stack-top"
 !macroend
 
 !macro FixtureCheck
+  !insertmacro FixtureObserveError $fixtureErrorAtExit
+  StrCpy $fixtureStage "result"
   StrCmpS $fixtureResult $fixtureExpected 0 fixture_failed
+  StrCpy $fixtureStage "stack-top"
   Pop $fixtureScratch
+  StrCpy $fixtureStackTop $fixtureScratch
   StrCmp $fixtureScratch "stack-top" 0 fixture_failed
+  StrCpy $fixtureStage "stack-bottom"
   Pop $fixtureScratch
+  StrCpy $fixtureStackBottom $fixtureScratch
   StrCmp $fixtureScratch "stack-bottom" 0 fixture_failed
   ${check}
 !macroend
@@ -1238,9 +1274,11 @@ Section
   fixture_hash_native_repeat:
     ClearErrors
     !insertmacro FixtureHash LifeNativeHashFile
+    StrCpy $fixtureStage "error-clear"
     IfErrors fixture_failed
     SetErrors
     !insertmacro FixtureHash LifeNativeHashFile
+    StrCpy $fixtureStage "error-set"
     IfErrors +2 0
     Goto fixture_failed
     IntOp $fixtureHashCount $fixtureHashCount - 1
@@ -1251,9 +1289,11 @@ Section
   fixture_hash_wrapper_repeat:
     ClearErrors
     !insertmacro FixtureHash LifeHashFile
+    StrCpy $fixtureStage "error-clear"
     IfErrors fixture_failed
     SetErrors
     !insertmacro FixtureHash LifeHashFile
+    StrCpy $fixtureStage "error-set"
     IfErrors +2 0
     Goto fixture_failed
     IntOp $fixtureHashCount $fixtureHashCount - 1
@@ -1312,9 +1352,12 @@ Section
     Goto fixture_success
 
   fixture_check_handles:
+    StrCpy $fixtureStage "handle-query"
     System::Call 'kernel32::GetCurrentProcess() p .r0'
     System::Call 'kernel32::GetProcessHandleCount(p r0, *i .r1) i .r2'
     StrCmp $2 "0" fixture_failed
+    StrCpy $fixtureCurrentHandleCount $1
+    StrCpy $fixtureStage "handle-count"
     StrCmp $1 $fixtureHandleCount 0 fixture_failed
   fixture_success:
     ClearErrors
@@ -1325,6 +1368,18 @@ Section
     SetErrorLevel 0
     Goto fixture_complete
   fixture_failed:
+    !insertmacro FixtureObserveError $fixtureErrorAtFailure
+    ; These pending pops are only failure diagnostics. All strict assertions
+    ; above already failed, and the original error state was captured first.
+    Pop $fixturePendingTop
+    Pop $fixturePendingBottom
+    ClearErrors
+    FileOpen $fixtureHandle "$fixtureReport.diagnostic.txt" w
+    IfErrors fixture_diagnostic_done
+    FileWriteUTF16LE $fixtureHandle "mode=$fixtureMode$\r$\nstage=$fixtureStage$\r$\ntarget=$INSTDIR$\r$\nexpected=$fixtureExpected$\r$\nactual=$fixtureResult$\r$\nerror-entry=$fixtureErrorAtEntry$\r$\nerror-exit=$fixtureErrorAtExit$\r$\nerror-failure=$fixtureErrorAtFailure$\r$\nchecked-stack-top=$fixtureStackTop$\r$\nchecked-stack-bottom=$fixtureStackBottom$\r$\npending-stack-top=$fixturePendingTop$\r$\npending-stack-bottom=$fixturePendingBottom$\r$\nhandles-before=$fixtureHandleCount$\r$\nhandles-after=$fixtureCurrentHandleCount$\r$\n"
+    ${reportRegisters}
+    FileClose $fixtureHandle
+  fixture_diagnostic_done:
     SetErrorLevel 7
     Quit
   fixture_complete:
@@ -1468,11 +1523,17 @@ SectionEnd
           ...fixtureEnvironment,
         },
       })
+      const diagnosticFile = `${report}.diagnostic.txt`
+      const diagnostic = fs.existsSync(diagnosticFile)
+        ? fs.readFileSync(diagnosticFile, 'utf16le')
+        : ''
+      if (diagnostic)
+        console.error(`${name}: native fixture diagnostic before cleanup:\n${diagnostic}`)
       if (succeeds) {
         assert.equal(
           result.status,
           0,
-          `${name}: native assertions failed (${result.status})\n${result.stdout}\n${result.stderr}`,
+          `${name}: native assertions failed (${result.status})\n${result.stdout}\n${result.stderr}\n${diagnostic || 'Native diagnostic not produced.'}`,
         )
         assert.equal(
           fs.readFileSync(report, 'utf8'),
@@ -1574,6 +1635,60 @@ SectionEnd
       knownVectorHashes.get('truncated-stable').expected,
       knownVectorHashes.get('multichunk').expected,
       'A stable truncated file must hash its actual shorter content',
+    )
+    const diagnosticReport = path.join(scratch, 'native-hash-diagnostic-probe.result')
+    const diagnosticExpected = '0'.repeat(64)
+    const diagnosticResult = run(executable, ['/S'], {
+      env: {
+        ...process.env,
+        TEMP: nativeTemp,
+        TMP: nativeTemp,
+        LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'hash-native',
+        LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: knownVectorHashes.get('tiny').target,
+        LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: diagnosticExpected,
+        LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: diagnosticReport,
+        LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: good,
+      },
+    })
+    assert.equal(
+      diagnosticResult.status,
+      7,
+      'Wrong expected SHA must retain the fixture failure exit',
+    )
+    assert.equal(
+      fs.existsSync(diagnosticReport),
+      false,
+      'Diagnostic failure must not report success',
+    )
+    const diagnosticText = fs.readFileSync(`${diagnosticReport}.diagnostic.txt`, 'utf16le')
+    const diagnosticFields = Object.fromEntries(
+      diagnosticText
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => {
+          const separator = line.indexOf('=')
+          assert.ok(separator > 0, 'Native diagnostic must contain named fields')
+          return [line.slice(0, separator), line.slice(separator + 1)]
+        }),
+    )
+    assert.equal(diagnosticFields.mode, 'hash-native')
+    assert.equal(diagnosticFields.stage, 'result')
+    assert.equal(diagnosticFields.target, knownVectorHashes.get('tiny').target)
+    assert.equal(diagnosticFields.expected, diagnosticExpected)
+    assert.equal(diagnosticFields.actual, knownVectorHashes.get('tiny').expected)
+    for (const name of ['error-entry', 'error-exit', 'error-failure'])
+      assert.equal(diagnosticFields[name], '0')
+    assert.equal(diagnosticFields['pending-stack-top'], 'stack-top')
+    assert.equal(diagnosticFields['pending-stack-bottom'], 'stack-bottom')
+    assert.equal(diagnosticFields['checked-stack-top'], 'unobserved')
+    assert.equal(diagnosticFields['checked-stack-bottom'], 'unobserved')
+    for (const [index, register] of registers.entries()) {
+      assert.equal(diagnosticFields[`register-${index} (${register})`], `register-${index}`)
+    }
+    assert.match(diagnosticFields['handles-before'], /^[1-9]\d*$/)
+    assert.equal(diagnosticFields['handles-after'], '')
+    console.log(
+      'Native fixture failure diagnostic probe passed: exact failed hash, stage, registers, stack and flags retained before cleanup.',
     )
     const hashVectorsBefore = inventory(hashVectors)
     function hashRejected(name, target) {

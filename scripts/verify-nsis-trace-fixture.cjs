@@ -53,6 +53,7 @@ SilentInstall silent
 !addincludedir "${nsisString(includes)}"
 !addincludedir "${nsisString(path.join(root, 'build'))}"
 !addplugindir /x86-unicode "${nsisString(path.join(plugins, 'x86-unicode'))}"
+!include "StdUtils.nsh"
 !include "${nsisString(path.join(root, 'build', 'installer.nsh'))}"
 !insertmacro customHeader
 Var fixtureScratch
@@ -72,6 +73,9 @@ Var fixtureHandleCount
 !macroend
 
 Section
+  ; Keep unrelated real-header helpers linked without executing their work.
+  GetFunctionAddress $fixtureScratch LifeHashFile
+  GetFunctionAddress $fixtureScratch LifeNoScopedProcess
   ; The payload helper is defined by the real include and must remain linked.
   Push "$TEMP"
   Call LifeEmptyPayloadDirectory

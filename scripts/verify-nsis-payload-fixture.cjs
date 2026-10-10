@@ -2367,11 +2367,11 @@ Var fixtureWarmOutput
 Var fixtureLaunchMarker
 Var fixtureLaunchMode
 Var fixtureDescendantPidFile
+Var fixtureNativeStatus
+Var fixtureNativeWait
 !ifdef LIFE_MODERN_ENABLED
 Var fixtureDescendantPid
 Var fixtureDescendantHandle
-Var fixtureNativeStatus
-Var fixtureNativeWait
 Var fixtureBoundaryError
 !endif
 
@@ -2380,6 +2380,48 @@ Var fixtureBoundaryError
   IfErrors 0 +3
   StrCpy ${'${OUTPUT}'} "1"
   SetErrors
+!macroend
+
+!macro FixturePublishPid TAG
+  ; Optional ReadEnvStr calls can leave a sticky error before this publisher.
+  ; Establish this operation's state before creating the owned ASCII record.
+  ClearErrors
+  StrCpy $fixtureStage "pid-query"
+  System::Call 'kernel32::GetCurrentProcessId() i.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureScratch
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+  StrCmp $fixtureScratch 0 fixture_failed
+  StrCpy $fixtureStage "pid-open"
+  FileOpen $fixtureHandle "$fixtureReport.pid" w
+  IfErrors fixture_failed
+  StrCpy $fixtureStage "pid-write"
+  FileWrite $fixtureHandle "$fixtureScratch$\r$\n"
+  IfErrors fixture_pid_failed_${'${TAG}'}
+  StrCpy $fixtureStage "pid-flush"
+  System::Call 'kernel32::FlushFileBuffers(p $fixtureHandle) i.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureNativeWait
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_pid_failed_${'${TAG}'}
+  StrCmp $fixtureNativeWait 0 fixture_pid_failed_${'${TAG}'}
+  StrCpy $fixtureStage "pid-close"
+  System::Call 'kernel32::CloseHandle(p $fixtureHandle) i.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureNativeWait
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+  StrCmp $fixtureNativeWait 0 fixture_failed
+  Goto fixture_pid_complete_${'${TAG}'}
+  fixture_pid_failed_${'${TAG}'}:
+    ; Retain the original write/flush stage and check this handle's cleanup.
+    System::Call 'kernel32::CloseHandle(p $fixtureHandle) i.s ?r'
+    Pop $fixtureNativeStatus
+    Pop $fixtureNativeWait
+    StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+    StrCmp $fixtureNativeWait 0 fixture_failed
+    Goto fixture_failed
+  fixture_pid_complete_${'${TAG}'}:
+    StrCpy $fixtureHandle ""
+    ClearErrors
 !macroend
 
 !macro FixtureBegin
@@ -2582,11 +2624,7 @@ Section
       Goto fixture_check_handles
     !ifdef LIFE_LAUNCHER_NATIVE_FIXTURE
       fixture_launch_fault:
-        System::Call 'kernel32::GetCurrentProcessId() i .r0'
-        FileOpen $fixtureHandle "$fixtureReport.pid" w
-        IfErrors fixture_failed
-        FileWrite $fixtureHandle "$0$\r$\n"
-        FileClose $fixtureHandle
+        !insertmacro FixturePublishPid fault
         !insertmacro FixtureBegin
         Push "$fixtureLaunchMode"
         Push "$fixtureLaunchMarker"
@@ -2743,11 +2781,7 @@ Section
   !endif
   fixture_extract:
     SetOutPath "$INSTDIR"
-    System::Call 'kernel32::GetCurrentProcessId() i .r0'
-    FileOpen $fixtureHandle "$fixtureReport.pid" w
-    IfErrors fixture_failed
-    FileWrite $fixtureHandle "$0$\r$\n"
-    FileClose $fixtureHandle
+    !insertmacro FixturePublishPid extract
     !insertmacro extractUsing7za "$fixtureArchive"
     ; These represent registration and launch. Neither may run after a bad payload.
     FileOpen $fixtureHandle "$fixtureReport.registered" w
@@ -3264,8 +3298,21 @@ SectionEnd
       })
       let faultFailure
       let mutation
+      let trialExit
+      trial.completion.then((exit) => {
+        trialExit = exit
+      })
       try {
-        const pinned = await observer.observed()
+        const pinned = await Promise.race([
+          observer.observed(),
+          trial.completion.then((exit) => {
+            // A legitimate fatal77 can close before Node reads an already
+            // published observation. Preserve that evidence and its gates.
+            const observed = maybeRead(config.ObservedFile, 'utf8')
+            if (observed !== undefined) return JSON.parse(observed)
+            throw new Error(`${name}: NSIS exited before identities (${JSON.stringify(exit)})`)
+          }),
+        ])
         assert.equal(pinned.parentPid, trial.child.pid)
         assert.match(pinned.parentCreationTime, /^[1-9]\d+$/)
         assert.match(pinned.decoderCreationTime, /^[1-9]\d+$/)
@@ -3366,6 +3413,33 @@ SectionEnd
         }
       } catch (error) {
         faultFailure = error
+        try {
+          const rawFiles = [
+            [`${report}.pid`, 'ascii'],
+            [marker, 'utf16le'],
+          ].map(([filename, encoding]) => {
+            const bytes = maybeRead(filename)
+            return {
+              filename,
+              bytes: bytes?.length,
+              hex: bytes?.toString('hex'),
+              text: bytes?.toString(encoding),
+            }
+          })
+          console.error(
+            `${name} original child evidence before cleanup: ${JSON.stringify({
+              exit: trialExit || { running: true, pid: trial.child.pid },
+              result: maybeRead(report, 'utf8'),
+              diagnostic: maybeRead(`${report}.diagnostic.txt`, 'utf16le'),
+              rawFiles,
+            })}`,
+          )
+        } catch (diagnosticError) {
+          faultFailure = new AggregateError(
+            [error, diagnosticError],
+            `${name}: original failure and evidence capture failure`,
+          )
+        }
       } finally {
         const cleanupErrors = []
         if (faultFailure) {

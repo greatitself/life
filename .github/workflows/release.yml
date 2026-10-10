@@ -194,7 +194,7 @@ jobs:
           path: |
             output/windows-upgrade-proof.json
             output/windows-installation-benchmark.md
-          if-no-files-found: ${{ failure() && 'warn' || 'error' }}
+          if-no-files-found: error
 
   publish:
     needs: [verify, build, windows-upgrade]

@@ -12,7 +12,7 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true') {
 
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $modulePath = Join-Path $repository 'build/installer-process.nsh'
-$moduleSource = Get-Content -Raw -LiteralPath $modulePath
+$moduleSource = (Get-Content -Raw -LiteralPath $modulePath).Replace("`r`n", "`n")
 $proofPath = [IO.Path]::GetFullPath($OutputPath)
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('life-process-fixture-' + [Guid]::NewGuid().ToString('N'))
 $results = [Collections.Generic.List[object]]::new()

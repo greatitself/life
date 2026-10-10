@@ -77,21 +77,34 @@ function Get-Compiler {
         return [pscustomobject]@{ path = $resolved; environment = (Get-NsisEnvironment $resolved) }
     }
     $resolver = Join-Path $fixtureRoot 'resolve-nsis.cjs'
+    $resolverOutput = Join-Path $fixtureRoot 'resolved-nsis.json'
     Write-Utf8 $resolver @'
+const fs = require('node:fs');
 const path = require('node:path');
 const root = process.argv[2];
+const output = process.argv[3];
 const pkg = require(path.join(root, 'package.json'));
 require(path.join(root, 'node_modules/app-builder-lib/out/toolsets/windows.js'))
   .getMakeNsisPath(pkg.build?.toolsets?.nsis, pkg.build?.nsis?.customNsisBinary)
-  .then(result => process.stdout.write(JSON.stringify(result)))
+  .then(result => fs.writeFileSync(output, JSON.stringify(result), { encoding: 'utf8', flag: 'wx' }))
   .catch(error => { console.error(error); process.exitCode = 1; });
 '@
-    $resolved = Invoke-Native 'node' @($resolver, $repository) @{} 120000
-    Assert-Fixture ($resolved.exitCode -eq 0) "Could not resolve the installer's NSIS compiler: $($resolved.stderr)"
-    $compiler = $resolved.stdout | ConvertFrom-Json -AsHashtable
+    $resolved = Invoke-Native 'node' @($resolver, $repository, $resolverOutput) @{} 120000
+    if ($resolved.stdout) { [Console]::Out.Write($resolved.stdout) }
+    if ($resolved.stderr) { [Console]::Error.Write($resolved.stderr) }
+    Assert-Fixture ($resolved.exitCode -eq 0 -and (Test-Path -LiteralPath $resolverOutput -PathType Leaf)) "Could not resolve the installer's NSIS compiler: $($resolved.stderr)"
+    $compiler = Get-Content -Raw -LiteralPath $resolverOutput | ConvertFrom-Json -AsHashtable
+    Assert-Fixture ($compiler -is [Collections.IDictionary] -and $compiler.ContainsKey('path') -and $compiler.path -is [string] -and (Test-Path -LiteralPath $compiler.path -PathType Leaf)) 'NSIS resolution returned no native compiler executable.'
     $environment = @{}
     if ($compiler.ContainsKey('env')) {
-        foreach ($entry in $compiler.env.GetEnumerator()) { $environment[$entry.Key] = $entry.Value }
+        Assert-Fixture ($compiler.env -is [Collections.IDictionary]) 'NSIS resolution returned an invalid compiler environment.'
+        foreach ($entry in $compiler.env.GetEnumerator()) {
+            Assert-Fixture ($entry.Key -is [string] -and $entry.Value -is [string]) 'NSIS resolution returned a non-string compiler environment entry.'
+            $environment[$entry.Key] = $entry.Value
+        }
+    }
+    if ($environment.ContainsKey('NSISDIR')) {
+        Assert-Fixture (Test-Path -LiteralPath $environment.NSISDIR -PathType Container) 'NSIS resolution returned a missing compiler resource directory.'
     }
     Assert-Fixture ($compiler.path -like '*.exe') 'These fixtures require the same native legacy makensis.exe used by the installer.'
     return [pscustomobject]@{ path = [string]$compiler.path; environment = $environment }
@@ -309,6 +322,7 @@ SectionEnd
 
 function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bool]$ExpectedProof, [hashtable]$Environment = @{}, [bool]$PriorError = $false) {
     $output = Join-Path $fixtureRoot ($Name + '.txt')
+    $proof.activeCase = [ordered]@{ name = $Name; kind = 'native-nsis'; expectedProof = $ExpectedProof; expectedStockFallback = -not $ExpectedProof; priorError = $PriorError }
     $childEnvironment = @{
         LIFE_FIXTURE_TARGET = $Target
         LIFE_FIXTURE_OUTPUT = $output
@@ -317,11 +331,15 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     }
     foreach ($entry in $Environment.GetEnumerator()) { $childEnvironment[$entry.Key] = $entry.Value }
     $run = Invoke-Native $Executable @('/S') $childEnvironment 15000
+    $proof.activeCase.processExitCode = $run.exitCode
+    $proof.activeCase.stdout = $run.stdout
+    $proof.activeCase.stderr = $run.stderr
     Assert-Fixture ($run.exitCode -eq 0 -and (Test-Path -LiteralPath $output)) "${Name}: native caller failed: $($run.exitCode) $($run.stderr)"
     $values = @{}
     foreach ($line in (Get-Content -LiteralPath $output)) {
         if ($line -match '^([^=]+)=(.*)$') { $values[$Matches[1]] = $Matches[2] }
     }
+    $proof.activeCase.observed = $values
     $expected = if ($ExpectedProof) { '1' } else { '0' }
     Assert-Fixture ($values.proof -eq $expected) "${Name}: expected proof $expected, received $($values.proof)"
     $fallback = if ($ExpectedProof) { '0' } else { '1' }
@@ -332,6 +350,7 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     $expectedError = if ($PriorError) { '1' } else { '0' }
     Assert-Fixture ($values.directError -eq $expectedError -and $values.wrapperError -eq $expectedError) "${Name}: the caller's error flag was changed"
     $results.Add([pscustomobject]@{ name = $Name; kind = 'native-nsis'; ok = $true; proof = $ExpectedProof; stockFallback = -not $ExpectedProof; priorError = $PriorError; preservation = $values })
+    $proof.Remove('activeCase')
 }
 
 try {

@@ -214,6 +214,78 @@ while ($pending.Count -gt 0) {
 $json = ConvertTo-Json -InputObject @($records | Sort-Object Relative) -Depth 12 -Compress
 [IO.File]::WriteAllText($metadataOutput, $json, [Text.UTF8Encoding]::new($false))`
 
+const accessDeniedScript = String.raw`$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$fixtureRoot = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_ROOT).TrimEnd([char]'\')
+$fixtureFile = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_FILE)
+$fixtureParent = [IO.Path]::GetDirectoryName($fixtureFile)
+$scratchRoot = [IO.Path]::GetFullPath($env:LIFE_ACL_FIXTURE_SCRATCH).TrimEnd([char]'\')
+if (-not $fixtureRoot.StartsWith(($scratchRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or -not $fixtureFile.StartsWith(($fixtureRoot + '\'), [StringComparison]::OrdinalIgnoreCase) -or $fixtureParent.Equals($fixtureRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Access denial must be confined to a nested, fixture-owned payload path.' }
+$sections = [Security.AccessControl.AccessControlSections]::Access
+$identitySections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Group
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class LifeFixtureAttributes {
+  public sealed class Result { public long Attributes; public int Error; }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+  private static extern uint GetFileAttributesW(string path);
+  public static Result Read(string path) {
+    uint attributes = GetFileAttributesW(path);
+    int error = Marshal.GetLastWin32Error();
+    return new Result { Attributes = unchecked((int)attributes), Error = error };
+  }
+}
+'@
+if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
+  foreach ($ordinary in @($fixtureRoot, $fixtureParent)) {
+    $attributes = [LifeFixtureAttributes]::Read($ordinary)
+    if ($attributes.Attributes -eq -1 -or ($attributes.Attributes -band 0x10) -eq 0 -or ($attributes.Attributes -band 0x400) -ne 0) { throw 'Access denial requires ordinary fixture directories.' }
+  }
+  $beforeFile = [LifeFixtureAttributes]::Read($fixtureFile)
+  if ($beforeFile.Attributes -eq -1 -or ($beforeFile.Attributes -band 0x410) -ne 0) { throw 'Access denial requires an ordinary expected file.' }
+  $parentAcl = [IO.Directory]::GetAccessControl($fixtureParent)
+  $fileAcl = [IO.File]::GetAccessControl($fixtureFile)
+  $backup = [PSCustomObject]@{
+    Parent = $fixtureParent; File = $fixtureFile; Sid = $currentSid.Value
+    ParentAccess = $parentAcl.GetSecurityDescriptorSddlForm($sections)
+    FileAccess = $fileAcl.GetSecurityDescriptorSddlForm($sections)
+    ParentIdentity = $parentAcl.GetSecurityDescriptorSddlForm($identitySections)
+    FileIdentity = $fileAcl.GetSecurityDescriptorSddlForm($identitySections)
+    FileAttributes = $beforeFile.Attributes
+  }
+  [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_BACKUP, (ConvertTo-Json -InputObject $backup -Compress), [Text.UTF8Encoding]::new($false))
+  # NTFS also exposes a child's attributes through parent directory listing.
+  # Deny both independent rights, without denying traversal or WRITE_DAC.
+  $parentAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentSid, [Security.AccessControl.FileSystemRights]::ListDirectory, [Security.AccessControl.InheritanceFlags]::None, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Deny))
+  $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($currentSid, [Security.AccessControl.FileSystemRights]::ReadAttributes, [Security.AccessControl.InheritanceFlags]::None, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Deny))
+  [IO.File]::SetAccessControl($fixtureFile, $fileAcl)
+  [IO.Directory]::SetAccessControl($fixtureParent, $parentAcl)
+  $denied = [LifeFixtureAttributes]::Read($fixtureFile)
+  if ($denied.Attributes -ne -1 -or $denied.Error -ne 5) { throw ('Expected actual native GetFileAttributesW access denial, got attributes=' + $denied.Attributes + ', error=' + $denied.Error) }
+  $result = [PSCustomObject]@{ Attributes = $denied.Attributes; Error = $denied.Error; Sid = $currentSid.Value }
+} elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'restore') {
+  $backup = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($env:LIFE_ACL_FIXTURE_BACKUP))
+  if ($backup.Parent -cne $fixtureParent -or $backup.File -cne $fixtureFile -or $backup.Sid -cne $currentSid.Value) { throw 'ACL backup paths or identity do not match this owned fixture.' }
+  # New security objects mark the saved Access section modified for persistence.
+  $fileAcl = [Security.AccessControl.FileSecurity]::new()
+  $fileAcl.SetSecurityDescriptorSddlForm($backup.FileAccess, $sections)
+  $parentAcl = [Security.AccessControl.DirectorySecurity]::new()
+  $parentAcl.SetSecurityDescriptorSddlForm($backup.ParentAccess, $sections)
+  $restoreFailures = @()
+  try { [IO.File]::SetAccessControl($fixtureFile, $fileAcl) } catch { $restoreFailures += $_.Exception.ToString() }
+  try { [IO.Directory]::SetAccessControl($fixtureParent, $parentAcl) } catch { $restoreFailures += $_.Exception.ToString() }
+  if ($restoreFailures.Count -gt 0) { throw ('Fixture ACL restoration failed: ' + ($restoreFailures -join '; ')) }
+  $restoredFile = [IO.File]::GetAccessControl($fixtureFile)
+  $restoredParent = [IO.Directory]::GetAccessControl($fixtureParent)
+  if ($restoredFile.GetSecurityDescriptorSddlForm($sections) -cne $backup.FileAccess -or $restoredParent.GetSecurityDescriptorSddlForm($sections) -cne $backup.ParentAccess -or $restoredFile.GetSecurityDescriptorSddlForm($identitySections) -cne $backup.FileIdentity -or $restoredParent.GetSecurityDescriptorSddlForm($identitySections) -cne $backup.ParentIdentity) { throw 'Access denial cleanup did not restore the exact DACL, owner and group.' }
+  $restoredAttributes = [LifeFixtureAttributes]::Read($fixtureFile)
+  if ($restoredAttributes.Attributes -ne $backup.FileAttributes) { throw 'Access denial cleanup did not restore native attribute access.' }
+  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; Sid = $currentSid.Value }
+} else { throw 'Unsupported access denial fixture action.' }
+[IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_OUTPUT, (ConvertTo-Json -InputObject $result -Compress), [Text.UTF8Encoding]::new($false))`
+
 const immediate = () => new Promise((resolve) => setImmediate(resolve))
 
 async function bounded(promise, timeoutMs, message) {
@@ -1293,6 +1365,23 @@ try {
       0,
       0,
     )
+    const fileSymlinkOutside = directory('file-symlink-outside')
+    fs.writeFileSync(path.join(fileSymlinkOutside, 'payload.bin'), bytes)
+    fs.writeFileSync(path.join(fileSymlinkOutside, 'sentinel.txt'), 'Outside file remains intact\n')
+    const fileSymlinkOutsideBefore = inventory(fileSymlinkOutside)
+    const fileSymlinkTarget = directory('verify-file-symlink', true)
+    const expectedFileSymlink = path.join(fileSymlinkTarget, 'payload.bin')
+    fs.rmSync(expectedFileSymlink)
+    fs.symlinkSync(path.join(fileSymlinkOutside, 'payload.bin'), expectedFileSymlink, 'file')
+    assert.ok(fs.lstatSync(expectedFileSymlink).isSymbolicLink())
+    assert.equal(sha256(expectedFileSymlink), sha256(path.join(payload, 'payload.bin')))
+    verificationCases.push({
+      name: 'file-symlink',
+      target: fileSymlinkTarget,
+      required: 0,
+      exact: 0,
+      preflight: 0,
+    })
     const rootJunction = path.join(scratch, 'verify-root-junction')
     fs.symlinkSync(payload, rootJunction, 'junction')
     verificationCases.push({
@@ -1315,6 +1404,78 @@ try {
       execute(`preflight-${item.name}`, 'preflight', item.target, item.preflight)
     }
     execute('preflight-empty', 'preflight', ordinary, 1)
+    assert.deepEqual(
+      execute('extract-file-symlink', 'extract', fileSymlinkTarget, 0, good, false),
+      [],
+      'Expected-file symlink must be rejected before extraction or copying',
+    )
+    assert.ok(fs.lstatSync(expectedFileSymlink).isSymbolicLink())
+    assert.deepEqual(
+      inventory(fileSymlinkOutside),
+      fileSymlinkOutsideBefore,
+      'Rejected expected-file symlink must preserve every outside hash',
+    )
+
+    const deniedTarget = directory('verify-native-access-denied', true)
+    const deniedFile = path.join(deniedTarget, 'nested', '研究$', "entry-$value-'quote-`tick.txt")
+    const deniedBefore = inventory(deniedTarget)
+    const deniedOutsideBefore = inventory(fileSymlinkOutside)
+    const deniedSource = path.join(scratch, 'native-access-denied.ps1')
+    const deniedBackup = path.join(scratch, 'native-access-denied.backup.json')
+    fs.writeFileSync(deniedSource, '\ufeff' + accessDeniedScript)
+    function deniedAcl(action) {
+      const output = path.join(scratch, `native-access-denied.${action}.json`)
+      requireSuccess(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', deniedSource],
+        {
+          env: windowsPowerShellEnvironment({
+            ...process.env,
+            TEMP: nativeTemp,
+            TMP: nativeTemp,
+            LIFE_ACL_FIXTURE_ROOT: deniedTarget,
+            LIFE_ACL_FIXTURE_FILE: deniedFile,
+            LIFE_ACL_FIXTURE_SCRATCH: scratch,
+            LIFE_ACL_FIXTURE_BACKUP: deniedBackup,
+            LIFE_ACL_FIXTURE_OUTPUT: output,
+            LIFE_ACL_FIXTURE_ACTION: action,
+          }),
+        },
+      )
+      return JSON.parse(fs.readFileSync(output, 'utf8'))
+    }
+    try {
+      const denied = deniedAcl('apply')
+      assert.equal(denied.Attributes, -1, 'Access denial must come from actual GetFileAttributesW')
+      assert.equal(denied.Error, 5, 'Access denial must report actual ERROR_ACCESS_DENIED')
+      execute('guard-native-access-denied', 'guard', deniedTarget, 0)
+      execute('required-native-access-denied', 'required', deniedTarget, 0)
+      execute('exact-native-access-denied', 'exact', deniedTarget, 0)
+      execute('preflight-native-access-denied', 'preflight', deniedTarget, 0)
+      assert.deepEqual(
+        execute('extract-native-access-denied', 'extract', deniedTarget, 0, good, false),
+        [],
+        'A native access-denied expected path must be rejected before extraction or copying',
+      )
+      assert.deepEqual(
+        inventory(fileSymlinkOutside),
+        deniedOutsideBefore,
+        'Native access-denied rejection must preserve every outside hash',
+      )
+      console.log(
+        `Native access-denied proof: GetFileAttributesW=-1, GetLastError=5 for expected nested payload; ordinary root guard retained stock eligibility, preflight rejected, extraction exited before writes for SID ${denied.Sid}.`,
+      )
+    } finally {
+      if (fs.existsSync(deniedBackup)) {
+        const restored = deniedAcl('restore')
+        assert.equal(restored.Restored, true)
+      }
+    }
+    assert.deepEqual(
+      inventory(deniedTarget),
+      deniedBefore,
+      'Native access-denied rejection and DACL restoration must preserve the entire payload',
+    )
 
     const direct = directory('extract-direct')
     const directPhases = execute('extract-direct', 'extract', direct, 1)
@@ -1495,6 +1656,62 @@ try {
     const localAppData = path.join(appData, 'Local')
     fs.mkdirSync(roamingAppData)
     fs.mkdirSync(localAppData)
+    const redirectedAppData = { APPDATA: roamingAppData, LOCALAPPDATA: localAppData }
+    const beforeFirstStock = inventory(appData)
+    assert.deepEqual(beforeFirstStock, [
+      { name: 'Local', directory: true },
+      { name: 'Roaming', directory: true },
+    ])
+    const firstStockTarget = directory('appdata-stock-prime-one')
+    execute(
+      'appdata-stock-prime-one',
+      'extract',
+      firstStockTarget,
+      1,
+      good,
+      true,
+      controlExecutable,
+      redirectedAppData,
+    )
+    assert.deepEqual(inventory(firstStockTarget), inventory(payload))
+    const afterFirstStock = inventory(appData)
+    console.log(
+      `Unchanged stock first AppData initialization: ${JSON.stringify({ beforeFirstStock, afterFirstStock })}`,
+    )
+    assert.deepEqual(
+      afterFirstStock,
+      [
+        'Local',
+        'Local/Microsoft',
+        'Local/Microsoft/Windows',
+        'Local/Microsoft/Windows/Caches',
+        'Roaming',
+      ].map((name) => ({ name, directory: true })),
+      'Unchanged stock installer must establish exactly the observed Windows AppData scaffold',
+    )
+    const beforeSecondStock = inventory(appData)
+    assert.deepEqual(beforeSecondStock, afterFirstStock)
+    const secondStockTarget = directory('appdata-stock-prime-two')
+    execute(
+      'appdata-stock-prime-two',
+      'extract',
+      secondStockTarget,
+      1,
+      good,
+      true,
+      controlExecutable,
+      redirectedAppData,
+    )
+    assert.deepEqual(inventory(secondStockTarget), inventory(payload))
+    const afterSecondStock = inventory(appData)
+    console.log(
+      `Unchanged stock repeat AppData initialization: ${JSON.stringify({ beforeSecondStock, afterSecondStock })}`,
+    )
+    assert.deepEqual(
+      afterSecondStock,
+      beforeSecondStock,
+      'A repeat unchanged stock installer must leave the complete redirected AppData inventory stable',
+    )
     fs.writeFileSync(path.join(roamingAppData, 'preferences.json'), '{"retained":true}\n')
     fs.writeFileSync(path.join(roamingAppData, 'sessions.json'), '["retained-session"]\n')
     fs.writeFileSync(path.join(localAppData, 'notes.txt'), 'Retain AppData through interruption\n')
@@ -1508,8 +1725,7 @@ try {
         ...process.env,
         TEMP: nativeTemp,
         TMP: nativeTemp,
-        APPDATA: roamingAppData,
-        LOCALAPPDATA: localAppData,
+        ...redirectedAppData,
         LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'extract',
         LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: interrupted,
         LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: '1',
@@ -1525,6 +1741,15 @@ try {
       expectedTail: largeBytes.subarray(largeBytes.length - 4096),
       expectedSha256: sha256(path.join(largePayload, 'large.bin')),
     })
+    const appDataAfterInterruption = inventory(appData)
+    console.log(
+      `Seeded AppData interruption preservation: ${JSON.stringify({ appDataBefore, appDataAfterInterruption })}`,
+    )
+    assert.deepEqual(
+      appDataAfterInterruption,
+      appDataBefore,
+      'The interrupted installer must preserve the entire seeded AppData inventory before recovery',
+    )
     execute('guard-interrupted', 'guard', interrupted, 0)
     const recoveredPhases = execute(
       'extract-interrupted-retry',
@@ -1534,7 +1759,7 @@ try {
       largeArchive,
       true,
       largeExecutable,
-      { APPDATA: roamingAppData, LOCALAPPDATA: localAppData },
+      redirectedAppData,
     )
     assert.equal(
       recoveredPhases.includes('payload-direct-start'),
@@ -1551,10 +1776,14 @@ try {
       inventory(largePayload),
       'Reinstall must completely repair the interrupted payload',
     )
+    const appDataAfterRecovery = inventory(appData)
+    console.log(
+      `Seeded AppData recovery preservation: ${JSON.stringify({ appDataBefore, appDataAfterRecovery })}`,
+    )
     assert.deepEqual(
-      inventory(appData),
+      appDataAfterRecovery,
       appDataBefore,
-      'Interruption and reinstall must preserve AppData fixture hashes',
+      'Interruption and reinstall must preserve the entire seeded AppData inventory and hashes',
     )
     assert.deepEqual(
       inventory(outsidePayload),
@@ -1565,7 +1794,7 @@ try {
       `Native interruption proof: actual extractor PID ${interruption.pid}, preallocated ${interruption.finalSize} bytes, written prefix and unwritten tail observed before kill and retained after process exit; stock reinstall restored every trusted hash.`,
     )
     console.log(
-      `Real Windows NSIS payload fixture passed ${trials} trials plus actual in-progress interruption: full hashes and exact inventory, all 20 registers, stack, set/clear errors, handle preservation, reparse/compressed guard, unchanged stock metadata parity, custom ACL/ADS preservation, direct and stock extraction, CRC/truncated/short archives, retained extras, busy-file fail-closed behavior and verified interruption recovery.`,
+      `Real Windows NSIS payload fixture passed ${trials} trials plus actual in-progress interruption: full hashes and exact inventory, all 20 registers, stack, set/clear errors, handle preservation, file-symlink/native-access-denied rejection, reparse/compressed guard, unchanged stock metadata parity, custom ACL/ADS preservation, direct and stock extraction, CRC/truncated/short archives, retained extras, busy-file fail-closed behavior, stock-initialized AppData equality and verified interruption recovery.`,
     )
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })

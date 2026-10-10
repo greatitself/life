@@ -1,5 +1,7 @@
 import type { LifeConfigPatch, LifeConfigState } from './customization'
 import type { LifeUpdatesAPI } from './updates'
+import type { ProviderUpdatesAPI } from './provider-updates'
+import type { ProviderUsageSnapshot } from './usage'
 import type { LifeExtensionManifest, LifeExtensionsSnapshot } from './extensions'
 import type { PortForwardingState } from './port-forwarding'
 import type { SourceExtensionBundle } from './source-extensions'
@@ -68,6 +70,8 @@ export interface ConnectInput extends Omit<ConnectionProfile, 'workspace'> {
   passphrase?: string
 }
 export interface ConnectionState {
+  /** Advances when installed provider versions are successfully rediscovered. */
+  providerVersionsRevision?: number
   status: 'disconnected' | 'connecting' | 'connected'
   profile?: ConnectionProfile
   home?: string
@@ -158,6 +162,8 @@ export interface AgentEvent {
     | 'tool-output'
     | 'approval'
     | 'question'
+    | 'request-resolved'
+    | 'account-usage'
     | 'complete'
     | 'error'
     | 'session'
@@ -186,7 +192,13 @@ export interface AgentQuestion {
   id: string
   header?: string
   question: string
-  options?: { label: string; description?: string }[]
+  options?: { label: string; description?: string; value?: string }[]
+  required?: boolean
+  inputType?: 'text' | 'number' | 'integer' | 'boolean'
+  isSecret?: boolean
+  isOther?: boolean
+  multiple?: boolean
+  allowEmpty?: boolean
 }
 export interface HostKeyRequest {
   id: string
@@ -201,12 +213,14 @@ export interface ModelOption {
   serviceTiers?: { id: string; name: string; description?: string }[]
   defaultServiceTier?: string
   isDefault?: boolean
+  supportsAutoMode?: boolean
+  inputModalities?: string[]
 }
 export interface RelayAPI {
   platform: string
   conversations?: {
-    load(): Promise<unknown[]>
-    save(threads: unknown[]): Promise<void>
+    load(): Promise<import('./conversations').ConversationHistorySnapshot | null>
+    save(threads: unknown[], savedAt?: number): Promise<void>
   }
   hostHistory?: HostHistoryAPI
   researchDocuments?: ResearchDocumentsAPI
@@ -215,6 +229,7 @@ export interface RelayAPI {
     onState(callback: (state: PortForwardingState) => void): () => void
   }
   updates: LifeUpdatesAPI
+  providerUpdates?: ProviderUpdatesAPI
   sourceCode: {
     get(): Promise<LifeSourceSnapshot>
     getContext(request?: LifeSourceRead): Promise<LifeSourceContext>
@@ -299,6 +314,7 @@ export interface RelayAPI {
       answers?: Record<string, string[]>,
     ): Promise<void>
     models(provider: Provider): Promise<ModelOption[]>
+    usage?(provider: Provider): Promise<ProviderUsageSnapshot>
   }
   files: {
     list(path?: string): Promise<FileEntry[]>

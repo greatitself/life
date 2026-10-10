@@ -709,6 +709,32 @@ async function runStudioChecks(context) {
     id: session.id,
     remoteId: session.thread.remoteId,
   }))
+  await page().evaluate(() => window.__lifeFlushConversationHistory())
+  const nativeHistory = await page().evaluate(() => window.relay.conversations.load())
+  assert.equal(nativeHistory.version, 1)
+  assert.ok(nativeHistory.savedAt > 0)
+  for (const id of baselineProjectThreads)
+    assert.ok(nativeHistory.threads.some((thread) => thread.id === id))
+  const savedTranscript = nativeHistory.threads.map((thread) => ({
+    id: thread.id,
+    remoteId: thread.remoteId,
+    messages: thread.messages.map(({ id, role, text }) => ({ id, role, text })),
+  }))
+  // Only the isolated test window's fallback history is cleared. Studio state
+  // remains present so the same cold start verifies both independent stores.
+  await page().evaluate(() => {
+    localStorage.removeItem('relay.threads.v1')
+    localStorage.removeItem('life.conversation-checkpoint.v1')
+    const save = Storage.prototype.setItem
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'relay.threads.v1' || key === 'life.conversation-checkpoint.v1')
+        throw new DOMException(
+          'The isolated history-cache failure fixture is active.',
+          'QuotaExceededError',
+        )
+      return Reflect.apply(save, this, [key, value])
+    }
+  })
   await application().close()
   await context.launch()
   await context.reconnect()
@@ -730,13 +756,32 @@ async function runStudioChecks(context) {
     )
   for (const id of baselineProjectThreads)
     assert.ok((await ordinaryHistory()).some((thread) => thread.id === id))
+  await waitUntil(
+    async () => (await ordinaryHistory()).length >= savedTranscript.length,
+    'a cold start reconstructs cached conversations from the native disk checkpoint',
+  )
+  const restoredNativeHistory = await page().evaluate(() => window.relay.conversations.load())
+  for (const saved of savedTranscript) {
+    const restored = restoredNativeHistory.threads.find((thread) => thread.id === saved.id)
+    assert.ok(restored, 'Every native conversation survives a missing browser history cache')
+    assert.equal(restored.remoteId, saved.remoteId)
+    assert.deepEqual(
+      restored.messages.map(({ id, role, text }) => ({ id, role, text })),
+      saved.messages,
+    )
+  }
   proof.source.restart = {
     activeRevision: restarted.active.revision,
     preservedStudioSessions: savedRemoteIds.length,
     preservedProjectThreads: baselineProjectThreads.length,
+    nativeHistoryRestoredWithEmptyBrowserCache: true,
+    preservedNativeTranscripts: savedTranscript.length,
   }
   checks.push(
     'compiled source and independent Studio histories survive an actual app exit/relaunch alongside all saved project threads',
+  )
+  checks.push(
+    'Native conversation checkpoints restore exact transcripts after a cold app restart with the browser history cache removed',
   )
 
   await openStudio()

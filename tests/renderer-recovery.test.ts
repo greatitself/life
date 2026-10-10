@@ -29,6 +29,8 @@ describe('renderer document admission during native recovery', () => {
     admission.suspend()
     for (const channel of [
       'connection:state',
+      'conversations:load',
+      'conversations:save',
       'profiles:list',
       'source-code:get',
       'window:restart',

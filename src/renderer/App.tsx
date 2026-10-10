@@ -5,6 +5,7 @@ import {
   ArrowUp,
   ArrowUpRight,
   BrainCircuit,
+  BarChart3,
   Cable,
   Check,
   ChevronDown,
@@ -48,6 +49,8 @@ import type {
   StartInput,
 } from '../shared/types'
 import { api, desktop, errorText, streamlinedWorkspace } from './api'
+import { flushSync } from 'react-dom'
+import { AgentEventBatch } from './agent-event-batch'
 import { providerPermissionMode } from '../shared/permissions'
 import './workspace-presentation.css'
 import {
@@ -67,7 +70,7 @@ import { ConnectionDialog } from './components/ConnectionDialog'
 import { ProjectDialog } from './components/ProjectDialog'
 import { ApprovalCard } from './components/MessageView'
 import { ThreadTimeline } from './components/ThreadTimeline'
-import { previewNavigableMessages } from './thread-presentation'
+import { previewNavigableMessages, threadHasRunningChildren } from './thread-presentation'
 import { WorkspaceSurfaces } from './components/WorkspaceSurfaces'
 import { ResizeHandle, usePanelSizes } from './components/SidebarResize'
 import { ThreadMessageNavigator } from './components/ThreadMessageNavigator'
@@ -77,6 +80,7 @@ import { CustomizationStudio } from './components/CustomizationStudio'
 import { HostHistoryDialog } from './components/HostHistoryDialog'
 import { hostHistoryThread, appendHostHistory } from './host-history'
 import type { HostHistoryPage } from '../shared/agent-history'
+import type { ConversationHistorySnapshot } from '../shared/conversations'
 import { useBuiltinFeatures } from './builtin-extensions'
 import { SidebarThread } from './components/SidebarThread'
 import './workspace-integration.css'
@@ -85,6 +89,10 @@ import { CustomizationDialog } from './components/CustomizationDialog'
 import { CustomPanels } from './components/CustomPanels'
 import { useLifeConfig } from './useLifeConfig'
 import { UpdateDialog } from './components/UpdateDialog'
+import { UsageDialog } from './components/UsageDialog'
+import { ProviderUpdatesButton, ProviderUpdatesDialog } from './components/ProviderUpdatesDialog'
+import { emptyProviderUpdatesState, type ProviderUpdatesState } from '../shared/provider-updates'
+import type { ProviderUsageSnapshot } from '../shared/usage'
 import type { UpdateState } from '../shared/updates'
 import { ExtensionDialog } from './components/ExtensionDialog'
 import { ExtensionHost } from './components/ExtensionHost'
@@ -144,6 +152,12 @@ import {
 import './components/life-workbench.css'
 import { ResearchLayout } from './components/ResearchLayout'
 import { useConversationDrafts } from './conversation-drafts'
+import { useConversationScroll } from './conversation-scroll'
+import {
+  readCachedConversationHistory,
+  reconcileConversationHistory,
+  useConversationPersistence,
+} from './conversation-persistence'
 import './components/research-machine.css'
 import './components/research-interface.css'
 
@@ -222,6 +236,13 @@ export function App() {
   const [sidebarFooter, setSidebarFooter] = useState<HTMLDivElement | null>(null)
   const [surfaceHeader, setSurfaceHeader] = useState<HTMLDivElement | null>(null)
   const [updatesOpen, setUpdatesOpen] = useState(false)
+  const [providerUpdatesOpen, setProviderUpdatesOpen] = useState(false)
+  const [usageOpen, setUsageOpen] = useState(false)
+  const [providerUpdateState, setProviderUpdateState] =
+    useState<ProviderUpdatesState>(emptyProviderUpdatesState)
+  const [accountSnapshots, setAccountSnapshots] = useState<
+    Partial<Record<Provider, ProviderUsageSnapshot>>
+  >({})
   const [portsOpen, setPortsOpen] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>({
     status: 'unsupported',
@@ -240,7 +261,7 @@ export function App() {
   profilesCurrent.current = profiles
   const [profilesLoaded, setProfilesLoaded] = useState(false)
   const [connection, setConnection] = useState<ConnectionState>({ status: 'disconnected' })
-  const [threads, setThreads] = useState<Thread[]>(readThreads)
+  const [threads, setThreads] = useState<Thread[]>(() => (api?.conversations ? [] : readThreads()))
   const threadsCurrent = useRef(threads)
   threadsCurrent.current = threads
   const [toast, setToast] = useState('')
@@ -277,6 +298,7 @@ export function App() {
         : undefined
       : workspaceActiveId
   function setActiveId(id: string | undefined) {
+    if (!historyReady) return
     if (view !== 'investigation') setWorkspaceActiveId(id)
   }
   const activeIdCurrent = useRef(activeId)
@@ -288,7 +310,16 @@ export function App() {
   const initialRecoveryRequest = useRef<Promise<boolean> | undefined>(undefined)
   const emergencyReview = useRef(false)
   const recoveryReviewed = useRef(false)
-  const [startupReady, setStartupReady] = useState(!api?.window.initialRecovery)
+  const [recoveryReady, setRecoveryReady] = useState(!api?.window.initialRecovery)
+  const [historyReady, setHistoryReady] = useState(!api?.conversations)
+  const historyLoad = useRef<Promise<ConversationHistorySnapshot | null> | undefined>(undefined)
+  const startupReady = recoveryReady && historyReady
+  const conversationPersistence = useConversationPersistence(
+    threads,
+    api?.conversations?.save,
+    setToast,
+    historyReady,
+  )
   const [provider, setProvider] = useState<Provider>(config.defaultProvider)
   const [model, setModel] = useState(config.defaultModel)
   const [reasoningEffort, setReasoningEffort] = useState('')
@@ -365,6 +396,7 @@ export function App() {
     (thread) => !thread.purpose && !workbench.linkedThreadIds.has(thread.id),
   )
   useEffect(() => {
+    if (!historyReady) return
     setThreads((previous) => {
       const next = previous.map((thread) => {
         const context = workbench.contextForThread(thread.id)
@@ -378,7 +410,7 @@ export function App() {
       })
       return next.some((thread, index) => thread !== previous[index]) ? next : previous
     })
-  }, [workbench.scopeKey, workbench.goals])
+  }, [workbench.scopeKey, workbench.goals, historyReady])
   const legacyResearchDirectories = useMemo(
     () => researchLegacyDirectories(threads, workbench.linkedThreadIds),
     [threads, workbench.scopeKey, workbench.goals],
@@ -397,7 +429,7 @@ export function App() {
     refreshKey,
     threads.length,
     setThreads,
-    builtin.enabled('thread-git-metadata'),
+    historyReady && builtin.enabled('thread-git-metadata'),
   )
   useEffect(() => {
     const sleeping = threads.filter((thread) => typeof thread.snoozedUntil === 'number')
@@ -419,8 +451,6 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [threads])
   const [threadMenu, setThreadMenu] = useState(false)
-  const [stickToBottom, setStickToBottom] = useState(true)
-  const conversation = useRef<HTMLDivElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<{ id?: string } | undefined>(undefined)
   const sourceReloading = useRef(false)
@@ -430,6 +460,15 @@ export function App() {
   const appContext = useRef({ preferences, config, extensions, connection })
   appContext.current = { preferences, config, extensions, connection }
   const active = threads.find((t) => t.id === activeId)
+  const { conversation, viewportRef, stickToBottom, setStickToBottom } = useConversationScroll(
+    JSON.stringify([
+      view,
+      active?.profileId,
+      activeId || draftKey,
+      view === 'investigation' ? workbench.scopeKey : undefined,
+    ]),
+    { messages: active?.messages, pending: active?.pending, queue: active?.queue },
+  )
   const navigableMessages = useMemo(
     () =>
       active ? (streamlinedWorkspace ? previewNavigableMessages(active) : active.messages) : [],
@@ -439,7 +478,6 @@ export function App() {
     settingsRequest.current += 1
     cancelThreadContext()
     setThreadMenu(false)
-    setStickToBottom(true)
   }, [view, activeId, workbench.scopeKey])
   const currentProvider = active?.provider || provider
   const currentModel = active?.model ?? model
@@ -451,7 +489,8 @@ export function App() {
   const draftUploads = useDraftUploads(
     attachments,
     connection,
-    builtin.enabled('thread-attachments') &&
+    historyReady &&
+      builtin.enabled('thread-attachments') &&
       (view === 'investigation' ? connected && Boolean(researchUploadWorkspace) : projectReady) &&
       (!active || active.profileId === 'life-local' || queueConnectionMatches(active, connection)),
     view === 'investigation' && researchUploadWorkspace
@@ -489,6 +528,7 @@ export function App() {
         (waitingMessage && !waitingMessage.paused && !waitingMessage.error)),
     )
   const queueControlsReady =
+    historyReady &&
     Boolean(active && queueConnectionMatches(active, connection)) &&
     !restoringThreadId.current &&
     !threadContext.current.busy &&
@@ -642,7 +682,7 @@ export function App() {
       .then((recovery) => {
         if (disposed) return
         if (recovery) reviewRecoveredExtensions()
-        setStartupReady(true)
+        setRecoveryReady(true)
         queue.wake()
       })
       .catch((error) => {
@@ -652,6 +692,43 @@ export function App() {
       disposed = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!api?.conversations) return
+    let disposed = false
+    // Consume a single native read during StrictMode replay. Saves and context
+    // restoration stay gated until existing disk history has been considered.
+    historyLoad.current ||= api.conversations.load()
+    void historyLoad.current
+      .then((saved) => {
+        if (disposed) return
+        const cached = readCachedConversationHistory()
+        conversationPersistence.advanceClock(Math.max(saved?.savedAt || 0, cached.savedAt || 0))
+        setThreads(
+          reconcileConversationHistory(saved, cached).map((thread) =>
+            bindLegacyThreadWorkspace(thread, appContext.current.connection),
+          ),
+        )
+        setHistoryReady(true)
+      })
+      .catch((error) => {
+        if (disposed) return
+        const cached = readCachedConversationHistory()
+        conversationPersistence.advanceClock(cached.savedAt || 0)
+        setThreads(
+          cached.threads.map((thread) =>
+            bindLegacyThreadWorkspace(thread, appContext.current.connection),
+          ),
+        )
+        setToast(
+          `Could not load the disk history. Its original file is preserved. ${errorText(error)}`,
+        )
+        setHistoryReady(true)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [conversationPersistence.advanceClock])
 
   useEffect(() => {
     try {
@@ -690,6 +767,29 @@ export function App() {
     return api.updates.onState(setUpdateState)
   }, [])
   useEffect(() => {
+    const updates = api?.providerUpdates
+    if (!updates) return
+    let current = true
+    let eventRevision = 0
+    const unsubscribe = updates.onState((state) => {
+      eventRevision++
+      setProviderUpdateState(state)
+    })
+    const requestedRevision = eventRevision
+    void updates
+      .get()
+      .then((state) => {
+        if (current && eventRevision === requestedRevision) setProviderUpdateState(state)
+      })
+      .catch((error) => {
+        if (current) setToast(errorText(error))
+      })
+    return () => {
+      current = false
+      unsubscribe()
+    }
+  }, [])
+  useEffect(() => {
     setView(config.startView)
   }, [config.startView])
   useEffect(() => {
@@ -712,6 +812,14 @@ export function App() {
     refreshProfiles()
     if (!api) return
     const updateConnection = (state: ConnectionState) => {
+      if (
+        state.profile?.id !== appContext.current.connection.profile?.id ||
+        state.profile?.host !== appContext.current.connection.profile?.host ||
+        state.profile?.port !== appContext.current.connection.profile?.port ||
+        state.profile?.username !== appContext.current.connection.profile?.username ||
+        state.status !== 'connected'
+      )
+        setAccountSnapshots({})
       appContext.current.connection = state
       setConnection(state)
       if (state.status === 'connected')
@@ -721,53 +829,91 @@ export function App() {
     void api.connection.state().then(updateConnection)
     const offConnection = api.onConnection(updateConnection)
     const offHost = api.onHostKey(setHostKey)
-    const offAgent = api.onAgent((event) => {
-      if (event.type === 'complete' || event.type === 'error')
-        runningChoices.current.delete(event.sessionId)
-      setThreads((previous) =>
-        previous.map((thread) =>
-          thread.id === event.sessionId ? applyEvent(thread, event) : thread,
-        ),
-      )
-      if (event.type === 'complete') setRefreshKey((key) => key + 1)
+    const eventBatch = new AgentEventBatch((events) => {
+      const byThread = new Map<string, AgentEvent[]>()
+      for (const event of events) {
+        if (event.type === 'account-usage' && !event.sessionId) {
+          const snapshot = event.details as ProviderUsageSnapshot | undefined
+          const connected = appContext.current.connection
+          const profile = connected.profile
+          if (
+            snapshot &&
+            profile &&
+            connected.status === 'connected' &&
+            snapshot.machineIdentity ===
+              JSON.stringify([profile.host, profile.port, profile.username])
+          )
+            setAccountSnapshots((previous) =>
+              (previous[snapshot.provider]?.fetchedAt ?? -Infinity) > snapshot.fetchedAt
+                ? previous
+                : { ...previous, [snapshot.provider]: snapshot },
+            )
+          continue
+        }
+        const current = byThread.get(event.sessionId) || []
+        current.push(event)
+        byThread.set(event.sessionId, current)
+        if (
+          !event.agentId &&
+          (event.type === 'complete' ||
+            (event.type === 'error' &&
+              !(
+                event.details &&
+                typeof event.details === 'object' &&
+                'recoverable' in event.details &&
+                event.details.recoverable === true
+              )))
+        )
+          runningChoices.current.delete(event.sessionId)
+      }
+      if (byThread.size)
+        setThreads((previous) =>
+          previous.map((thread) => {
+            const updates = byThread.get(thread.id)
+            return updates ? updates.reduce(applyEvent, thread) : thread
+          }),
+        )
+      if (events.some((event) => event.type === 'complete' && !event.agentId))
+        setRefreshKey((key) => key + 1)
     })
+    const offAgent = api.onAgent((event) => eventBatch.push(event))
+    // History's unload listener runs after this subscription effect. Publish
+    // the final received deltas before it reads the current conversation.
+    const flushEvents = () => flushSync(() => eventBatch.flush())
+    window.addEventListener('beforeunload', flushEvents)
+    window.addEventListener('life:history-checkpoint', flushEvents)
     return () => {
       offConnection()
       offHost()
       offAgent()
+      window.removeEventListener('beforeunload', flushEvents)
+      window.removeEventListener('life:history-checkpoint', flushEvents)
+      eventBatch.dispose()
     }
   }, [refreshProfiles])
 
-  function persistThreadHistory() {
-    const history = threadsCurrent.current.map((thread) => ({ ...thread, pending: [] }))
-    localStorage.setItem('relay.threads.v1', JSON.stringify(history))
-    void api?.conversations?.save(history).catch((error) => setToast(errorText(error)))
-  }
   useEffect(() => {
     const unload = () => {
       sourceReloading.current = true
-      try {
-        persistThreadHistory()
-      } catch {
-        /* Quota feedback remains visible. */
-      }
+      void conversationPersistence.flush()
     }
+    const checkpointWindow = window as Window & {
+      __lifeFlushConversationHistory?: () => Promise<void>
+    }
+    const flushHistory = () => {
+      // Native close/reload can await this checkpoint before replacing the
+      // document. The stream listener flushes queued deltas synchronously first.
+      window.dispatchEvent(new Event('life:history-checkpoint'))
+      return conversationPersistence.flush().then(() => undefined)
+    }
+    checkpointWindow.__lifeFlushConversationHistory = flushHistory
     window.addEventListener('beforeunload', unload)
-    return () => window.removeEventListener('beforeunload', unload)
-  }, [])
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        const history = threads.map((t) => ({ ...t, pending: [] }))
-        localStorage.setItem('relay.threads.v1', JSON.stringify(history))
-        void api?.conversations?.save(history).catch((error) => setToast(errorText(error)))
-      } catch {
-        setToast('Local history storage is full. Delete older threads to free space.')
-      }
-    }, 600)
-    return () => clearTimeout(timer)
-  }, [threads])
+    return () => {
+      window.removeEventListener('beforeunload', unload)
+      if (checkpointWindow.__lifeFlushConversationHistory === flushHistory)
+        delete checkpointWindow.__lifeFlushConversationHistory
+    }
+  }, [conversationPersistence.flush])
   useEffect(() => {
     const catalogKey = `${connection.profile?.id || ''}:${connection.workspace || ''}:${currentProvider}`
     const cached = modelCatalogs.current.get(catalogKey)
@@ -820,10 +966,6 @@ export function App() {
     setTerminalOpen(false)
   }, [connected, connection.profile?.id, connection.workspace, startupReady, view])
   useEffect(() => {
-    if (stickToBottom && conversation.current)
-      conversation.current.scrollTop = conversation.current.scrollHeight
-  }, [active?.messages, active?.pending, active?.queue, stickToBottom])
-  useEffect(() => {
     if (!toast) return
     const timer = setTimeout(() => setToast(''), 6500)
     return () => clearTimeout(timer)
@@ -836,6 +978,7 @@ export function App() {
   }, [draft, view, activeId])
 
   const newThread = useCallback(() => {
+    if (!historyReady) return
     emergencyReview.current = false
     cancelThreadContext()
     if (!attachmentTransfer.current) submitting.current = undefined
@@ -846,10 +989,11 @@ export function App() {
     setThreadMenu(false)
     setStickToBottom(true)
     textarea.current?.focus()
-  }, [])
+  }, [historyReady])
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (
+        !historyReady ||
         e.defaultPrevented ||
         e.isComposing ||
         (e.target instanceof Element && Boolean(e.target.closest('[role="dialog"]'))) ||
@@ -862,6 +1006,8 @@ export function App() {
         customizeOpen ||
         portsOpen ||
         updatesOpen ||
+        providerUpdatesOpen ||
+        usageOpen ||
         extensionsOpen ||
         sourceCodeOpen ||
         workbench.editor
@@ -904,6 +1050,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [
     newThread,
+    historyReady,
     hostKey,
     connectOpen,
     projectOpen,
@@ -915,6 +1062,8 @@ export function App() {
     customizeOpen,
     portsOpen,
     updatesOpen,
+    providerUpdatesOpen,
+    usageOpen,
     extensionsOpen,
     sourceCodeOpen,
     view,
@@ -922,6 +1071,7 @@ export function App() {
     workbench.editor,
   ])
   function attachFiles(files: File[]) {
+    if (!historyReady) return
     if (!files.length || !builtin.enabled('thread-attachments')) return
     if (attachmentTransfer.current || queue.preparing) {
       setToast(
@@ -1384,8 +1534,8 @@ export function App() {
       await api.agent.stop(active.id)
       setThreads((previous) =>
         previous.map((thread) =>
-          thread.id === active.id && thread.turn === active.turn
-            ? { ...thread, busy: false, turnStatus: 'interrupted', pending: [] }
+          thread.id === active.id && thread.turn === active.turn && active.busy
+            ? applyEvent(thread, { sessionId: thread.id, type: 'complete', status: 'interrupted' })
             : thread,
         ),
       )
@@ -1402,6 +1552,7 @@ export function App() {
     reasoningEffort?: string
     serviceTier?: string
   }) => {
+    if (!historyReady) return
     const request = ++settingsRequest.current
     const settingsThreadId = active?.id
     const settingsView = view
@@ -1441,19 +1592,21 @@ export function App() {
     }
   }
   async function respond(event: AgentEvent, accepted: boolean, answers?: Record<string, string[]>) {
-    if (!active || !api) return
-    try {
-      await api.agent.respond(active.id, event.requestId!, accepted, answers)
-      setThreads((previous) =>
-        previous.map((t) =>
-          t.id === active.id ? resolveAgentRequest(t, event.requestId!, accepted, answers) : t,
-        ),
-      )
-    } catch (e) {
-      setToast(errorText(e))
-    }
+    if (!api || !event.requestId) throw new Error('This request is no longer available.')
+    const target = threadsCurrent.current.find((thread) => thread.id === event.sessionId)
+    if (!target?.pending.some((request) => request.requestId === event.requestId))
+      throw new Error('This request is no longer pending.')
+    await api.agent.respond(event.sessionId, event.requestId, accepted, answers)
+    setThreads((previous) =>
+      previous.map((thread) =>
+        thread.id === event.sessionId
+          ? resolveAgentRequest(thread, event.requestId!, accepted, answers)
+          : thread,
+      ),
+    )
   }
   function importHostHistory(page: HostHistoryPage) {
+    if (!historyReady) return
     if (!connection.profile) return
     const existing = threadsCurrent.current.find(
       (thread) =>
@@ -1527,6 +1680,7 @@ export function App() {
     }
   }
   function openMapProject(project: WorkspaceProject) {
+    if (!historyReady) return
     const previous = threadsCurrent.current
       .filter(
         (thread) =>
@@ -1559,17 +1713,45 @@ export function App() {
     selectThread(thread)
   }
   function selectThread(thread: Thread) {
+    if (!historyReady) return
     emergencyReview.current = false
     setView('workspace')
     activeIdCurrent.current = thread.id
     setWorkspaceActiveId(thread.id)
     setSearchOpen(false)
     setQuery('')
-    setStickToBottom(true)
     setThreadMenu(false)
     setProjectOpen(false)
     if (thread.profileId === 'life-local') cancelThreadContext()
     else if (profilesLoaded) void restoreThreadContext(thread)
+  }
+  function selectUsageThread(id: string) {
+    if (!historyReady) return
+    const thread = threadsCurrent.current.find((item) => item.id === id)
+    if (!thread) return
+    if (thread.purpose === 'research' || workbench.linkedThreadIds.has(thread.id)) {
+      const context = workbench.contextForThread(thread.id)
+      if (!builtin.enabled('research-workbench')) {
+        setToast('Enable Research to open this conversation.')
+        return
+      }
+      if (
+        !context ||
+        !researchScopeMatches(context.scope, connection) ||
+        !workbench.useWorkspace(connection)
+      ) {
+        setToast('Open this conversation from its Research goal to preserve its context.')
+        return
+      }
+      workbench.selectGoal(context.target.goal.id)
+      if (context.target.problem) workbench.selectProblem(context.target.problem.id)
+      setResearchAgentOpen(true)
+      setView('investigation')
+    } else if (thread.purpose === 'customization') {
+      if (streamlinedWorkspace) setStudioOpen(true)
+      else setView('customization')
+    } else selectThread(thread)
+    setUsageOpen(false)
   }
   async function invokeExtensionUI(method: string, args: unknown): Promise<unknown> {
     const payload = Array.isArray(args) ? args[0] : args
@@ -1668,6 +1850,24 @@ export function App() {
           contentRef={setTitleBarContent}
           surfaceContentRef={setSurfaceHeader}
           leadingActionsRef={setHeaderLeadingActions}
+          utilityActions={
+            <>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Usage"
+                title="Provider usage and account limits"
+                aria-haspopup="dialog"
+                onClick={() => setUsageOpen(true)}
+              >
+                <BarChart3 size={16} />
+              </button>
+              <ProviderUpdatesButton
+                state={providerUpdateState}
+                onClick={() => setProviderUpdatesOpen(true)}
+              />
+            </>
+          }
           studioOpen={studioOpen}
           onStudioToggle={
             streamlinedWorkspace
@@ -1692,6 +1892,11 @@ export function App() {
           <div className="extension-recovery-bar" role="status">
             <span>{sourceUI.error}</span>
             <button onClick={() => setSourceCodeOpen(true)}>Review source changes</button>
+          </div>
+        ) : null}
+        {!historyReady ? (
+          <div className="extension-recovery-bar" role="status">
+            Loading saved conversations…
           </div>
         ) : null}
         {replacement ? (
@@ -1722,7 +1927,7 @@ export function App() {
             {extensionHost(replacement)}
           </div>
         ) : (
-          <div className="app-body">
+          <div className="app-body" inert={!historyReady} aria-busy={!historyReady}>
             <aside
               className="sidebar"
               id="life-sidebar"
@@ -1759,13 +1964,14 @@ export function App() {
                   connection={connection}
                   activeId={activeId}
                   onSelect={selectThread}
-                  onArrange={(thread, patch) =>
+                  onArrange={(thread, patch) => {
+                    if (!historyReady) return
                     setThreads((previous) =>
                       previous.map((item) =>
                         item.id === thread.id ? { ...item, ...patch } : item,
                       ),
                     )
-                  }
+                  }}
                   onNewThread={newThread}
                   shortcutModifier={shortcutModifier}
                   filtersOpen={sidebarFiltersOpen}
@@ -2223,8 +2429,9 @@ export function App() {
                                 Settings and undo
                               </button>
                               <button
-                                disabled={busy}
+                                disabled={busy || !historyReady}
                                 onClick={() => {
+                                  if (!historyReady) return
                                   if (
                                     view === 'investigation' &&
                                     !workbench.unlinkThread(active.id)
@@ -2238,11 +2445,17 @@ export function App() {
                                   const removed = threadAttachmentIds(active).filter(
                                     (id) => !retained.has(id),
                                   )
-                                  void deleteAttachmentFiles(removed).catch((error) =>
-                                    setToast(errorText(error)),
+                                  const next = threadsCurrent.current.filter(
+                                    (item) => item.id !== active.id,
                                   )
-                                  setThreads((t) => t.filter((item) => item.id !== active.id))
+                                  setThreads(next)
                                   if (view !== 'investigation') newThread()
+                                  void conversationPersistence
+                                    .flush(next)
+                                    .then((saved) =>
+                                      saved ? deleteAttachmentFiles(removed) : undefined,
+                                    )
+                                    .catch((error) => setToast(errorText(error)))
                                 }}
                               >
                                 Delete thread
@@ -2293,11 +2506,7 @@ export function App() {
                     ) : null}
                     <div
                       className={`conversation ${!active ? 'empty-conversation' : ''}`}
-                      ref={conversation}
-                      onScroll={(e) => {
-                        const el = e.currentTarget
-                        setStickToBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100)
-                      }}
+                      ref={viewportRef}
                     >
                       {!active && view === 'investigation' ? null : !active ? (
                         <ActiveProject
@@ -2462,8 +2671,9 @@ export function App() {
                           attachments={attachments}
                           uploadStates={draftUploads.states}
                           onRetry={draftUploads.retry}
-                          disabled={queue.preparing || Boolean(attachmentProgress)}
+                          disabled={!historyReady || queue.preparing || Boolean(attachmentProgress)}
                           onRemove={(id) => {
+                            if (!historyReady) return
                             cancelAttachmentUpload(id)
                             setAttachments((current) => current.filter((item) => item.id !== id))
                             if (
@@ -2574,7 +2784,7 @@ export function App() {
                                 onFiles={attachFiles}
                               />
                             ) : null}
-                            {busy ? (
+                            {busy || (active && threadHasRunningChildren(active)) ? (
                               <button
                                 type="button"
                                 className="send-button stop-button"
@@ -2773,11 +2983,44 @@ export function App() {
           onOpenChange={setSourceCodeOpen}
           onNotify={setToast}
         />
+        <UsageDialog
+          open={usageOpen}
+          onOpenChange={setUsageOpen}
+          threads={threads}
+          profiles={profiles}
+          activeThreadId={activeId}
+          activeProfileId={connection.profile?.id}
+          activeMachineIdentity={
+            connection.profile
+              ? JSON.stringify([
+                  connection.profile.host,
+                  connection.profile.port,
+                  connection.profile.username,
+                ])
+              : undefined
+          }
+          connected={connected}
+          onReadUsage={api?.agent.usage}
+          accountSnapshots={Object.values(accountSnapshots).filter(
+            (snapshot): snapshot is ProviderUsageSnapshot => Boolean(snapshot),
+          )}
+          onSelectThread={selectUsageThread}
+        />
+        <ProviderUpdatesDialog
+          open={providerUpdatesOpen}
+          onOpenChange={setProviderUpdatesOpen}
+          state={providerUpdateState}
+          onCheck={async () => {
+            if (!api?.providerUpdates)
+              throw new Error('Provider version checks are unavailable in this interface.')
+            await api.providerUpdates.check()
+          }}
+        />
         <UpdateDialog
           open={updatesOpen}
           onOpenChange={setUpdatesOpen}
           state={updateState}
-          busy={threads.some((thread) => thread.busy)}
+          busy={threads.some((thread) => thread.busy || threadHasRunningChildren(thread))}
           onCheck={async () => {
             if (api) setUpdateState(await api.updates.check())
           }}

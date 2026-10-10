@@ -3,6 +3,7 @@ import {
   isValidElement,
   memo,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -35,7 +36,15 @@ import {
   toolOutputSections,
 } from '../thread-presentation'
 import { LifeSourceCard } from './LifeSourceCard'
+import {
+  approvalRequestPresentation,
+  prepareQuestionAnswers,
+  questionAllowsOther,
+  questionChoiceSentinel,
+  questionOptionValue,
+} from '../question-answers'
 import './thread-output.css'
+import './question-answers.css'
 
 function useCopy(text: string) {
   const [copied, setCopied] = useState(false)
@@ -349,72 +358,365 @@ export function ApprovalCard({
   onRespond: (accepted: boolean, answers?: Record<string, string[]>) => Promise<void>
 }) {
   const [answers, setAnswers] = useState<Record<string, string[]>>({})
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
+  const [customQuestions, setCustomQuestions] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState('')
+  const [urlCompleted, setURLCompleted] = useState(false)
+  const sending = useRef(false)
+  const responded = useRef(false)
+  const requestKey = `${event.sessionId}:${event.requestId || ''}`
+  const currentRequest = useRef(requestKey)
+  currentRequest.current = requestKey
+  const formId = useId()
+  useEffect(() => {
+    setAnswers({})
+    setCustomAnswers({})
+    setCustomQuestions({})
+    setLoading(false)
+    setSubmitted(false)
+    setError('')
+    setURLCompleted(false)
+    sending.current = false
+    responded.current = false
+  }, [requestKey])
+  const draft = { ...answers }
+  for (const question of event.questions || []) {
+    if (customQuestions[question.id])
+      draft[question.id] = [
+        ...(question.multiple ? draft[question.id] || [] : []),
+        customAnswers[question.id] || '',
+      ]
+  }
+  const validation = prepareQuestionAnswers(event.questions || [], draft)
+  const presentation = approvalRequestPresentation(event)
+  const disabled = loading || submitted
+  const cannotAccept =
+    disabled ||
+    (event.type === 'question' && !validation.valid) ||
+    (presentation.urlRequest && (!presentation.url || !urlCompleted))
   const respond = async (accepted: boolean) => {
+    if (sending.current || responded.current || submitted || (accepted && cannotAccept)) return
+    sending.current = true
     setLoading(true)
     setError('')
     try {
-      await onRespond(accepted, answers)
+      await onRespond(
+        accepted,
+        accepted && event.type === 'question' ? validation.answers : undefined,
+      )
+      if (currentRequest.current === requestKey) {
+        responded.current = true
+        setSubmitted(true)
+      }
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error))
+      if (currentRequest.current === requestKey)
+        setError(error instanceof Error ? error.message : String(error))
     } finally {
-      setLoading(false)
+      if (currentRequest.current === requestKey) {
+        sending.current = false
+        setLoading(false)
+      }
     }
   }
   return (
-    <div className="approval-card">
+    <div className="approval-card" aria-busy={loading}>
       <div className="approval-title">
         <Terminal size={16} />
         <strong>
           {event.type === 'question' ? 'Your input is needed' : event.title || 'Approval requested'}
         </strong>
-        <span className="badge">Waiting for you</span>
+        <span className="badge">
+          {submitted ? 'Response sent' : loading ? 'Sending' : 'Waiting for you'}
+        </span>
       </div>
       {event.type === 'question' && event.text ? <pre>{event.text}</pre> : null}
       {event.type === 'question' ? (
-        event.questions?.map((q) => (
-          <div className="thread-question-card" key={q.id}>
-            <label className="question">
-              {q.header ? <strong>{q.header}</strong> : null}
-              {q.question}
-              {q.options?.length ? (
-                <select
-                  disabled={loading}
-                  value={answers[q.id]?.[0] || ''}
-                  onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: [e.target.value] }))}
-                >
-                  <option value="">Choose an answer</option>
-                  {q.options.map((o) => (
-                    <option key={o.label} value={o.label}>
-                      {o.label}
-                      {o.description ? ` — ${o.description}` : ''}
-                    </option>
-                  ))}
-                </select>
-              ) : (
+        event.questions?.map((q, index) => {
+          const inputId = `${formId}-question-${index}`
+          const errorId = `${inputId}-error`
+          const fieldError = validation.errors[q.id]
+          const showError = Boolean(
+            fieldError && (answers[q.id]?.length || customAnswers[q.id]?.length),
+          )
+          const allowsOther = Boolean(q.options?.length && questionAllowsOther(q))
+          const isCustom = Boolean(customQuestions[q.id])
+          const emptyValue = questionChoiceSentinel(q, 'empty')
+          const otherValue = questionChoiceSentinel(q, 'other')
+          const setAnswer = (value: string) =>
+            setAnswers((current) => ({ ...current, [q.id]: [value] }))
+          const customInput = isCustom ? (
+            <label className="question thread-custom-answer">
+              <span>
+                {q.multiple ? 'Additional answer' : 'Your answer'} · {q.question}
+              </span>
+              {q.isSecret ? (
                 <input
-                  disabled={loading}
-                  placeholder="Your answer"
-                  value={answers[q.id]?.[0] || ''}
-                  onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: [e.target.value] }))}
+                  disabled={disabled}
+                  type="password"
+                  autoComplete="off"
+                  value={customAnswers[q.id] || ''}
+                  aria-invalid={showError || undefined}
+                  aria-describedby={showError ? errorId : undefined}
+                  onChange={(e) =>
+                    setCustomAnswers((current) => ({ ...current, [q.id]: e.target.value }))
+                  }
+                />
+              ) : (
+                <textarea
+                  disabled={disabled}
+                  rows={3}
+                  value={customAnswers[q.id] || ''}
+                  aria-invalid={showError || undefined}
+                  aria-describedby={showError ? errorId : undefined}
+                  onChange={(e) =>
+                    setCustomAnswers((current) => ({ ...current, [q.id]: e.target.value }))
+                  }
                 />
               )}
             </label>
-            {q.options?.some((option) => option.description) ? (
-              <ul className="thread-question-options" aria-label="Answer descriptions">
-                {q.options.map((option) => (
-                  <li key={option.label}>
-                    <strong>{option.label}</strong>
-                    {option.description ? <span>{option.description}</span> : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        ))
+          ) : null
+          const prompt = (
+            <>
+              {q.question}
+              {q.required === false ? (
+                <span className="thread-question-optional"> (optional)</span>
+              ) : null}
+            </>
+          )
+          return (
+            <div className="thread-question-card" key={q.id}>
+              {q.multiple && q.options?.length ? (
+                <fieldset
+                  className="question thread-question-multiple"
+                  disabled={disabled}
+                  aria-describedby={showError ? errorId : undefined}
+                >
+                  <legend>
+                    {q.header ? <strong>{q.header}</strong> : null}
+                    {prompt}
+                  </legend>
+                  {q.options.map((option, optionIndex) => {
+                    const value = questionOptionValue(option)
+                    return (
+                      <label className="thread-question-choice" key={optionIndex}>
+                        <input
+                          type="checkbox"
+                          checked={answers[q.id]?.includes(value) || false}
+                          onChange={(e) =>
+                            setAnswers((current) => ({
+                              ...current,
+                              [q.id]: e.target.checked
+                                ? [...(current[q.id] || []), value]
+                                : (current[q.id] || []).filter((entry) => entry !== value),
+                            }))
+                          }
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          {option.description ? <small>{option.description}</small> : null}
+                        </span>
+                      </label>
+                    )
+                  })}
+                  {allowsOther ? (
+                    <label className="thread-question-choice">
+                      <input
+                        type="checkbox"
+                        checked={isCustom}
+                        onChange={(e) =>
+                          setCustomQuestions((current) => ({
+                            ...current,
+                            [q.id]: e.target.checked,
+                          }))
+                        }
+                      />
+                      <span>Other answer</span>
+                    </label>
+                  ) : null}
+                </fieldset>
+              ) : (
+                <label className="question" htmlFor={inputId}>
+                  {q.header ? <strong>{q.header}</strong> : null}
+                  <span>{prompt}</span>
+                  {q.options?.length || q.inputType === 'boolean' ? (
+                    <select
+                      id={inputId}
+                      disabled={disabled}
+                      value={isCustom ? otherValue : (answers[q.id]?.[0] ?? emptyValue)}
+                      aria-invalid={showError || undefined}
+                      aria-describedby={showError ? errorId : undefined}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        setCustomQuestions((current) => ({
+                          ...current,
+                          [q.id]: value === otherValue,
+                        }))
+                        setAnswers((current) => ({
+                          ...current,
+                          [q.id]: value === emptyValue || value === otherValue ? [] : [value],
+                        }))
+                      }}
+                    >
+                      <option value={emptyValue}>
+                        {q.required === false ? 'Leave unanswered' : 'Choose an answer'}
+                      </option>
+                      {q.options?.length ? (
+                        q.options.map((option, optionIndex) => (
+                          <option key={optionIndex} value={questionOptionValue(option)}>
+                            {option.label}
+                            {option.description ? ` — ${option.description}` : ''}
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="true">Yes</option>
+                          <option value="false">No</option>
+                        </>
+                      )}
+                      {allowsOther ? <option value={otherValue}>Other answer</option> : null}
+                    </select>
+                  ) : !q.isSecret && (!q.inputType || q.inputType === 'text') ? (
+                    <textarea
+                      id={inputId}
+                      disabled={disabled}
+                      rows={3}
+                      placeholder="Your answer"
+                      value={answers[q.id]?.[0] || ''}
+                      aria-invalid={showError || undefined}
+                      aria-describedby={showError ? errorId : undefined}
+                      onChange={(e) => setAnswer(e.target.value)}
+                    />
+                  ) : (
+                    <input
+                      id={inputId}
+                      disabled={disabled}
+                      placeholder="Your answer"
+                      type={
+                        q.isSecret
+                          ? 'password'
+                          : q.inputType === 'number' || q.inputType === 'integer'
+                            ? 'number'
+                            : 'text'
+                      }
+                      step={
+                        q.inputType === 'integer' ? 1 : q.inputType === 'number' ? 'any' : undefined
+                      }
+                      autoComplete={q.isSecret ? 'off' : undefined}
+                      value={answers[q.id]?.[0] || ''}
+                      aria-invalid={showError || undefined}
+                      aria-describedby={showError ? errorId : undefined}
+                      onChange={(e) => setAnswer(e.target.value)}
+                    />
+                  )}
+                </label>
+              )}
+              {q.allowEmpty ? (
+                <label className="thread-question-choice">
+                  <input
+                    type="checkbox"
+                    disabled={disabled}
+                    checked={
+                      Object.hasOwn(answers, q.id) &&
+                      (q.multiple
+                        ? answers[q.id].length === 0
+                        : answers[q.id].length === 1 && answers[q.id][0] === '') &&
+                      !isCustom
+                    }
+                    onChange={(e) => {
+                      setCustomQuestions((current) => ({ ...current, [q.id]: false }))
+                      setAnswers((current) => {
+                        const next = { ...current }
+                        if (e.target.checked) next[q.id] = q.multiple ? [] : ['']
+                        else delete next[q.id]
+                        return next
+                      })
+                    }}
+                  />
+                  <span>
+                    {q.multiple ? 'Select none' : 'Use an empty answer'} · {q.question}
+                  </span>
+                </label>
+              ) : null}
+              {customInput}
+              {!q.multiple && q.options?.some((option) => option.description) ? (
+                <ul className="thread-question-options" aria-label="Answer descriptions">
+                  {q.options.map((option, optionIndex) => (
+                    <li key={optionIndex}>
+                      <strong>{option.label}</strong>
+                      {option.description ? <span>{option.description}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {showError ? (
+                <p id={errorId} className="thread-approval-error" role="alert">
+                  {fieldError}
+                </p>
+              ) : null}
+            </div>
+          )
+        })
       ) : (
-        <pre>{event.text}</pre>
+        <>
+          {event.text &&
+          !presentation.fields.length &&
+          !presentation.textIsJSON &&
+          !presentation.fields.some((field) => field.text === event.text) ? (
+            <p className="thread-approval-context">{event.text}</p>
+          ) : null}
+          {event.text &&
+          (presentation.textIsJSON ||
+            (presentation.fields.length > 0 &&
+              !presentation.fields.some((field) => field.text === event.text))) ? (
+            <details className="thread-approval-provider-details">
+              <summary>Full provider request</summary>
+              <pre>{event.text}</pre>
+            </details>
+          ) : null}
+          {presentation.fields.length ? (
+            <dl className="thread-approval-details">
+              {presentation.fields.map((field) => (
+                <div key={field.label}>
+                  <dt>{field.label}</dt>
+                  <dd>{field.text}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+          {presentation.permissionsRequest ? (
+            <p className="thread-approval-context">
+              Allowing this request grants the displayed permissions for this turn.
+            </p>
+          ) : null}
+          {presentation.urlRequest ? (
+            <div className="thread-approval-url">
+              <p>
+                Open the link to complete the provider request, then confirm when you are finished.
+              </p>
+              {presentation.url ? (
+                <a href={presentation.url} target="_blank" rel="noopener noreferrer">
+                  Open requested link · {presentation.rawURL}
+                </a>
+              ) : (
+                <>
+                  <p role="alert">The provider did not supply a valid HTTP or HTTPS link.</p>
+                  {presentation.rawURL ? <pre>{presentation.rawURL}</pre> : null}
+                </>
+              )}
+              <label className="thread-question-choice">
+                <input
+                  type="checkbox"
+                  disabled={disabled || !presentation.url}
+                  checked={urlCompleted}
+                  onChange={(e) => setURLCompleted(e.target.checked)}
+                />
+                <span>I completed this request in the browser</span>
+              </label>
+            </div>
+          ) : null}
+        </>
       )}
       {error ? (
         <p className="thread-approval-error" role="alert">
@@ -422,18 +724,29 @@ export function ApprovalCard({
         </p>
       ) : null}
       <div className="approval-actions">
-        <button className="button secondary" disabled={loading} onClick={() => void respond(false)}>
+        <button
+          className="button secondary"
+          disabled={disabled}
+          onClick={() => void respond(false)}
+        >
           Decline
         </button>
         <button
           className="button primary"
-          disabled={
-            loading ||
-            (event.type === 'question' && event.questions?.some((q) => !answers[q.id]?.[0]))
-          }
+          disabled={cannotAccept}
           onClick={() => void respond(true)}
         >
-          {loading ? 'Sending…' : event.type === 'question' ? 'Send answers' : 'Allow once'}
+          {loading
+            ? 'Sending…'
+            : submitted
+              ? 'Response sent'
+              : event.type === 'question'
+                ? 'Send answers'
+                : presentation.urlRequest
+                  ? 'Confirm completed'
+                  : presentation.permissionsRequest
+                    ? 'Allow for this turn'
+                    : 'Allow once'}
         </button>
       </div>
     </div>

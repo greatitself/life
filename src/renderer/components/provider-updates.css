@@ -1,0 +1,120 @@
+.provider-updates-modal {
+  max-width: 620px;
+}
+.provider-updates-machine {
+  margin: 20px 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.provider-updates-list {
+  display: grid;
+  gap: 12px;
+}
+.provider-update-card {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.provider-update-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.provider-update-heading h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+.provider-update-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.provider-update-status.available {
+  color: var(--accent);
+}
+.provider-update-versions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 18px 0;
+}
+.provider-update-versions dt {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.provider-update-versions dd {
+  margin: 0;
+  color: var(--text-strong);
+  font: 13px var(--mono);
+  overflow-wrap: anywhere;
+}
+.provider-update-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 10px;
+}
+.provider-update-footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  font-size: 11px;
+  text-underline-offset: 3px;
+}
+.provider-update-warning,
+.provider-updates-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.provider-update-warning {
+  margin: 0 0 12px;
+}
+.provider-updates-help {
+  margin: 16px 0;
+}
+.provider-updates-button {
+  position: relative;
+}
+.provider-updates-button.has-updates {
+  color: var(--accent);
+}
+.provider-updates-count {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--bg);
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 9px;
+  font-weight: 600;
+}
+@media (max-width: 480px) {
+  .provider-update-card {
+    padding: 14px;
+  }
+  .provider-update-status {
+    width: 100%;
+    margin-left: 31px;
+  }
+}

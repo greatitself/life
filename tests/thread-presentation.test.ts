@@ -4,6 +4,7 @@ import {
   activityAnchor,
   activitySummary,
   completedTurnResponse,
+  createTurnGroupProjector,
   groupThreadTurns,
   messagePhaseLabel,
   outputPreview,
@@ -11,6 +12,8 @@ import {
   previewNavigableMessages,
   subagentPresentation,
   threadOutputSequence,
+  threadHasRunningChildren,
+  threadTurnStartedAt,
   toolOutputSections,
 } from '../src/renderer/thread-presentation'
 
@@ -24,6 +27,25 @@ function message(
 }
 
 describe('thread output presentation', () => {
+  it('keeps Stop available for background children after the parent has finished', () => {
+    const parent = message('parent', 'assistant', 1, { status: 'running' })
+    expect(threadHasRunningChildren({ messages: [parent], pending: [] })).toBe(false)
+    for (const child of [
+      message('child', 'tool', 1, { agentId: 'worker', status: 'running' }),
+      message('spawn', 'tool', 1, { kind: 'subagent', status: 'initializing' }),
+    ]) {
+      expect(threadHasRunningChildren({ messages: [parent, child], pending: [] })).toBe(true)
+      expect(
+        threadHasRunningChildren({ messages: [{ ...child, status: 'interrupted' }], pending: [] }),
+      ).toBe(false)
+    }
+    expect(
+      threadHasRunningChildren({
+        messages: [],
+        pending: [{ sessionId: 'parent', type: 'approval', agentId: 'worker' }],
+      }),
+    ).toBe(true)
+  })
   it('replaces completed Codex activity with its parent final response without changing stored history', () => {
     const user = message('user', 'user', 1, { finishStatus: 'completed' })
     const progress = message('progress', 'assistant', 1, { phase: 'commentary' })
@@ -52,6 +74,28 @@ describe('thread output presentation', () => {
     expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
   })
 
+  it('uses a current unsuccessful or uncertain turn state before an older request completion marker', () => {
+    const group = groupThreadTurns([
+      message('user', 'user', 1, { finishStatus: 'completed' }),
+      message('final', 'assistant', 1, { phase: 'final_answer' }),
+    ])[0]
+    for (const status of ['running', 'reconnecting', 'unknown', 'failed', 'interrupted']) {
+      expect(completedTurnResponse(group, false, status)).toBeUndefined()
+    }
+    expect(completedTurnResponse(group, false, 'completed')?.id).toBe('final')
+  })
+
+  it('shows retry errors during work and returns to the final response after recovery succeeds', () => {
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    const group = groupThreadTurns([
+      message('user', 'user', 1, { finishStatus: 'completed' }),
+      message('retry', 'error', 1, { details: { recoverable: true } }),
+      final,
+    ])[0]
+    expect(completedTurnResponse(group, true, 'running')).toBeUndefined()
+    expect(completedTurnResponse(group, false, 'completed')).toBe(final)
+  })
+
   it('does not mistake a progress update or a child response for the final result', () => {
     const group = groupThreadTurns([
       message('user', 'user', 1, { finishStatus: 'completed' }),
@@ -59,6 +103,51 @@ describe('thread output presentation', () => {
       message('child', 'assistant', 1, { phase: 'final_answer', parentItemId: 'child-task' }),
     ])[0]
     expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
+  })
+
+  it('keeps independent child work and unresolved requests visible after the parent answers', () => {
+    const user = message('user', 'user', 1, { finishStatus: 'completed' })
+    const final = message('final', 'assistant', 1, { phase: 'final_answer' })
+    for (const activity of [
+      message('child-command', 'tool', 1, { agentId: 'child', status: 'running' }),
+      message('child-start', 'tool', 1, { kind: 'subagent', status: 'initializing' }),
+      message('approval', 'tool', 1, { kind: 'event', status: 'waiting' }),
+    ]) {
+      const group = groupThreadTurns([user, final, activity])[0]
+      expect(completedTurnResponse(group, false, 'completed')).toBeUndefined()
+      activity.status = 'completed'
+      expect(completedTurnResponse(group, false, 'completed')).toBe(final)
+    }
+  })
+
+  it('uses the original turn request for elapsed time after steering and across later turns', () => {
+    const original = message('original', 'user', 1, { createdAt: 10 })
+    const steering = message('steering', 'user', 1, { submission: 'steering', createdAt: 90 })
+    const next = message('next', 'user', 2, { createdAt: 100 })
+    expect(threadTurnStartedAt({ turn: 1, messages: [original, steering] })).toBe(10)
+    expect(threadTurnStartedAt({ turn: 2, messages: [original, steering, next] })).toBe(100)
+    expect(threadTurnStartedAt({ turn: 3, messages: [original, steering, next] })).toBeUndefined()
+  })
+
+  it('reuses unaffected turn props while streaming and refreshes a delayed child update', () => {
+    const project = createTurnGroupProjector()
+    const request = message('request', 'user', 1)
+    const child = message('child', 'tool', 1, { agentId: 'child', status: 'running' })
+    const next = message('next', 'user', 2)
+    const response = message('response', 'assistant', 2)
+    const original = project([request, child, next, response])
+    const streamed = project([request, child, next, { ...response, text: 'More output' }])
+    expect(streamed[0]).toBe(original[0])
+    expect(streamed[1]).not.toBe(original[1])
+    const childFinished = project([
+      request,
+      { ...child, status: 'completed' },
+      next,
+      streamed[1].messages[0],
+    ])
+    expect(childFinished[0]).not.toBe(streamed[0])
+    expect(childFinished[1]).toBe(streamed[1])
+    expect(project([request, child])[0]).not.toBe(childFinished[0])
   })
 
   it('keeps every human request and the final response navigable after activity is hidden', () => {

@@ -1507,6 +1507,10 @@ export function activityLabel(activity: ThreadActivity): string {
     await page.evaluate(() => window.relay.customization.apply({ theme: 'dark' }))
     checks.push('neutral dark and light themes with current reference layout screenshots')
 
+    const { runUsageChecks } = require('./helpers/desktop-usage-steps.cjs')
+    phase = 'native provider usage, cumulative totals and account limits'
+    await runUsageChecks(context)
+
     const { runStudioChecks } = require('./helpers/desktop-studio-steps.cjs')
     phase = 'dedicated Studio settings, extensions, compile, repair and sharing'
     await runStudioChecks(context)

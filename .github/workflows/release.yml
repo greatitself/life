@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      windows_baselines: ${{ steps.versions.outputs.windows_baselines }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,9 +40,20 @@ jobs:
       - name: Record release source
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Check out maintained release baseline selection
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-verification
+          sparse-checkout: scripts/release-baselines.cjs
+          sparse-checkout-cone-mode: false
+      - name: Select latest preceding Windows upgrade baseline
+        id: versions
+        run: node .release-verification/scripts/release-baselines.cjs package.json >> "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run format:check
       - run: npm run build
       - run: npx playwright install chromium --with-deps
       - run: npm run test:recovery
@@ -50,8 +62,26 @@ jobs:
       - run: node tests/studio-lifecycle-smoke.cjs
       - run: node tests/app-live-controls-smoke.cjs
       - run: node tests/app-live-controls-smoke.cjs --presentation
+      - name: Verify native history hydration
+        run: |
+          if node -e "process.exit(require('node:fs').readFileSync('tests/app-live-controls-smoke.cjs', 'utf8').includes('--history-hydration') ? 0 : 1)"; then
+            node tests/app-live-controls-smoke.cjs --history-hydration
+          fi
+      - name: Verify provider utilities in the desktop interface
+        run: |
+          if node -e "process.exit(require('node:fs').readFileSync('tests/app-live-controls-smoke.cjs', 'utf8').includes('--provider-utilities') ? 0 : 1)"; then
+            node tests/app-live-controls-smoke.cjs --provider-utilities
+          fi
       - run: node tests/run-selectors-smoke.cjs
       - run: node tests/research-method-ui-smoke.cjs
+      - run: node tests/provider-request-ui-smoke.cjs
+        if: hashFiles('tests/provider-request-ui-smoke.cjs') != ''
+      - run: node tests/conversation-scroll-smoke.cjs
+        if: hashFiles('tests/conversation-scroll-smoke.cjs') != ''
+      - run: node tests/provider-updates-ui-smoke.cjs
+        if: hashFiles('tests/provider-updates-ui-smoke.cjs') != ''
+      - run: node tests/usage-smoke.cjs
+        if: hashFiles('tests/usage-smoke.cjs') != ''
       - run: xvfb-run -a npm run test:desktop
 
   build:
@@ -97,25 +127,6 @@ jobs:
           name: life-windows-customization-proof
           path: output/source-runtime-proof.json
           if-no-files-found: error
-      - name: Check out maintained Windows verification
-        if: matrix.platform == 'windows-x64'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          path: .release-verification
-          sparse-checkout: tests/windows-upgrade.ps1
-          sparse-checkout-cone-mode: false
-      - name: Verify Windows upgrades from Life 0.1.0, 0.5.1, 0.6.0, 0.7.0 and 0.8.0
-        if: matrix.platform == 'windows-x64'
-        shell: pwsh
-        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @('0.1.0','0.5.1','0.6.0','0.7.0','0.8.0')
-      - name: Save Windows upgrade proof
-        if: matrix.platform == 'windows-x64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-windows-upgrade-proof
-          path: output/windows-upgrade-proof.json
-          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: life-${{ matrix.platform }}
@@ -128,8 +139,44 @@ jobs:
             release/*.blockmap
             release/latest*.yml
 
-  publish:
+  windows-upgrade:
     needs: [verify, build]
+    if: needs.verify.outputs.windows_baselines != '[]'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: ${{ fromJSON(needs.verify.outputs.windows_baselines) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-windows-x64
+          path: release
+      - name: Check out maintained Windows verification
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-verification
+          sparse-checkout: tests/windows-upgrade.ps1
+          sparse-checkout-cone-mode: false
+      - name: Verify Windows upgrade from Life ${{ matrix.baseline }}
+        shell: pwsh
+        env:
+          BASELINE_VERSION: ${{ matrix.baseline }}
+        run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @($env:BASELINE_VERSION)
+      - name: Save Windows upgrade proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-upgrade-proof-${{ matrix.baseline }}
+          path: output/windows-upgrade-proof.json
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, build, windows-upgrade]
+    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' && (needs.windows-upgrade.result == 'success' || needs.windows-upgrade.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,10 +185,28 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.source_sha }}
           path: checkout
+      - name: Check out maintained release assembly
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-verification
+          sparse-checkout: |
+            scripts/prepare-release.cjs
+            package.json
+            package-lock.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .release-verification/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: .release-verification
       - uses: actions/download-artifact@v4
         with:
-          path: installers
-          merge-multiple: true
+          path: artifacts
+      - name: Validate installers and merge architecture metadata
+        run: node .release-verification/scripts/prepare-release.cjs artifacts installers "${LIFE_RELEASE_TAG#v}"
       - name: Publish installers and checksums
         env:
           GH_TOKEN: ${{ github.token }}

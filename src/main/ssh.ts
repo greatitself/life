@@ -32,6 +32,14 @@ export function remotePath(path: string) {
   if (path === '~') return '"$HOME"'
   return path.startsWith('~/') ? '"$HOME"/' + shellQuote(path.slice(2)) : shellQuote(path)
 }
+const PROVIDER_VERSION_COMMAND =
+  'if command -v codex >/dev/null 2>&1; then if life_codex_version=$(codex --version 2>/dev/null); then printf "CODEX=%s\\n" "$life_codex_version"; else printf "CODEX=unknown\\n"; fi; else printf "CODEX=missing\\n"; fi; if command -v claude >/dev/null 2>&1; then if life_claude_version=$(claude --version 2>/dev/null); then printf "CLAUDE=%s\\n" "$life_claude_version"; else printf "CLAUDE=unknown\\n"; fi; else printf "CLAUDE=missing\\n"; fi'
+
+function providerVersions(output: string): Pick<ConnectionState, 'codex' | 'claude'> {
+  const version = (name: string) =>
+    output.match(new RegExp('^' + name + '=(.*)$', 'm'))?.[1]?.trim()
+  return { codex: version('CODEX'), claude: version('CLAUDE') }
+}
 export class SSHConnection extends EventEmitter {
   state: ConnectionState = { status: 'disconnected' }
   readonly forwarding: PortForwarding
@@ -45,6 +53,7 @@ export class SSHConnection extends EventEmitter {
   private workspaceGeneration = 0
   private workspaceSelection?: AbortController
   private rendererGeneration = 0
+  private providerVersionGeneration = 0
   private reconnect?: {
     input: ConnectInput
     workspace?: string
@@ -367,13 +376,10 @@ export class SSHConnection extends EventEmitter {
       if (this.client !== client) throw new Error('SSH connection cancelled')
       if (!home.startsWith('/'))
         throw new Error('The remote home must resolve to an absolute POSIX path')
-      const versions = await this.exec(
-        'printf "CODEX="; if command -v codex >/dev/null 2>&1; then codex --version; else printf "missing\\n"; fi; printf "CLAUDE="; if command -v claude >/dev/null 2>&1; then claude --version; else printf "missing\\n"; fi',
-        { rendererOwned: false },
+      const versions = providerVersions(
+        await this.exec(PROVIDER_VERSION_COMMAND, { rendererOwned: false }),
       )
       if (this.client !== client) throw new Error('SSH connection cancelled')
-      const version = (name: string) =>
-        versions.match(new RegExp('^' + name + '=(.*)$', 'm'))?.[1]?.trim()
       const sftp = await this.remoteRequest<SFTPWrapper>(
         'Opening remote file access',
         (done) => client.sftp(done),
@@ -462,8 +468,8 @@ export class SSHConnection extends EventEmitter {
         home,
         lastWorkspace,
         ...(workspace ? { workspace } : {}),
-        codex: version('CODEX'),
-        claude: version('CLAUDE'),
+        ...versions,
+        providerVersionsRevision: ++this.providerVersionGeneration,
       })
       this.forwarding.start(profile.port)
       return this.state
@@ -478,6 +484,28 @@ export class SSHConnection extends EventEmitter {
       this.update({ status: 'disconnected', profile, error: message })
       throw new Error(message)
     }
+  }
+  /** Refreshes read-only CLI discovery on the machine, independent of project selection. */
+  async refreshProviderVersions(): Promise<ConnectionState> {
+    const client = this.client
+    if (!client || this.state.status !== 'connected') throw new Error('Connect to a machine first')
+    const generation = ++this.providerVersionGeneration
+    const versions = providerVersions(
+      await this.exec(PROVIDER_VERSION_COMMAND, {
+        rendererOwned: false,
+        timeoutMs: 10000,
+        maxOutputBytes: 16000,
+      }),
+    )
+    if (
+      this.client !== client ||
+      this.state.status !== 'connected' ||
+      generation !== this.providerVersionGeneration
+    ) {
+      throw new Error('The connected machine changed while checking provider versions')
+    }
+    this.update({ ...this.state, ...versions, providerVersionsRevision: generation })
+    return this.state
   }
   private scheduleReconnect() {
     const reconnect = this.reconnect

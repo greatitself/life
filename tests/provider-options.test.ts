@@ -66,6 +66,17 @@ describe('provider capabilities and extensible request validation', () => {
     expect(claudeModelOption({ value: 'default' })).toMatchObject({ id: '', isDefault: true })
   })
 
+  it('does not offer effort, Fast or Auto when the Claude catalogue omits support', () => {
+    expect(claudeModelOption({ value: 'haiku', displayName: 'Haiku' })).toMatchObject({
+      supportedReasoningEfforts: [],
+      serviceTiers: [{ id: 'default', name: 'Standard' }],
+      supportsAutoMode: false,
+    })
+    expect(claudeModelOption({ value: 'opus', supportsAutoMode: true })).toMatchObject({
+      supportsAutoMode: true,
+    })
+  })
+
   it('accepts generic provider fields while protecting conversation transport and project scope', () => {
     const input = {
       sessionId: 'thread',

@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, protocol } fro
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { Store } from './store'
+import { ConversationStore } from './conversation-store'
 import { SSHConnection } from './ssh'
 import { Agents } from './agents'
 import {
@@ -35,6 +36,7 @@ import { canonicalPublicGistURL } from '../shared/extension-sharing'
 import { RendererDocumentAdmission, RendererRecoveryBudget } from './renderer-recovery'
 import { ResearchDocuments } from './research-documents'
 import { isTrustedRendererSender } from './renderer-ipc'
+import { ProviderUpdateController } from './provider-updates'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
@@ -49,9 +51,11 @@ let window: BrowserWindow | null = null
 let ssh: SSHConnection
 let customization: CustomizationStore
 let updates: UpdatesService
+let providerUpdates: ProviderUpdateController | undefined
 let extensions: ExtensionStore
 let sourceCode: SourceCodeStore
 let hostHistory: AgentHistory | undefined
+let conversations: ConversationStore | undefined
 let sourceStartupTimer: ReturnType<typeof setTimeout> | undefined
 let sourceReloadTimer: ReturnType<typeof setTimeout> | undefined
 let quitting = false
@@ -74,6 +78,30 @@ async function cancelRendererWork() {
   cancelRendererSessions()
   hostHistory?.cancelAll()
   await requests
+  await flushConversationHistory(window)
+  await conversations?.settled()
+}
+
+async function flushConversationHistory(owner: BrowserWindow | null): Promise<void> {
+  if (!owner || owner.isDestroyed()) return
+  const contents = owner.webContents
+  if (contents.isDestroyed() || contents.isCrashed()) return
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  try {
+    // A frozen customized renderer cannot block native recovery indefinitely.
+    await Promise.race([
+      contents.executeJavaScript(
+        'typeof window.__lifeFlushConversationHistory === "function" ? window.__lifeFlushConversationHistory() : undefined',
+      ),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, 3_000)
+      }),
+    ])
+  } catch {
+    // The bounded periodic checkpoint remains available after renderer death.
+  } finally {
+    if (deadline !== undefined) clearTimeout(deadline)
+  }
 }
 const ownsInstance = app.requestSingleInstanceLock()
 if (!ownsInstance) app.quit()
@@ -156,6 +184,7 @@ const send = (channel: string, data: unknown) => {
 async function init() {
   const store = new Store(app.getPath('userData'))
   await store.init()
+  conversations = new ConversationStore(app.getPath('userData'))
   customization = new CustomizationStore(app.getPath('userData'), (state) => {
     nativeTheme.themeSource = state.config.theme
     ssh?.forwarding.setEnabled(state.config.autoPortForward)
@@ -167,11 +196,22 @@ async function init() {
   ssh = new SSHConnection(store)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
+  providerUpdates = new ProviderUpdateController(
+    () => ssh.state,
+    (state) => send('provider-updates:state', state),
+    {
+      cachePath: join(app.getPath('userData'), 'provider-updates-cache.json'),
+      refreshInstalled: () => ssh.refreshProviderVersions(),
+    },
+  )
   hostHistory = new AgentHistory(ssh)
   cancelRendererSessions = () =>
     agents.close('Life restarted its interface. Send a message to continue this thread.')
   const extensionSharing = new ExtensionSharing()
-  ssh.on('state', (state) => send('connection:state', state))
+  ssh.on('state', (state) => {
+    send('connection:state', state)
+    providerUpdates?.connectionChanged()
+  })
   ssh.on('host-key', (request) => send('connection:host-key', request))
   ssh.on('terminal', (data) => send('terminal:data', data))
   ssh.on('forwarding-state', (state) => send('forwarding:state', state))
@@ -383,6 +423,13 @@ async function init() {
     )
   })
   handle('profiles:list', () => store.list())
+  handle('conversations:load', () => conversations!.load())
+  handle('conversations:save', (threads, savedAt) =>
+    conversations!.save(
+      z.array(z.unknown()).parse(threads),
+      savedAt === undefined ? undefined : z.number().int().min(0).parse(savedAt),
+    ),
+  )
   handle('app:info', () => ({
     name: 'Life',
     version: app.getVersion(),
@@ -421,7 +468,11 @@ async function init() {
   handle('updates:get', () => updates.getState())
   handle('updates:check', () => updates.check())
   handle('updates:download', () => updates.download())
-  handle('updates:install', () => updates.install())
+  handle('updates:install', () => {
+    if (agents.hasRunningSessions())
+      throw new Error('Finish or stop active agents before restarting Life to install the update.')
+    updates.install()
+  })
   handle('customization:get', () => customization.get())
   handle('customization:apply', (patch) => customization.apply(patch))
   handle('customization:undo', () => customization.undo())
@@ -476,6 +527,20 @@ async function init() {
     ),
   )
   handle('agent:models', (provider) => agents.models(z.enum(['codex', 'claude']).parse(provider)))
+  handle('agent:usage', (provider) => agents.usage(z.enum(['codex', 'claude']).parse(provider)))
+  handle('provider-updates:get', () => providerUpdates!.getState())
+  handle('provider-updates:check', async () => {
+    const expected = ssh.state
+    if (expected.status === 'connected') {
+      try {
+        await ssh.refreshProviderVersions()
+      } catch (error) {
+        providerUpdates!.markInstalledCheckFailed(error, expected)
+        throw error
+      }
+    }
+    return providerUpdates!.check(true)
+  })
   handle('files:list', (path) => ssh.list(z.string().optional().parse(path)))
   handle('files:read', (path) => ssh.read(z.string().parse(path)))
   handle('files:git', () => ssh.git())
@@ -620,6 +685,20 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
     },
   })
   const owner = window
+  let closeReady = false
+  let closePending = false
+  owner.on('close', (event) => {
+    if (closeReady || quitting) return
+    event.preventDefault()
+    if (closePending || owner !== window || owner.isDestroyed()) return
+    closePending = true
+    void flushConversationHistory(owner)
+      .then(() => conversations?.settled())
+      .finally(() => {
+        closeReady = true
+        if (!owner.isDestroyed()) owner.close()
+      })
+  })
   if (extensionRecovery) extensionRecoveryStartups.add(owner)
   const admission = new RendererDocumentAdmission()
   rendererAdmissions.set(owner, admission)
@@ -807,13 +886,21 @@ app.on('before-quit', (event) => {
   const rendererRequests = ssh?.cancelRendererRequests()
   customization?.close()
   updates?.dispose()
+  providerUpdates?.dispose()
   clearTimeout(sourceStartupTimer)
   clearTimeout(sourceReloadTimer)
   if (extensions) {
     event.preventDefault()
     quitting = true
-    void Promise.allSettled([rendererRequests, extensions.close(), sourceCode?.close()]).finally(
-      () => app.quit(),
-    )
+    void flushConversationHistory(window)
+      .then(() =>
+        Promise.allSettled([
+          rendererRequests,
+          extensions.close(),
+          sourceCode?.close(),
+          conversations?.settled(),
+        ]),
+      )
+      .finally(() => app.quit())
   }
 })

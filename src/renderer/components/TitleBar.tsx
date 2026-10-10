@@ -25,6 +25,7 @@ type TitleBarProps = {
   environment?: ActiveEnvironmentProps
   studioOpen?: boolean
   onStudioToggle?: () => void
+  utilityActions?: ReactNode
 }
 
 function WindowGlyph({ action }: { action: 'minimize' | 'maximize' | 'restore' | 'close' }) {
@@ -85,6 +86,7 @@ export function TitleBar({
   environment,
   studioOpen = false,
   onStudioToggle,
+  utilityActions,
   researchTitle = 'Map',
   workspaceTitle = 'Agents',
 }: TitleBarProps) {
@@ -158,6 +160,7 @@ export function TitleBar({
         <div className="titlebar-tools">
           {version ? <span className="version">v{version.replace(/^v/, '')}</span> : null}
           <div className="titlebar-action-slot titlebar-leading-actions" ref={leadingActionsRef} />
+          {utilityActions}
           {onStudioToggle ? (
             <button
               type="button"

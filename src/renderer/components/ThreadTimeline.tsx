@@ -8,7 +8,7 @@ import { ProviderIcon } from './Icons'
 import { ThreadActivityRows } from './ThreadActivityRows'
 import {
   completedTurnResponse,
-  groupThreadTurns,
+  createTurnGroupProjector,
   threadOutputSequence,
   type TurnGroup,
 } from '../thread-presentation'
@@ -25,6 +25,31 @@ function duration(milliseconds: number): string {
       : `${seconds}s`
 }
 
+function WorkTiming({ started, ended, busy }: { started?: number; ended?: number; busy: boolean }) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!busy || !started) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [busy, started])
+  const elapsed =
+    started && (busy || ended)
+      ? duration(Math.max(0, (busy ? Math.max(now, started) : ended!) - started))
+      : undefined
+  return (
+    <span>
+      {busy
+        ? elapsed
+          ? `Working for ${elapsed}`
+          : 'Working'
+        : elapsed
+          ? `Worked for ${elapsed}`
+          : 'Activity'}
+    </span>
+  )
+}
+
 function WorkActivity({
   group,
   busy,
@@ -36,27 +61,10 @@ function WorkActivity({
   provider: Thread['provider']
   turnStatus?: string
 }) {
-  const [now, setNow] = useState(Date.now)
   const started = group.user?.createdAt
   const ended = group.user?.finishedAt
-  useEffect(() => {
-    if (!busy || !started) return
-    setNow(Date.now())
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [busy, started])
   const activity = threadOutputSequence(group)
-  const elapsed =
-    started && (busy || ended)
-      ? duration(Math.max(0, (busy ? Math.max(now, started) : ended!) - started))
-      : undefined
-  const label = busy
-    ? elapsed
-      ? `Working for ${elapsed}`
-      : 'Working'
-    : elapsed
-      ? `Worked for ${elapsed}`
-      : 'Activity'
+  const elapsed = started && ended ? duration(Math.max(0, ended - started)) : undefined
   const files = useMemo(
     () =>
       streamlinedWorkspace ? [] : reportedFileChanges(group.messages, group.user?.fileChanges),
@@ -87,7 +95,7 @@ function WorkActivity({
             >
               <ProviderIcon provider={provider} brand size={16} />
             </span>
-            <span>{label}</span>
+            <WorkTiming started={started} ended={ended} busy={busy} />
             {group.user?.finishStatus === 'failed' || group.user?.finishStatus === 'interrupted' ? (
               <small>{group.user.finishStatus === 'failed' ? 'Failed' : 'Interrupted'}</small>
             ) : null}
@@ -202,36 +210,28 @@ function ChangedFiles({ files, source }: { files: ThreadFileChange[]; source: bo
   )
 }
 
-const TimelineTurn = memo(
-  function TimelineTurn({
-    group,
-    busy,
-    provider,
-    turnStatus,
-  }: {
-    group: TurnGroup
-    busy: boolean
-    provider: Thread['provider']
-    turnStatus?: string
-  }) {
-    return (
-      <section className="thread-timeline-turn" aria-label={`Turn ${group.turn || 1}`}>
-        {group.user ? <MessageView message={group.user} provider={provider} /> : null}
-        <WorkActivity group={group} busy={busy} provider={provider} turnStatus={turnStatus} />
-      </section>
-    )
-  },
-  (previous, next) =>
-    previous.busy === next.busy &&
-    previous.provider === next.provider &&
-    previous.turnStatus === next.turnStatus &&
-    previous.group.user === next.group.user &&
-    previous.group.messages.length === next.group.messages.length &&
-    previous.group.messages.every((message, index) => message === next.group.messages[index]),
-)
+const TimelineTurn = memo(function TimelineTurn({
+  group,
+  busy,
+  provider,
+  turnStatus,
+}: {
+  group: TurnGroup
+  busy: boolean
+  provider: Thread['provider']
+  turnStatus?: string
+}) {
+  return (
+    <section className="thread-timeline-turn" aria-label={`Turn ${group.turn || 1}`}>
+      {group.user ? <MessageView message={group.user} provider={provider} /> : null}
+      <WorkActivity group={group} busy={busy} provider={provider} turnStatus={turnStatus} />
+    </section>
+  )
+})
 
 export function ThreadTimeline({ thread }: { thread: Thread }) {
-  const groups = useMemo(() => groupThreadTurns(thread.messages), [thread.messages])
+  const projectTurns = useMemo(createTurnGroupProjector, [])
+  const groups = useMemo(() => projectTurns(thread.messages), [projectTurns, thread.messages])
   return (
     <div className="thread-timeline">
       {groups.map((group) => (

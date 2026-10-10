@@ -1,0 +1,23 @@
+# Life 0.10.0
+
+Life 0.10.0 brings clearer usage, current provider versions, correct native approvals, and more reliable conversations to the Electron desktop workspace. It includes the complete Research interface from the rebuilt 0.9.0 release.
+
+- **Usage across your saved sessions:** Open **Usage** in the header to see native token totals, input/output, cache reads and writes, reasoning, reported context usage, and provider cost estimates. Filter by machine and provider, inspect session/model breakdowns, and return to a conversation. Cumulative snapshots and resumed sessions are deduplicated; unreported costs and incomplete coverage remain visible rather than becoming assumed prices.
+- **Your connected account's limits:** Usage shows provider-reported quota windows, reset times, credits, spend controls, and extra usage where available. It refreshes on opening, periodically while open, and through **Refresh limits**. Account results follow the connected machine; unavailable data is identified explicitly.
+- **Keep remote CLIs current:** **Provider updates** compares installed Codex and Claude Code versions on the selected machine with the latest published releases. Background checks refresh both remote versions and release metadata; **Check for updates** provides an explicit check. Notices identify newer releases, while cached or failed checks remain labeled. Official instructions respect each installation method and release channel.
+- **Correct native requests:** Typed MCP forms, URL confirmations, scoped permission approvals, and Claude multi-select questions use the providers' native responses. Optional fields, explicit empty answers, and exact custom text are preserved. Duplicate submissions are blocked, failed submissions can be retried, and provider cancellation clears pending requests. Secret answers reach the provider unchanged and are redacted from saved history.
+- **Current provider behavior:** Model, reasoning-effort, speed, Auto-mode, and image controls follow discovered provider capabilities. Claude text and reasoning blocks retain earlier output as completion messages arrive. Native retry, compaction, tool progress, and denial events are represented in the conversation. Background child activity keeps its own lifecycle after the parent turn finishes.
+- **History that survives a restart:** Saved conversations now use atomic native checkpoints, with migration from the existing browser cache. Reload, normal quit, and interface recovery wait for pending history writes. Saved snapshots restore after a cold restart; reconciliation retains deliberate deletions and guards deletion while history is loading.
+- **Smoother streaming and reading:** Bounded event batches reduce repeated rendering while preserving event order and promptly delivering approvals and status changes. Agents and Research remember separate conversation positions. Reading earlier messages stays stable when streamed text or images change the layout; sending or choosing the latest message returns to the bottom.
+
+The alignment review used **Codex 0.162.1**, **Claude Code 2.1.296**, and **T3 Code v0.0.45**, including promptless CLI initialization/metadata probes and deterministic protocol/browser regressions. See the [frontier alignment audit](https://github.com/greatitself/life/blob/main/docs/frontier-alignment-v0.10.0.md) for sources, validation scope, and remaining gaps. These checks do not establish paid model inference or complete feature parity with those products.
+
+## Desktop update and verification
+
+Installers are included for Windows x64, Linux x64 (AppImage and Debian), and macOS on Intel and Apple Silicon. Windows and AppImage installations can update through Life's **Updates** controls. Unsigned macOS and Debian installations use the latest installer. **Provider updates** tracks the remote agent CLIs separately from these Life application updates.
+
+- All desktop installers and release notes use one verified source commit. Installer sizes and updater SHA-512 checksums are checked before publication.
+- Intel and Apple Silicon installer entries share one deterministic macOS manifest, preserving both architectures when release artifacts are assembled.
+- Windows CI verifies the upgrade from the latest preceding release, **0.9.0 → 0.10.0**, including the installation identity and preservation of saved connections, history storage, and exported source extensions.
+
+The release includes updater metadata, blockmaps, and SHA-256 checksums. Life remains a desktop application. Existing connections, conversations, Research files, and customizations remain in their data directories when you upgrade. Installers remain unsigned. The exact build source is linked at the end of these release notes.

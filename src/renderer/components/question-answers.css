@@ -1,0 +1,77 @@
+.thread-question-multiple {
+  border: 0;
+  padding: 0;
+  min-width: 0;
+}
+.question textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 68px;
+  color: var(--text);
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: calc(var(--life-font-size, 12px) * 0.91667);
+}
+.thread-approval-provider-details {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.thread-question-multiple legend {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.thread-question-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.thread-question-choice input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+}
+.thread-question-choice > span {
+  display: grid;
+  gap: 3px;
+}
+.thread-question-choice small,
+.thread-question-optional {
+  color: var(--muted);
+}
+.thread-approval-details {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+}
+.thread-approval-details > div {
+  display: grid;
+  gap: 4px;
+}
+.thread-approval-details dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+.thread-approval-details dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.6 var(--mono);
+}
+.thread-approval-context,
+.thread-approval-url {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.thread-approval-url > a {
+  display: block;
+  margin: 10px 0;
+}

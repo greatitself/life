@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   AgentConfigureResult,
   AgentEvent,
+  AgentAttachment,
   AgentQuestion,
   AgentSettingsInput,
   AgentSteerInput,
@@ -10,6 +11,7 @@ import type {
   Provider,
   StartInput,
 } from '../shared/types'
+import type { ProviderUsageSnapshot } from '../shared/usage'
 import { agentProviderOptionsSchema, shellQuote } from '../shared/validation'
 import { claudePermissionMode, codexPermissions } from '../shared/permissions'
 import { SSHConnection } from './ssh'
@@ -19,10 +21,26 @@ import { LIFE_VERSION } from '../shared/version'
 import { stageStudioContext } from './studio-context'
 import { generateProviderTitle } from './provider-titles'
 import { claudeUserContent, codexUserInput } from './agent-attachments'
+import {
+  claudeAdvisoryEvent,
+  claudeLaunchCommand,
+  claudeMetadataControls,
+  claudeRestoresUsageTotals,
+  ClaudeMessageBlocks,
+} from './claude-protocol'
+import {
+  codexApprovalPresentation,
+  codexElicitationQuestions,
+  codexRequestResponse,
+} from './codex-requests'
+import { claudeElicitationQuestions, claudeElicitationResponse } from './claude-requests'
+import { codexUsageSnapshot } from './provider-usage'
+import { normalizeClaudeUsageSnapshot } from './claude-usage'
 
 type DurableChannel = ClientChannel & { transportState?: 'connected' | 'suspended' | 'closed' }
 
 type Wire = Record<string, unknown>
+const claudeMessageBlocks = new WeakMap<object, ClaudeMessageBlocks>()
 const object = (value: unknown): Wire => (value && typeof value === 'object' ? (value as Wire) : {})
 const string = (value: unknown) => (typeof value === 'string' ? value : '')
 const array = (value: unknown): Wire[] => (Array.isArray(value) ? value.map(object) : [])
@@ -77,6 +95,10 @@ export function codexModelOption(model: Wire): ModelOption {
   if (typeof model.defaultServiceTier === 'string')
     result.defaultServiceTier = model.defaultServiceTier
   if (typeof model.isDefault === 'boolean') result.isDefault = model.isDefault
+  if (Array.isArray(model.inputModalities))
+    result.inputModalities = model.inputModalities.filter(
+      (value): value is string => typeof value === 'string',
+    )
   return result
 }
 
@@ -90,12 +112,13 @@ export function claudeModelOption(model: Wire): ModelOption {
     result.supportedReasoningEfforts = model.supportedEffortLevels
       .filter((effort): effort is string => typeof effort === 'string' && Boolean(effort))
       .map((reasoningEffort) => ({ reasoningEffort }))
-  else if (model.supportsEffort === false) result.supportedReasoningEfforts = []
-  if (typeof model.supportsFastMode === 'boolean')
-    result.serviceTiers = [
-      { id: 'default', name: 'Standard' },
-      ...(model.supportsFastMode ? [{ id: 'fast', name: 'Fast' }] : []),
-    ]
+  else result.supportedReasoningEfforts = []
+  result.serviceTiers = [
+    { id: 'default', name: 'Standard' },
+    ...(model.supportsFastMode === true ? [{ id: 'fast', name: 'Fast' }] : []),
+  ]
+  if (typeof model.supportsAutoMode === 'boolean') result.supportsAutoMode = model.supportsAutoMode
+  else result.supportsAutoMode = false
   if (value === 'default') result.isDefault = true
   return result
 }
@@ -111,7 +134,7 @@ interface Session {
   messageId?: string
   streamed: Set<string>
   stderr: string
-  approvals: Map<string, { wireId: unknown; method: string; params: Wire }>
+  approvals: Map<string, { wireId: unknown; method: string; params: Wire; rpc?: RPC }>
   startup?: Promise<void>
   initialization: AbortController
   stopRequested: boolean
@@ -142,6 +165,12 @@ interface Session {
   claudeState?: 'idle' | 'running' | 'requires_action'
   claudeResult?: Wire
   claudeReply?: string
+  claudeFastModeNeedsOptIn?: boolean
+  claudeRestartForSettings?: boolean
+  claudeUsageCallId?: string
+  claudeCodeVersion?: string
+  claudeActiveChildren?: Map<string, { itemId: string; title?: string; parentItemId?: string }>
+  claudeTaskRuns?: Map<string, string>
   phase: 'initializing' | 'startingTurn' | 'running'
 }
 export class Agents {
@@ -150,6 +179,7 @@ export class Agents {
   private codexTransports = new Set<RPC>()
   private codexByMachine = new Map<string, RPC>()
   private codexStartingByMachine = new Map<string, Promise<RPC>>()
+  private codexTransportVersions = new WeakMap<RPC, string>()
   private sessions = new Map<string, Session>()
   private threads = new Map<string, string>()
   private threadTransports = new Map<string, RPC>()
@@ -160,13 +190,25 @@ export class Agents {
   private codexDefaultEfforts = new Map<string, string>()
   private codexDefaultTiers = new Map<string, string | null>()
   private codexDiskConfig?: Wire
+  private codexUsageSnapshots = new WeakMap<RPC, ProviderUsageSnapshot>()
   private codexConfigStarting?: Promise<Wire>
   private claudeModels?: ModelOption[]
   private claudeModelsStarting?: Promise<ModelOption[]>
   private discoveryChannels = new Set<ClientChannel>()
-  private childThreads = new Map<string, { sessionId: string; agentName?: string }>()
+  private childThreads = new Map<
+    string,
+    {
+      sessionId: string
+      agentName?: string
+      rpc: RPC
+      busy: boolean
+      turnId?: string
+      ignoredTurns: Set<string>
+    }
+  >()
   private durableOpening = 0
   private catalogGeneration = 0
+  private catalogIdentity?: string
   constructor(
     private ssh: SSHConnection,
     private emit: (event: AgentEvent) => void,
@@ -206,18 +248,26 @@ export class Agents {
   }
   /** Browser reconnects can restore live turn state without starting or repeating a request. */
   runningSessionEvents(): AgentEvent[] {
-    return [...this.sessions.entries()].flatMap(([sessionId, session]) =>
-      session.busy && !session.stopRequested
-        ? [
-            {
-              sessionId,
-              type: 'status' as const,
-              status: 'running',
-              provider: session.input.provider,
-            },
-          ]
-        : [],
-    )
+    return [...this.sessions.entries()].flatMap(([sessionId, session]) => {
+      if (session.stopRequested) return []
+      const events: AgentEvent[] = session.busy
+        ? [{ sessionId, type: 'status', status: 'running', provider: session.input.provider }]
+        : []
+      for (const [agentId, child] of this.childThreads)
+        if (child.sessionId === sessionId && child.busy)
+          events.push({
+            sessionId,
+            type: 'subagent',
+            provider: 'codex',
+            agentId,
+            itemId: `agent-${agentId}`,
+            agentName: child.agentName,
+            title: child.agentName || 'Subagent',
+            status: 'running',
+            details: { lifecycle: 'turn', nativeTurnId: child.turnId },
+          })
+      return events
+    })
   }
   private async providerChannel(command: string): Promise<ClientChannel> {
     const durable = this.ssh as SSHConnection & {
@@ -275,15 +325,28 @@ export class Agents {
     const profile = this.ssh.state.profile
     return profile ? JSON.stringify([profile.host, profile.port, profile.username]) : 'test-machine'
   }
+  private refreshModelCatalogIdentity() {
+    const identity = JSON.stringify([
+      this.machineIdentity(),
+      this.ssh.state.codex || '',
+      this.ssh.state.claude || '',
+    ])
+    if (this.catalogIdentity !== undefined && this.catalogIdentity !== identity)
+      this.clearModelCatalogs()
+    this.catalogIdentity = identity
+  }
   private async getCodex(): Promise<RPC> {
+    this.refreshModelCatalogIdentity()
     const machine = this.machineIdentity()
+    const cliVersion = this.ssh.state.codex || ''
+    const openingKey = JSON.stringify([machine, cliVersion])
     const existing = this.codexByMachine.get(machine)
-    if (existing && !existing.closed) {
+    if (existing && !existing.closed && this.codexTransportVersions.get(existing) === cliVersion) {
       if (this.codex !== existing) this.clearModelCatalogs()
       this.codex = existing
       return existing
     }
-    const opening = this.codexStartingByMachine.get(machine)
+    const opening = this.codexStartingByMachine.get(openingKey)
     if (opening) return opening
     const generation = this.generation
     ++this.codexGeneration
@@ -316,23 +379,25 @@ export class Agents {
           // Invalidate all turns immediately, without waiting for the remote SSH
           // close acknowledgement, which can arrive after a replacement starts.
           for (const [id, session] of this.sessions)
-            if (session.codexRPC === rpc) {
-              if (session.remoteId) this.threads.delete(session.remoteId)
+            if (session.codexRPC === rpc || this.hasCodexChildren(id, rpc)) {
+              this.finishCodexChildren(id, session, 'failed', rpc)
+              this.resolveCodexRequests(id, session, rpc)
+              if (session.codexRPC === rpc && session.remoteId)
+                this.threads.delete(session.remoteId)
               for (const [remoteId, child] of this.childThreads)
-                if (child.sessionId === id) this.childThreads.delete(remoteId)
-              if (session.busy && !session.stopRequested) {
+                if (child.sessionId === id && child.rpc === rpc) this.childThreads.delete(remoteId)
+              if (session.codexRPC === rpc && session.busy && !session.stopRequested) {
                 session.busy = false
-                session.approvals.clear()
                 this.event(id, { type: 'error', text: error.message })
               }
             }
         },
       )
+      this.codexTransportVersions.set(rpc, cliVersion)
       this.codexTransports.add(rpc)
       this.transportEvents(channel, () =>
         [...this.sessions].filter(
-          ([, session]) =>
-            session.machineIdentity === machine && session.input.provider === 'codex',
+          ([, session]) => session.machineIdentity === machine && session.codexRPC === rpc,
         ),
       )
       try {
@@ -342,9 +407,11 @@ export class Agents {
         })
         if (this.generation !== generation) throw new Error('SSH connection cancelled')
         rpc.send({ method: 'initialized', params: {} })
-        this.codexByMachine.set(machine, rpc)
-        if (this.codex !== rpc) this.clearModelCatalogs()
-        this.codex = rpc
+        if (machine === this.machineIdentity() && cliVersion === (this.ssh.state.codex || '')) {
+          this.codexByMachine.set(machine, rpc)
+          if (this.codex !== rpc) this.clearModelCatalogs()
+          this.codex = rpc
+        }
         return rpc
       } catch (error) {
         rpc.close(error instanceof Error ? error : new Error(String(error)))
@@ -352,20 +419,22 @@ export class Agents {
       }
     })()
     this.codexStarting = starting
-    this.codexStartingByMachine.set(machine, starting)
+    this.codexStartingByMachine.set(openingKey, starting)
     try {
       return await starting
     } finally {
       if (this.codexStarting === starting) this.codexStarting = undefined
-      if (this.codexStartingByMachine.get(machine) === starting)
-        this.codexStartingByMachine.delete(machine)
+      if (this.codexStartingByMachine.get(openingKey) === starting)
+        this.codexStartingByMachine.delete(openingKey)
     }
   }
   async models(provider: Provider): Promise<ModelOption[]> {
     if (this.ssh.state.status !== 'connected') throw new Error('Connect to a machine first')
+    this.refreshModelCatalogIdentity()
     if (provider === 'claude') return this.discoverClaudeModels()
     const generation = this.generation
     const machine = this.machineIdentity()
+    const cliVersion = this.ssh.state.codex
     const rpc = await this.getCodex()
     const catalogGeneration = this.catalogGeneration
     const config = await this.configuredCodexDefaults(rpc)
@@ -381,6 +450,7 @@ export class Agents {
     if (
       generation !== this.generation ||
       machine !== this.machineIdentity() ||
+      cliVersion !== this.ssh.state.codex ||
       catalogGeneration !== this.catalogGeneration
     )
       throw new Error('SSH connection cancelled')
@@ -396,11 +466,145 @@ export class Agents {
     ]
     return this.codexModels
   }
+  async usage(provider: Provider): Promise<ProviderUsageSnapshot> {
+    const unavailable = (message: string): ProviderUsageSnapshot => ({
+      provider,
+      status: 'unavailable',
+      fetchedAt: Date.now(),
+      limits: [],
+      message,
+    })
+    if (this.ssh.state.status !== 'connected')
+      return unavailable('Connect to a machine to read provider account limits.')
+    if (provider === 'claude')
+      try {
+        return await this.readClaudeAccountUsage()
+      } catch (error) {
+        return unavailable(error instanceof Error ? error.message : String(error))
+      }
+    const machine = this.machineIdentity()
+    const generation = this.generation
+    try {
+      const rpc = await this.getCodex()
+      const response = await rpc.request('account/rateLimits/read', {}, 15000)
+      if (machine !== this.machineIdentity() || generation !== this.generation)
+        throw new Error('The connected machine changed while reading account limits.')
+      const snapshot = { ...codexUsageSnapshot(response), machineIdentity: machine }
+      this.codexUsageSnapshots.set(rpc, snapshot)
+      return snapshot
+    } catch (error) {
+      return unavailable(error instanceof Error ? error.message : String(error))
+    }
+  }
+  private async readClaudeAccountUsage(): Promise<ProviderUsageSnapshot> {
+    const machine = this.machineIdentity()
+    const generation = this.generation
+    const current = () => {
+      if (
+        machine !== this.machineIdentity() ||
+        generation !== this.generation ||
+        this.ssh.state.status !== 'connected'
+      )
+        throw new Error('The connected machine changed while reading Claude account limits.')
+    }
+    const session = [...this.sessions.values()].find(
+      (item) =>
+        item.input.provider === 'claude' &&
+        item.machineIdentity === machine &&
+        !item.stopRequested &&
+        item.phase === 'running' &&
+        item.channel &&
+        !item.channel.destroyed,
+    )
+    if (session) {
+      const controller = new AbortController()
+      const cancelled = () => controller.abort()
+      this.ssh.on('disconnected', cancelled)
+      this.ssh.on('workspace-changing', cancelled)
+      try {
+        const response = await this.claudeControl(
+          session,
+          { subtype: 'get_usage', skip_behaviors: true },
+          15000,
+          controller.signal,
+        )
+        current()
+        return normalizeClaudeUsageSnapshot(response)
+      } finally {
+        this.ssh.off('disconnected', cancelled)
+        this.ssh.off('workspace-changing', cancelled)
+      }
+    }
+    const args = [
+      'claude',
+      '-p',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--permission-prompt-tool',
+      'stdio',
+      '--permission-mode',
+      'plan',
+    ]
+    const channel = await this.ssh.channel(
+      `cd ${shellQuote(this.ssh.state.workspace || this.ssh.state.home || '/')} && exec ${args.map(shellQuote).join(' ')}`,
+    )
+    this.discoveryChannels.add(channel)
+    const controls = claudeMetadataControls(channel)
+    const cancelled = () => {
+      controls.close()
+      try {
+        channel.signal('TERM')
+      } catch {}
+      try {
+        channel.close()
+      } catch {}
+    }
+    this.ssh.on('disconnected', cancelled)
+    this.ssh.on('workspace-changing', cancelled)
+    try {
+      current()
+      await controls.request({ subtype: 'initialize', hooks: null }, 60000)
+      current()
+      const response = await controls.request({ subtype: 'get_usage', skip_behaviors: true })
+      current()
+      return normalizeClaudeUsageSnapshot(response)
+    } finally {
+      this.ssh.off('disconnected', cancelled)
+      this.ssh.off('workspace-changing', cancelled)
+      controls.close()
+      this.discoveryChannels.delete(channel)
+      try {
+        channel.signal('TERM')
+      } catch {}
+      try {
+        channel.close()
+      } catch {}
+    }
+  }
+  private async validateCodexAttachments(
+    model: string | undefined,
+    attachments?: AgentAttachment[],
+  ) {
+    if (!attachments?.length) return
+    const images = codexUserInput('', attachments).some((item) => item.type === 'localImage')
+    if (!images) return
+    if (!this.codexModels) await this.models('codex')
+    const capability = this.codexModels?.find((item) => item.id === (model || ''))
+    if (capability?.inputModalities && !capability.inputModalities.includes('image'))
+      throw new Error(
+        `${capability.name} does not support image input. Choose a model that accepts images or remove the image attachments.`,
+      )
+  }
   private async discoverClaudeModels(): Promise<ModelOption[]> {
+    this.refreshModelCatalogIdentity()
     if (this.claudeModels) return this.claudeModels
     if (this.claudeModelsStarting) return this.claudeModelsStarting
     const generation = this.generation
     const machine = this.machineIdentity()
+    const cliVersion = this.ssh.state.claude
     const catalogGeneration = this.catalogGeneration
     const starting = (async () => {
       const args = [
@@ -466,6 +670,7 @@ export class Agents {
         if (
           generation !== this.generation ||
           machine !== this.machineIdentity() ||
+          cliVersion !== this.ssh.state.claude ||
           catalogGeneration !== this.catalogGeneration
         )
           throw new Error('SSH connection cancelled')
@@ -600,6 +805,7 @@ export class Agents {
       throw new Error('This conversation belongs to a different workspace view')
     if (old && old.machineIdentity !== this.machineIdentity())
       throw new Error('Reconnect to this thread’s saved machine before continuing it')
+    this.refreshModelCatalogIdentity()
     if (input.providerOptions) agentProviderOptionsSchema.parse(input.providerOptions)
     if (
       input.provider === 'codex' &&
@@ -618,7 +824,14 @@ export class Agents {
       machineIdentity: this.machineIdentity(),
       codexRPC: undefined,
       busy: true,
-      approvals: new Map(),
+      approvals:
+        input.provider === 'codex'
+          ? new Map(
+              [...(old?.approvals || [])].filter(([, approval]) =>
+                this.childThreads.has(string(approval.params.threadId)),
+              ),
+            )
+          : new Map(),
       streamed: new Set(),
       stderr: '',
       remoteId: old?.remoteId || input.remoteId,
@@ -637,6 +850,11 @@ export class Agents {
       claudeAgentNames: old?.claudeAgentNames || new Map(),
       claudeStateAware: old?.claudeStateAware,
       claudeState: old?.claudeState,
+      claudeUsageCallId: old?.claudeUsageCallId,
+      claudeCodeVersion: old?.claudeCodeVersion,
+      claudeActiveChildren: old?.claudeActiveChildren,
+      claudeTaskRuns: old?.claudeTaskRuns,
+      claudeFastModeNeedsOptIn: old?.claudeFastModeNeedsOptIn,
       phase: 'initializing',
       initialization: new AbortController(),
     }
@@ -647,13 +865,17 @@ export class Agents {
       old?.input.provider === 'claude' &&
       old.channel &&
       !old.channel.destroyed &&
+      !old.claudeRestartForSettings &&
       old.workspace ===
         (input.scope ? input.workspace || old.workspace : this.ssh.state.workspace) &&
       JSON.stringify(old.input.providerOptions || {}) ===
         JSON.stringify(input.providerOptions || {})
     const activeSession = reuseClaude
-      ? Object.assign(old, session, { controls: old.controls })
+      ? Object.assign(old, session, { controls: old.controls, approvals: old.approvals })
       : session
+    if (!reuseClaude && old?.input.provider === 'claude') {
+      this.resolveClaudeRequests(input.sessionId, old)
+    }
     this.sessions.set(input.sessionId, activeSession)
     const initialize = async () => {
       if (input.scope === 'life-customization') {
@@ -728,6 +950,12 @@ export class Agents {
       const turnId = session.turnId
       if (!rpc || rpc.closed || !turnId || !session.remoteId)
         throw new Error('The Codex turn is not ready for steering')
+      await this.validateCodexAttachments(
+        session.appliedModel || session.input.model,
+        input.attachments,
+      )
+      if (this.sessions.get(input.sessionId) !== session || !session.busy || session.stopRequested)
+        throw new Error('The active turn has finished. Your message was not sent.')
       await rpc.request('turn/steer', {
         threadId: session.remoteId,
         expectedTurnId: turnId,
@@ -777,6 +1005,7 @@ export class Agents {
     session: Session,
     input: AgentSettingsInput,
   ): Promise<AgentConfigureResult> {
+    this.refreshModelCatalogIdentity()
     const choices = { ...session.input, ...input }
     if (session.machineIdentity !== this.machineIdentity()) {
       session.input = choices
@@ -876,6 +1105,7 @@ export class Agents {
               )
               if (!ownsSession()) throw new Error('Agent session changed while applying settings')
               if (live.status === 'applied') {
+                if (input.model !== undefined) session.appliedModel = model
                 result.applied = permissionBoundaryChanged ? 'next-request' : 'live'
                 result.note = permissionBoundaryChanged
                   ? 'Model and reviewer changes are live; sandbox changes apply to the next turn.'
@@ -928,11 +1158,22 @@ export class Agents {
           ? { fastMode: input.serviceTier ? input.serviceTier === 'fast' : null }
           : {}),
       }
+      const fastNeedsRestart = settings.fastMode === true && session.claudeFastModeNeedsOptIn
+      if (input.serviceTier !== undefined && settings.fastMode !== true)
+        session.claudeRestartForSettings = false
+      if (fastNeedsRestart) {
+        session.claudeRestartForSettings = true
+        delete settings.fastMode
+      }
       if (Object.keys(settings).length)
         await this.claudeControl(session, { subtype: 'apply_flag_settings', settings }, 15000)
       if (!ownsSession()) throw new Error('Agent session changed while applying settings')
       result.applied = 'live'
-      if (input.serviceTier !== undefined) {
+      if (fastNeedsRestart) {
+        result.applied = 'next-request'
+        result.note =
+          'Fast mode requires Claude session opt-in. The next turn will resume this conversation with Fast enabled.'
+      } else if (input.serviceTier !== undefined) {
         result.applied = 'next-request'
         result.note =
           'Accepted without interrupting. Claude changes speed on the next turn; model and effort change at subsequent model requests.'
@@ -990,6 +1231,7 @@ export class Agents {
     )
       await this.models('codex')
     this.validateModelChoices(effectiveOptions, this.codexModels)
+    await this.validateCodexAttachments(turnModel, input.attachments)
     if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     if (!session.remoteId || this.threadTransports.get(session.remoteId) !== rpc) {
       const resuming = Boolean(session.remoteId)
@@ -1103,23 +1345,70 @@ export class Agents {
   private receiveCodex(message: Wire, rpc: RPC) {
     const method = string(message.method)
     const params = object(message.params)
+    if (method === 'account/rateLimits/updated') {
+      const snapshot = codexUsageSnapshot(params, this.codexUsageSnapshots.get(rpc), true)
+      this.codexUsageSnapshots.set(rpc, snapshot)
+      if (this.codexByMachine.get(this.machineIdentity()) === rpc) {
+        const ownedSnapshot = { ...snapshot, machineIdentity: this.machineIdentity() }
+        this.codexUsageSnapshots.set(rpc, ownedSnapshot)
+        this.emit({
+          sessionId: '',
+          provider: 'codex',
+          type: 'account-usage',
+          details: ownedSnapshot,
+        })
+      }
+      return
+    }
     const thread = object(params.thread)
     const remoteId = string(params.threadId || thread.id)
     if (method === 'thread/started' && thread.parentThreadId) {
       const parentId = string(thread.parentThreadId)
       const owner = this.threads.get(parentId) || this.childThreads.get(parentId)?.sessionId
-      if (owner && this.sessions.get(owner)?.codexRPC === rpc)
+      if (
+        owner &&
+        (this.sessions.get(owner)?.codexRPC === rpc || this.childThreads.get(parentId)?.rpc === rpc)
+      )
         this.childThreads.set(remoteId, {
           sessionId: owner,
           agentName: string(thread.agentNickname || thread.agentRole || thread.name) || undefined,
+          rpc,
+          busy: object(thread.status).type !== 'idle',
+          ignoredTurns: this.childThreads.get(remoteId)?.ignoredTurns || new Set(),
         })
     }
     if (method === 'thread/closed') {
       const childOwner = this.childThreads.get(remoteId)?.sessionId
+      const owner = this.threads.get(remoteId) || childOwner
       if (
         this.threadTransports.get(remoteId) === rpc ||
-        (childOwner && this.sessions.get(childOwner)?.codexRPC === rpc)
+        this.childThreads.get(remoteId)?.rpc === rpc
       ) {
+        const session = owner ? this.sessions.get(owner) : undefined
+        const child = this.childThreads.get(remoteId)
+        if (child?.busy && owner)
+          this.event(owner, {
+            type: 'subagent',
+            provider: 'codex',
+            agentId: remoteId,
+            itemId: `agent-${remoteId}`,
+            agentName: child.agentName,
+            title: child.agentName || 'Subagent',
+            status: 'interrupted',
+            details: { lifecycle: 'turn', nativeTurnId: child.turnId },
+          })
+        if (session && owner)
+          for (const [requestId, approval] of session.approvals)
+            if (approval.params.threadId === remoteId) {
+              session.approvals.delete(requestId)
+              this.event(owner, {
+                type: 'request-resolved',
+                requestId,
+                status: 'provider-resolved',
+                provider: 'codex',
+                ...(childOwner ? { agentId: remoteId } : {}),
+              })
+            }
         this.threads.delete(remoteId)
         this.threadTransports.delete(remoteId)
         this.childThreads.delete(remoteId)
@@ -1135,7 +1424,7 @@ export class Agents {
     }
     const session = this.sessions.get(sessionId)
     if (!session) return
-    if (session.codexRPC !== rpc) {
+    if (session.codexRPC !== rpc && child?.rpc !== rpc) {
       if (message.id != null && method)
         rpc.send({
           id: message.id,
@@ -1150,6 +1439,24 @@ export class Agents {
         provider: 'codex',
         ...(isChild ? { agentId: remoteId, agentName: child?.agentName } : {}),
       })
+    // Requests can be cleared by the provider even after the turn stops. Match
+    // its wire ID rather than treating the notification as an active item.
+    if (method === 'serverRequest/resolved') {
+      for (const [requestId, approval] of session.approvals)
+        if (
+          approval.wireId === params.requestId &&
+          (approval.rpc || session.codexRPC) === rpc &&
+          (!approval.params.threadId || approval.params.threadId === remoteId)
+        ) {
+          session.approvals.delete(requestId)
+          emit({ type: 'request-resolved', requestId, status: 'provider-resolved' })
+        }
+      return
+    }
+    if (method === 'currentTime/read' && message.id != null) {
+      rpc.send({ id: message.id, result: { currentTimeAt: Math.floor(Date.now() / 1000) } })
+      return
+    }
     // Thread metadata remains relevant after the work completes. In particular,
     // provider-generated titles often arrive after turn/completed.
     if (method === 'thread/name/updated' && !isChild) {
@@ -1166,11 +1473,46 @@ export class Agents {
         itemId: `usage-${remoteId}`,
         title: 'Token usage',
         text: 'Token usage',
-        details: { tokenUsage: params.tokenUsage },
+        details: {
+          tokenUsage: params.tokenUsage,
+          usageScope: 'session',
+          usageSessionId: remoteId,
+          usageObservedAt: Date.now(),
+        },
+      })
+      return
+    }
+    if (method === 'thread/status/changed') {
+      const status = object(params.status)
+      if (isChild && child && !session.stopRequested) child.busy = status.type === 'active'
+      const flags = Array.isArray(status.activeFlags) ? status.activeFlags : []
+      emit({
+        type: 'status',
+        status: flags.includes('waitingOnApproval')
+          ? 'awaiting-approval'
+          : flags.includes('waitingOnUserInput')
+            ? 'awaiting-input'
+            : string(status.type),
+        details: { threadStatus: params.status },
       })
       return
     }
     const turnId = string(params.turnId || object(params.turn).id)
+    if (
+      isChild &&
+      child &&
+      (session.stopRequested ||
+        (turnId &&
+          (child.ignoredTurns.has(turnId) ||
+            (method !== 'turn/started' && child.turnId && child.turnId !== turnId))))
+    ) {
+      if (message.id != null && method)
+        rpc.send({
+          id: message.id,
+          error: { code: -32000, message: 'The child turn is no longer active' },
+        })
+      return
+    }
     if (
       !isChild &&
       (!session.busy ||
@@ -1190,6 +1532,14 @@ export class Agents {
     const phase =
       item.phase === 'commentary' || item.phase === 'final_answer' ? item.phase : undefined
     if (phase && itemId) session.itemPhases.set(itemId, phase)
+    if (method === 'model/rerouted') {
+      if (!isChild && typeof params.toModel === 'string') session.appliedModel = params.toModel
+      emit({
+        type: 'status',
+        text: `Codex switched from ${string(params.fromModel)} to ${string(params.toModel)}.`,
+        details: { modelReroute: params },
+      })
+    }
     if (method === 'item/agentMessage/delta')
       emit({
         type: 'text',
@@ -1237,7 +1587,16 @@ export class Agents {
         : [string(item.receiverThreadId || item.newThreadId || item.agentThreadId)].filter(Boolean)
       for (const receiver of receivers)
         if (!this.threads.has(receiver) && !this.childThreads.has(receiver))
-          this.childThreads.set(receiver, { sessionId })
+          this.childThreads.set(receiver, { sessionId, rpc, busy: true, ignoredTurns: new Set() })
+      for (const receiver of receivers) {
+        const receiverChild = this.childThreads.get(receiver)
+        const state = object(object(item.agentsStates)[receiver])
+        if (receiverChild?.rpc === rpc && typeof state.status === 'string') {
+          receiverChild.busy = ['pendingInit', 'running'].includes(state.status)
+          if (!receiverChild.busy && receiverChild.turnId)
+            receiverChild.ignoredTurns.add(receiverChild.turnId)
+        }
+      }
       emit({
         type: 'subagent',
         itemId,
@@ -1287,6 +1646,10 @@ export class Agents {
         status: 'completed',
       })
     if (method === 'turn/started') {
+      if (isChild && child) {
+        child.busy = true
+        child.turnId = turnId
+      }
       if (isChild)
         emit({
           type: 'subagent',
@@ -1294,13 +1657,25 @@ export class Agents {
           agentId: remoteId,
           title: child?.agentName || 'Subagent',
           status: 'running',
-          details: thread,
+          details: { ...thread, lifecycle: 'turn', nativeTurnId: turnId },
         })
       else session.turnId = string(object(params.turn).id)
     }
     if (method === 'turn/completed') {
       const turn = object(params.turn)
+      for (const [requestId, approval] of session.approvals)
+        if (
+          (approval.rpc || session.codexRPC) === rpc &&
+          (!approval.params.threadId || approval.params.threadId === remoteId)
+        ) {
+          session.approvals.delete(requestId)
+          emit({ type: 'request-resolved', requestId, status: 'provider-resolved' })
+        }
       if (isChild) {
+        if (child) {
+          child.busy = false
+          if (turnId) child.ignoredTurns.add(turnId)
+        }
         emit({
           type: 'subagent',
           itemId: `agent-${remoteId}`,
@@ -1308,16 +1683,13 @@ export class Agents {
           title: child?.agentName || 'Subagent',
           status: string(turn.status),
           text: string(object(turn.error).message),
-          details: { lifecycle: 'turn' },
+          details: { lifecycle: 'turn', nativeTurnId: turnId },
         })
         return
       }
       if (turnId) session.ignoredTurns.add(turnId)
       if (session.stopRequested) return
       session.busy = false
-      for (const [requestId, approval] of session.approvals)
-        if (!approval.params.threadId || approval.params.threadId === session.remoteId)
-          session.approvals.delete(requestId)
       emit({
         type: turn.status === 'failed' ? 'error' : 'complete',
         status: string(turn.status),
@@ -1336,27 +1708,64 @@ export class Agents {
       emit({
         type: params.willRetry ? 'status' : 'error',
         text: string(object(params.error).message),
+        details: {
+          error: params.error,
+          willRetry: params.willRetry,
+          ...(params.willRetry === true ? { recoverable: true } : {}),
+        },
       })
     if (message.id != null && method) {
       const requestId = randomUUID()
       if (
         /requestApproval$/.test(method) &&
-        (method.includes('commandExecution') || method.includes('fileChange'))
+        (method.includes('commandExecution') ||
+          method.includes('fileChange') ||
+          method === 'item/permissions/requestApproval')
       ) {
-        session.approvals.set(requestId, { wireId: message.id, method, params })
+        session.approvals.set(requestId, { wireId: message.id, method, params, rpc })
         emit({
           type: 'approval',
           requestId,
-          title: method.includes('fileChange') ? 'Allow file changes?' : 'Allow this command?',
-          text: string(params.command || params.reason) || 'Codex needs permission to continue.',
+          itemId,
+          ...codexApprovalPresentation(method, params),
+          details: { method, ...params },
         })
       } else if (method === 'item/tool/requestUserInput') {
-        session.approvals.set(requestId, { wireId: message.id, method, params })
+        session.approvals.set(requestId, { wireId: message.id, method, params, rpc })
         emit({
           type: 'question',
           requestId,
+          itemId,
           questions: array(params.questions) as unknown as AgentQuestion[],
+          details: { method, ...params },
         })
+      } else if (method === 'mcpServer/elicitation/request') {
+        try {
+          const urlMode = params.mode === 'url'
+          const questions = urlMode ? undefined : codexElicitationQuestions(params)
+          session.approvals.set(requestId, { wireId: message.id, method, params, rpc })
+          emit({
+            type: urlMode ? 'approval' : 'question',
+            requestId,
+            itemId,
+            title: urlMode ? 'Confirm the MCP connection flow?' : 'MCP server needs your input',
+            text: [string(params.message), urlMode ? string(params.url) : '']
+              .filter(Boolean)
+              .join('\n\n'),
+            ...(questions ? { questions } : {}),
+            details: { method, ...params },
+          })
+        } catch (error) {
+          rpc.send({
+            id: message.id,
+            result: { action: 'decline', content: null, _meta: null },
+          })
+          emit({
+            type: 'status',
+            text: error instanceof Error ? error.message : String(error),
+            details: { method, serverName: params.serverName, declined: true },
+          })
+        }
       } else
         rpc.send({
           id: message.id,
@@ -1366,6 +1775,13 @@ export class Agents {
   }
   private async startClaude(session: Session, reuse = false) {
     const { input } = session
+    if (reuse) claudeMessageBlocks.get(session)?.resetRoot()
+    else {
+      if (session.channel) this.finishClaudeChildren(input.sessionId, session, 'interrupted')
+      claudeMessageBlocks.set(session, new ClaudeMessageBlocks())
+      session.claudeActiveChildren = new Map()
+      session.claudeTaskRuns = new Map()
+    }
     const settings = { ...input.providerOptions?.settings }
     if (input.serviceTier !== undefined) {
       if (input.serviceTier === '') delete settings.fastMode
@@ -1423,6 +1839,9 @@ export class Agents {
       // A new process lets each turn apply the selected model and permission mode.
       const oldChannel = session.channel
       session.channel = undefined
+      try {
+        oldChannel.signal('TERM')
+      } catch {}
       oldChannel.end()
       oldChannel.close()
     }
@@ -1439,7 +1858,6 @@ export class Agents {
       'stdio',
       '--permission-mode',
       claudePermissionMode(input.mode),
-      '--allow-dangerously-skip-permissions',
     ]
     if (input.scope === 'research' && session.writableRoot !== session.workspace)
       args.push('--add-dir', session.writableRoot)
@@ -1448,9 +1866,8 @@ export class Agents {
     if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings))
     args.push(...(input.providerOptions?.args || []))
     if (session.remoteId) args.push(`--resume=${session.remoteId}`)
-    const channel = await this.providerChannel(
-      `cd ${shellQuote(session.workspace)} && exec env CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1 ${args.map(shellQuote).join(' ')}`,
-    )
+    session.claudeUsageCallId = randomUUID()
+    const channel = await this.providerChannel(claudeLaunchCommand(session.workspace, args))
     if (this.sessions.get(input.sessionId) !== session || session.stopRequested) {
       channel.close()
       return
@@ -1469,7 +1886,14 @@ export class Agents {
         clearTimeout(pending.timer)
         if (response.subtype === 'error')
           pending.reject(new Error(string(response.error) || 'Claude control request failed'))
-        else pending.resolve(object(response.response))
+        else {
+          pending.resolve(object(response.response))
+          for (const request of [
+            ...array(response.pending_permission_requests),
+            ...array(response.pending_user_dialog_requests),
+          ])
+            if (request.type === 'control_request') this.receiveClaude(session, request)
+        }
       } else this.receiveClaude(session, message)
     })
     channel.on('data', (chunk: Buffer) => lines.push(chunk))
@@ -1485,7 +1909,12 @@ export class Agents {
       }
       session.controls.clear()
       session.channel = undefined
-      session.approvals.clear()
+      this.resolveClaudeRequests(input.sessionId, session)
+      this.finishClaudeChildren(
+        input.sessionId,
+        session,
+        session.stopRequested ? 'interrupted' : 'failed',
+      )
       if (session.busy && !session.stopRequested) {
         session.busy = false
         this.event(input.sessionId, { type: 'error', text: error.message })
@@ -1506,6 +1935,23 @@ export class Agents {
         { subtype: 'initialize', hooks: null, forwardSubagentText: true },
         60000,
       )
+      session.claudeFastModeNeedsOptIn =
+        initialized.fast_mode_disabled_reason === 'sdk_opt_in_required'
+      session.claudeCodeVersion = string(initialized.claude_code_version) || this.ssh.state.claude
+      this.event(input.sessionId, {
+        type: 'settings',
+        details: {
+          ...(typeof initialized.fast_mode_state === 'string'
+            ? { fastModeState: initialized.fast_mode_state }
+            : {}),
+          ...(typeof initialized.fast_mode_disabled_reason === 'string'
+            ? { fastModeDisabledReason: initialized.fast_mode_disabled_reason }
+            : {}),
+          ...(typeof initialized.current_permission_mode === 'string'
+            ? { currentPermissionMode: initialized.current_permission_mode }
+            : {}),
+        },
+      })
       if (['idle', 'running', 'requires_action'].includes(string(initialized.session_state))) {
         session.claudeStateAware = true
         session.claudeState = initialized.session_state as Session['claudeState']
@@ -1532,14 +1978,33 @@ export class Agents {
       throw error
     }
   }
-  private claudeControl(session: Session, request: Wire, timeout: number): Promise<Wire> {
+  private claudeControl(
+    session: Session,
+    request: Wire,
+    timeout: number,
+    signal?: AbortSignal,
+  ): Promise<Wire> {
     const channel = session.channel
     if (!channel || channel.destroyed)
       return Promise.reject(new Error('Claude Code is disconnected'))
     const requestId = randomUUID()
     return new Promise((resolve, reject) => {
+      const cleanup = () => signal?.removeEventListener('abort', cancelled)
+      const cancelled = () => {
+        const pending = session.controls.get(requestId)
+        session.controls.delete(requestId)
+        clearTimeout(pending?.timer)
+        cleanup()
+        reject(new Error('Claude metadata request cancelled'))
+      }
+      if (signal?.aborted) {
+        cancelled()
+        return
+      }
+      signal?.addEventListener('abort', cancelled, { once: true })
       const expire = () => {
         session.controls.delete(requestId)
+        cleanup()
         reject(
           new Error(
             `Claude ${string(request.subtype)} timed out. Check its remote login in the terminal.`,
@@ -1551,8 +2016,14 @@ export class Agents {
           ? undefined
           : setTimeout(expire, timeout)
       session.controls.set(requestId, {
-        resolve,
-        reject,
+        resolve: (value) => {
+          cleanup()
+          resolve(value)
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        },
         timer,
         remaining: timeout,
         started: Date.now(),
@@ -1565,6 +2036,7 @@ export class Agents {
       } catch (error) {
         clearTimeout(timer)
         session.controls.delete(requestId)
+        cleanup()
         reject(error)
       }
     })
@@ -1572,9 +2044,9 @@ export class Agents {
   private receiveClaude(session: Session, message: Wire) {
     const id = session.input.sessionId
     const parentItemId = string(message.parent_tool_use_id) || undefined
-    const emit = (event: Omit<AgentEvent, 'sessionId'>) =>
-      this.event(id, {
-        ...event,
+    const requestAgentId = string(object(message.request).agent_id) || undefined
+    const emit = (event: Omit<AgentEvent, 'sessionId'>) => {
+      const native = {
         provider: 'claude',
         ...(parentItemId
           ? {
@@ -1583,7 +2055,27 @@ export class Agents {
               agentName: session.claudeAgentNames.get(parentItemId),
             }
           : {}),
-      })
+        ...event,
+      } as Omit<AgentEvent, 'sessionId'>
+      if (native.agentId) {
+        const terminal =
+          native.type === 'subagent' &&
+          ['completed', 'failed', 'interrupted', 'stopped', 'killed'].includes(native.status || '')
+        if (terminal) session.claudeActiveChildren?.delete(native.agentId)
+        else if (['subagent', 'text', 'tool', 'approval', 'question'].includes(native.type)) {
+          const previous = session.claudeActiveChildren?.get(native.agentId)
+          session.claudeActiveChildren?.set(native.agentId, {
+            itemId:
+              native.type === 'subagent'
+                ? native.itemId || `agent-${native.agentId}`
+                : previous?.itemId || `agent-${native.agentId}`,
+            title: native.agentName || previous?.title || native.title,
+            parentItemId: native.parentItemId || previous?.parentItemId,
+          })
+        }
+      }
+      this.event(id, native)
+    }
     if (
       parentItemId &&
       (message.type === 'result' ||
@@ -1604,6 +2096,8 @@ export class Agents {
         text: string(message.result),
         details: { ...message, lifecycle: 'turn' },
       })
+      if (message.type === 'result' || message.state === 'idle')
+        this.resolveClaudeRequests(id, session, [parentItemId], 'provider-resolved')
       return
     }
     if (
@@ -1633,14 +2127,41 @@ export class Agents {
         type: 'status',
         text: string(message.message || message.text) || JSON.stringify(message),
       })
+    const advisory = claudeAdvisoryEvent(message)
+    if (advisory) {
+      const agentId = string(message.agent_id)
+      emit({
+        ...advisory,
+        ...(agentId ? { agentId, agentName: session.claudeAgentNames.get(agentId) } : {}),
+      })
+      return
+    }
     if (
       message.type === 'system' &&
       /^task_(started|progress|notification|updated)$/.test(string(message.subtype))
     ) {
+      if (message.skip_transcript === true || message.ambient === true) return
+      const patch = object(message.patch)
       const agentId = string(message.task_id || message.tool_use_id)
-      const parent = string(message.tool_use_id) || parentItemId
-      const name = string(message.description || message.summary || message.task_type)
+      const runId = string(message.run_id)
+      const previousRun = session.claudeTaskRuns?.get(agentId)
+      if (runId && previousRun && runId < previousRun) return
+      if (runId) session.claudeTaskRuns?.set(agentId, runId)
+      const parent =
+        string(message.tool_use_id) ||
+        session.claudeActiveChildren?.get(agentId)?.parentItemId ||
+        parentItemId
+      const name =
+        string(message.description || patch.description || message.task_type) ||
+        session.claudeActiveChildren?.get(agentId)?.title ||
+        (parent ? session.claudeAgentNames.get(parent) : undefined) ||
+        string(message.summary) ||
+        ''
       if (parent && name) session.claudeAgentNames.set(parent, name)
+      const status =
+        string(message.status || patch.status) ||
+        (message.subtype === 'task_notification' ? 'completed' : 'running')
+      const terminal = ['completed', 'failed', 'interrupted', 'stopped', 'killed'].includes(status)
       emit({
         type: 'subagent',
         itemId: `task-${agentId}`,
@@ -1648,22 +2169,32 @@ export class Agents {
         agentName: name || undefined,
         parentItemId: parent || undefined,
         title: name || 'Subagent',
-        text: string(message.summary || message.description),
-        status:
-          string(message.status) ||
-          (message.subtype === 'task_notification' ? 'completed' : 'running'),
-        details: message,
+        text: string(message.summary || message.description || patch.error),
+        status: status === 'stopped' || status === 'killed' ? 'interrupted' : status,
+        details: { ...message, ...(terminal ? { lifecycle: 'turn' } : {}) },
       })
+      if (terminal) {
+        if (parent) session.claudeActiveChildren?.delete(parent)
+        this.resolveClaudeRequests(
+          id,
+          session,
+          [agentId, ...(parent ? [parent] : [])],
+          'provider-resolved',
+        )
+      }
       return
     }
     if (message.type === 'control_cancel_request') {
-      session.approvals.delete(string(message.request_id))
+      const requestId = string(message.request_id)
+      if (session.approvals.delete(requestId))
+        emit({ type: 'request-resolved', requestId, status: 'cancelled' })
       return
     }
-    if (!session.busy && message.type !== 'system') return
+    if (!session.busy && message.type !== 'system' && !parentItemId && !requestAgentId) return
     if (
       typeof message.session_id === 'string' &&
       !parentItemId &&
+      !requestAgentId &&
       message.session_id !== session.remoteId
     ) {
       session.remoteId = message.session_id
@@ -1671,40 +2202,30 @@ export class Agents {
     }
     if (message.type === 'stream_event') {
       const event = object(message.event)
-      const delta = object(event.delta)
       const stream = parentItemId || 'root'
       if (event.type === 'message_start') {
         const messageId = string(object(event.message).id) || randomUUID()
         session.claudeMessageIds.set(stream, messageId)
         if (!parentItemId) session.messageId = messageId
       }
-      if (delta.type === 'text_delta') {
-        const itemId = session.claudeMessageIds.get(stream) || session.messageId || 'response'
-        session.streamed.add(itemId)
-        emit({ type: 'text', itemId, text: string(delta.text) })
+      for (const output of claudeMessageBlocks.get(session)?.stream(event, parentItemId) || []) {
+        if (output.type === 'text' && output.itemId) {
+          session.streamed.add(output.itemId)
+          if (!parentItemId) session.messageId = output.itemId
+        }
+        emit(output)
       }
-      const block = object(event.content_block)
-      if (event.type === 'content_block_start' && block.type === 'tool_use')
-        emit({
-          type: 'tool',
-          itemId: string(block.id),
-          title: string(block.name),
-          status: 'running',
-          details: block,
-        })
     }
     if (message.type === 'assistant') {
       const content = object(message.message)
-      const itemId =
-        string(content.id) || session.claudeMessageIds.get(parentItemId || 'root') || randomUUID()
-      const text = array(content.content)
-        .filter((block) => block.type === 'text')
-        .map((block) => string(block.text))
-        .join('\n')
-      if (text) {
-        if (!parentItemId) session.claudeReply = text
-        emit({ type: 'text', itemId, text, status: 'replace' })
+      const blocks = claudeMessageBlocks.get(session)
+      if (string(message.uuid) && blocks?.hasEnvelope(string(message.uuid), parentItemId)) return
+      for (const output of blocks?.assistant(content, string(message.uuid), parentItemId) || []) {
+        if (!parentItemId && output.type === 'text') session.messageId = output.itemId
+        emit(output)
       }
+      if (!parentItemId && blocks)
+        session.claudeReply = blocks.text(string(content.id) || undefined)
       for (const tool of array(content.content).filter((block) => block.type === 'tool_use')) {
         const toolInput = object(tool.input)
         const delegated = tool.name === 'Agent' || tool.name === 'Task'
@@ -1736,13 +2257,24 @@ export class Agents {
             : {}),
           text:
             typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
-          status: result.is_error ? 'failed' : 'completed',
+          status: result.is_error
+            ? 'failed'
+            : [...(session.claudeActiveChildren?.values() || [])].some(
+                  (child) => child.parentItemId === string(result.tool_use_id),
+                )
+              ? 'running'
+              : 'completed',
           details: result,
         })
     if (message.type === 'control_request') {
       const request = object(message.request)
       const requestId = string(message.request_id)
       if (request.subtype === 'can_use_tool') {
+        if (session.approvals.has(requestId)) return
+        const agentId = string(request.agent_id) || parentItemId
+        const requestMetadata = agentId
+          ? { agentId, agentName: session.claudeAgentNames.get(agentId), parentItemId }
+          : {}
         session.approvals.set(requestId, {
           wireId: requestId,
           method: string(request.tool_name),
@@ -1753,10 +2285,12 @@ export class Agents {
           emit({
             type: 'question',
             requestId,
+            ...requestMetadata,
             questions: array(toolInput.questions).map((q, i) => ({
               id: string(q.question) || String(i),
               question: string(q.question),
               header: string(q.header),
+              ...(q.multiSelect === true ? { multiple: true } : {}),
               options: array(q.options).map((o) => ({
                 label: string(o.label),
                 description: string(o.description),
@@ -1767,10 +2301,74 @@ export class Agents {
           emit({
             type: 'approval',
             requestId,
-            title: `Allow ${string(request.tool_name)}?`,
+            ...requestMetadata,
+            title:
+              string(request.title) ||
+              `Allow ${string(request.display_name || request.tool_name)}?`,
             text: string(toolInput.command) || JSON.stringify(toolInput, null, 2),
+            details: request,
           })
-      } else
+      } else if (request.subtype === 'elicitation') {
+        if (session.approvals.has(requestId)) return
+        const agentId = string(request.agent_id) || parentItemId
+        const requestMetadata = agentId
+          ? { agentId, agentName: session.claudeAgentNames.get(agentId), parentItemId }
+          : {}
+        try {
+          const urlMode = request.mode === 'url'
+          const questions = urlMode ? undefined : claudeElicitationQuestions(request)
+          session.approvals.set(requestId, {
+            wireId: requestId,
+            method: 'elicitation',
+            params: { ...request, ...(parentItemId ? { parent_tool_use_id: parentItemId } : {}) },
+          })
+          emit({
+            type: urlMode ? 'approval' : 'question',
+            requestId,
+            ...requestMetadata,
+            title:
+              string(request.title) ||
+              (urlMode ? 'Confirm the MCP connection flow?' : 'MCP server needs your input'),
+            text: [string(request.message), urlMode ? string(request.url) : '']
+              .filter(Boolean)
+              .join('\n\n'),
+            ...(questions ? { questions } : {}),
+            details: request,
+          })
+        } catch (error) {
+          session.channel?.write(
+            JSON.stringify({
+              type: 'control_response',
+              response: {
+                subtype: 'success',
+                request_id: requestId,
+                response: { action: 'decline' },
+              },
+            }) + '\n',
+          )
+          emit({
+            type: 'status',
+            ...requestMetadata,
+            text: error instanceof Error ? error.message : String(error),
+            details: {
+              subtype: 'elicitation',
+              serverName: request.mcp_server_name,
+              declined: true,
+            },
+          })
+        }
+      } else if (request.subtype === 'request_user_dialog')
+        session.channel?.write(
+          JSON.stringify({
+            type: 'control_response',
+            response: {
+              subtype: 'success',
+              request_id: requestId,
+              response: { behavior: 'cancelled' },
+            },
+          }) + '\n',
+        )
+      else
         session.channel?.write(
           JSON.stringify({
             type: 'control_response',
@@ -1784,7 +2382,12 @@ export class Agents {
     }
     if (message.type === 'result') {
       if (session.stopRequested) return
-      if (!message.is_error && string(message.result) && message.result !== session.claudeReply)
+      if (
+        !message.is_error &&
+        string(message.result) &&
+        message.result !== session.claudeReply &&
+        !claudeMessageBlocks.get(session)?.matchesText(string(message.result))
+      )
         emit({
           type: 'text',
           itemId: session.messageId || `result-${string(message.uuid) || randomUUID()}`,
@@ -1802,7 +2405,17 @@ export class Agents {
           itemId: `usage-${session.messageId || id}`,
           title: 'Usage and cost',
           text: 'Usage and cost',
-          details: metrics,
+          details: {
+            ...metrics,
+            usageScope: 'session',
+            usageSessionId: session.remoteId,
+            usageCallId: session.claudeUsageCallId,
+            usageRestoresSessionTotals: claudeRestoresUsageTotals(
+              session.claudeCodeVersion || this.ssh.state.claude || '',
+            ),
+            usageObservedAt: Date.now(),
+            usageResultSubtype: message.subtype,
+          },
         })
       session.claudeResult = message
       if (!session.claudeStateAware || session.claudeState === 'idle')
@@ -1811,6 +2424,7 @@ export class Agents {
   }
   private finishClaudeResult(session: Session, message: Wire) {
     if (session.stopRequested || !session.busy) return
+    if (typeof message.queued_turn_count === 'number' && message.queued_turn_count > 0) return
     session.busy = false
     session.claudeResult = undefined
     for (const [requestId, approval] of session.approvals)
@@ -1839,16 +2453,10 @@ export class Agents {
     const approval = session?.approvals.get(requestId)
     if (!session || !approval) throw new Error('This request is no longer pending')
     if (session.input.provider === 'codex') {
-      const result =
-        approval.method === 'item/tool/requestUserInput'
-          ? {
-              answers: Object.fromEntries(
-                Object.entries(answers || {}).map(([key, value]) => [key, { answers: value }]),
-              ),
-            }
-          : { decision: accepted ? 'accept' : 'decline' }
-      if (!session.codexRPC) throw new Error('Codex is disconnected')
-      session.codexRPC.send({ id: approval.wireId, result })
+      const result = codexRequestResponse(approval.method, approval.params, accepted, answers)
+      const rpc = approval.rpc || session.codexRPC
+      if (!rpc || rpc.closed) throw new Error('Codex is disconnected')
+      rpc.send({ id: approval.wireId, result })
     } else {
       const original = object(approval.params.input)
       const updatedInput =
@@ -1868,21 +2476,42 @@ export class Agents {
           response: {
             subtype: 'success',
             request_id: approval.wireId,
-            response: accepted
-              ? { behavior: 'allow', updatedInput }
-              : { behavior: 'deny', message: 'The user declined this action' },
+            response:
+              approval.method === 'elicitation'
+                ? claudeElicitationResponse(approval.params, accepted, answers)
+                : accepted
+                  ? { behavior: 'allow', updatedInput }
+                  : { behavior: 'deny', message: 'The user declined this action' },
           },
         }) + '\n',
       )
     }
     session.approvals.delete(requestId)
+    this.event(sessionId, {
+      type: 'request-resolved',
+      requestId,
+      status: accepted
+        ? [
+            'AskUserQuestion',
+            'elicitation',
+            'item/tool/requestUserInput',
+            'mcpServer/elicitation/request',
+          ].includes(approval.method)
+          ? 'answered'
+          : 'approved'
+        : 'declined',
+    })
   }
   async stop(sessionId: string) {
     const session = this.sessions.get(sessionId)
-    if (!session || !session.busy) return
+    if (
+      !session ||
+      (!session.busy && !session.claudeActiveChildren?.size && !this.hasCodexChildren(sessionId))
+    )
+      return
     if (session.stopping) return session.stopping
     session.stopRequested = true
-    const stopping = this.stopSession(sessionId, session)
+    const stopping = this.stopSession(sessionId, session, session.busy)
     session.stopping = stopping
     try {
       await stopping
@@ -1890,14 +2519,98 @@ export class Agents {
       if (session.stopping === stopping) session.stopping = undefined
     }
   }
-  private async stopSession(sessionId: string, session: Session) {
+  private hasCodexChildren(sessionId: string, rpc?: RPC) {
+    return [...this.childThreads.values()].some(
+      (child) => child.sessionId === sessionId && child.busy && (!rpc || child.rpc === rpc),
+    )
+  }
+  private resolveCodexRequests(sessionId: string, session: Session, rpc?: RPC, threadId?: string) {
+    for (const [requestId, approval] of session.approvals) {
+      if (rpc && (approval.rpc || session.codexRPC) !== rpc) continue
+      if (threadId && approval.params.threadId !== threadId) continue
+      session.approvals.delete(requestId)
+      const agentId = string(approval.params.threadId)
+      this.event(sessionId, {
+        type: 'request-resolved',
+        provider: 'codex',
+        requestId,
+        status: 'cancelled',
+        ...(agentId && agentId !== session.remoteId ? { agentId } : {}),
+      })
+    }
+  }
+  private finishCodexChildren(
+    sessionId: string,
+    session: Session,
+    status: 'failed' | 'interrupted',
+    rpc?: RPC,
+  ) {
+    for (const [agentId, child] of this.childThreads) {
+      if (child.sessionId !== sessionId || (rpc && child.rpc !== rpc)) continue
+      if (child.busy)
+        this.event(sessionId, {
+          type: 'subagent',
+          provider: 'codex',
+          agentId,
+          itemId: `agent-${agentId}`,
+          agentName: child.agentName,
+          title: child.agentName || 'Subagent',
+          status,
+          details: { lifecycle: 'turn', nativeTurnId: child.turnId },
+        })
+      child.busy = false
+      if (child.turnId) child.ignoredTurns.add(child.turnId)
+      this.resolveCodexRequests(sessionId, session, child.rpc, agentId)
+    }
+  }
+  private finishClaudeChildren(
+    sessionId: string,
+    session: Session,
+    status: 'failed' | 'interrupted',
+  ) {
+    for (const [agentId, child] of session.claudeActiveChildren || [])
+      this.event(sessionId, {
+        type: 'subagent',
+        provider: 'claude',
+        agentId,
+        itemId: child.itemId,
+        title: child.title || 'Subagent',
+        agentName: child.title,
+        parentItemId: child.parentItemId,
+        status,
+        details: { lifecycle: 'turn' },
+      })
+    session.claudeActiveChildren?.clear()
+  }
+  private resolveClaudeRequests(
+    sessionId: string,
+    session: Session,
+    agentIds?: string[],
+    status = 'cancelled',
+  ) {
+    for (const [requestId, approval] of session.approvals) {
+      const agentId =
+        string(approval.params.agent_id || approval.params.parent_tool_use_id) || undefined
+      if (agentIds && (!agentId || !agentIds.includes(agentId))) continue
+      session.approvals.delete(requestId)
+      this.event(sessionId, {
+        type: 'request-resolved',
+        provider: 'claude',
+        requestId,
+        status,
+        ...(agentId ? { agentId, agentName: session.claudeAgentNames.get(agentId) } : {}),
+      })
+    }
+  }
+  private async stopSession(sessionId: string, session: Session, interruptRoot: boolean) {
     const generation = this.generation
     const rpc = session.codexRPC
     const ownsSession = () =>
       this.generation === generation && this.sessions.get(sessionId) === session
     // No user prompt has been sent during initialization. Finish immediately;
     // the startup checks the turn identity before issuing any remote work.
-    if (session.phase === 'initializing') {
+    if (session.phase === 'initializing') session.initialization.abort()
+    if (session.phase === 'initializing' && !this.hasCodexChildren(sessionId)) {
       session.initialization.abort()
       for (const pending of session.controls.values()) {
         clearTimeout(pending.timer)
@@ -1913,7 +2626,13 @@ export class Agents {
         channel?.close()
       } catch {}
       session.busy = false
+      if (session.input.provider === 'codex') {
+        this.finishCodexChildren(sessionId, session, 'interrupted')
+        this.resolveCodexRequests(sessionId, session)
+      }
       session.approvals.clear()
+      if (session.input.provider === 'claude')
+        this.finishClaudeChildren(sessionId, session, 'interrupted')
       this.event(sessionId, { type: 'complete', status: 'interrupted' })
       return
     }
@@ -1922,8 +2641,19 @@ export class Agents {
     for (const id of [...session.approvals.keys()]) {
       if (!ownsSession()) return
       if (session.approvals.has(id)) {
+        const approval = session.approvals.get(id)
         try {
           await this.respond(sessionId, id, false)
+          if (session.input.provider === 'codex' && approval) {
+            const agentId = string(approval.params.threadId)
+            this.event(sessionId, {
+              type: 'request-resolved',
+              provider: 'codex',
+              requestId: id,
+              status: 'cancelled',
+              ...(agentId && agentId !== session.remoteId ? { agentId } : {}),
+            })
+          }
         } catch (error) {
           if (!ownsSession()) return
           throw error
@@ -1933,6 +2663,7 @@ export class Agents {
     }
     if (
       session.input.provider === 'codex' &&
+      interruptRoot &&
       session.turnId &&
       !session.ignoredTurns.has(session.turnId)
     ) {
@@ -1979,10 +2710,40 @@ export class Agents {
         }
       }
     }
+    if (session.input.provider === 'codex') {
+      const children = [...this.childThreads].filter(
+        ([, child]) => child.sessionId === sessionId && child.busy,
+      )
+      for (const [threadId, child] of children) {
+        if (!ownsSession()) return
+        try {
+          await child.rpc.request(
+            'turn/interrupt',
+            {
+              threadId,
+              ...(child.turnId ? { turnId: child.turnId } : {}),
+            },
+            10000,
+          )
+        } catch (error) {
+          if (!ownsSession()) return
+          child.rpc.close(error instanceof Error ? error : new Error(String(error)))
+          this.event(sessionId, {
+            type: 'status',
+            text: `Codex subagent interruption failed; its connection was closed. ${(error as Error).message}`,
+          })
+        }
+      }
+      if (!ownsSession()) return
+      this.finishCodexChildren(sessionId, session, 'interrupted')
+      this.resolveCodexRequests(sessionId, session)
+    }
     if (!ownsSession()) return
     session.busy = false
     session.approvals.clear()
-    this.event(sessionId, { type: 'complete', status: 'interrupted' })
+    if (session.input.provider === 'claude')
+      this.finishClaudeChildren(sessionId, session, 'interrupted')
+    if (interruptRoot) this.event(sessionId, { type: 'complete', status: 'interrupted' })
   }
   async dispose(sessionId: string) {
     const session = this.sessions.get(sessionId)
@@ -2007,8 +2768,15 @@ export class Agents {
     this.sessions.delete(sessionId)
   }
   hasRunningSessions(): boolean {
-    return [...this.sessions.values()].some(
-      (session) => session.busy || session.startup !== undefined || session.stopping !== undefined,
+    return (
+      [...this.childThreads.values()].some((child) => child.busy) ||
+      [...this.sessions.values()].some(
+        (session) =>
+          session.busy ||
+          !!session.claudeActiveChildren?.size ||
+          session.startup !== undefined ||
+          session.stopping !== undefined,
+      )
     )
   }
   close(reason = 'SSH disconnected. Reconnect to continue this thread.') {
@@ -2035,8 +2803,15 @@ export class Agents {
     this.discoveryChannels.clear()
     this.threads.clear()
     this.threadTransports.clear()
-    this.childThreads.clear()
     for (const [id, session] of this.sessions) {
+      if (session.input.provider === 'codex') {
+        this.finishCodexChildren(id, session, 'failed')
+        this.resolveCodexRequests(id, session)
+      }
+      if (session.input.provider === 'claude') {
+        this.resolveClaudeRequests(id, session)
+        this.finishClaudeChildren(id, session, 'failed')
+      }
       const channel = session.channel
       session.channel = undefined
       for (const pending of session.controls.values()) {
@@ -2056,6 +2831,7 @@ export class Agents {
       session.initialization.abort()
       session.titleTask?.abort()
     }
+    this.childThreads.clear()
     this.sessions.clear()
   }
 }

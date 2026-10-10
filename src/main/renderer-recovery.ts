@@ -17,6 +17,8 @@ export class RendererRecoveryBudget {
 const recoverySafeChannels = new Set([
   'app:info',
   'connection:state',
+  'conversations:load',
+  'conversations:save',
   'customization:get',
   'extensions:get',
   'forwarding:get',

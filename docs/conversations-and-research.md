@@ -22,6 +22,14 @@ The conversation preserves chronological provider events: responses, provider-em
 
 While work runs, progress updates stay expanded between collapsed action rows. Reasoning uses the reported action text without a separate reasoning-summary label. Expanded tool rows retain their code views and copying. Successfully completed turns show the final parent response and elapsed work time; submitted prompts and the complete stored transcript are preserved. Large outputs have bounded previews so a long diff or tool response cannot freeze the interface; the full retained output remains available to copy or download. Provider reasoning can be shown only when the provider emits it. Life cannot expose internal information absent from the stream.
 
+## Saved conversations and recovery
+
+Agents and Research transcripts are saved to `conversations.json` in Life's Electron user-data directory. Each checkpoint flushes a private temporary file before atomically replacing the committed history. Saving waits for a 600 ms quiet period, with checkpoints scheduled every two seconds during continuous output. Native close, quit, and interface reload also request a final checkpoint before replacing the document.
+
+Existing browser history migrates when the native store is first created. Life loads the disk history before enabling conversation edits, then retains newer local fallback messages or a matching newer cache checkpoint. Stale cached threads do not restore conversations already deleted from a newer checkpoint. Browser-cache quota errors cannot prevent a native save; disk errors leave the last committed file intact and report that the newer conversation remains in the cache when available. Unreadable originals are preserved instead of replaced automatically.
+
+Restored unfinished work is marked unknown, and queued messages remain paused for review. Restarting Life does not replay prompts or approvals. Life Studio retains its separate customization history. These local checkpoints do not change Codex or Claude Code's original provider records on the connected host.
+
 ## Queue a follow-up or steer current work
 
 With the message-queue feature enabled, pressing Tab in a nonempty composer while a provider is busy queues a follow-up. Empty Tab and modified Tab retain normal keyboard navigation. The queue runs in order after the current response reaches provider-confirmed completion. A partial result, pending approval, failure, interruption, or lost connection does not start the next queued prompt. Claude's native session-idle event takes precedence over individual result events when that protocol is available.

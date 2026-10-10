@@ -3,7 +3,7 @@ param(
     [string]$Installer,
     [string]$ExpectedVersion,
     [Alias('BaselineVersion')]
-    [string[]]$BaselineVersions = @('0.1.0'),
+    [string[]]$BaselineVersions = @(),
     [string]$ProofPath = 'output/windows-upgrade-proof.json'
 )
 
@@ -33,7 +33,15 @@ function Get-ValidatedBaselineVersions([string[]]$Versions, [string]$TargetVersi
     if ($TargetVersion -notmatch '^\d+\.\d+\.\d+$') {
         throw 'The target must be a stable three-part Life release version.'
     }
-    if (-not $Versions -or $Versions.Count -eq 0) { throw 'Specify at least one baseline release.' }
+    if (-not $Versions -or $Versions.Count -eq 0) {
+        # The default matches release CI: test only the latest published predecessor.
+        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0') |
+            Where-Object { [version]$_ -lt [version]$TargetVersion } |
+            Sort-Object { [version]$_ } -Descending |
+            Select-Object -First 1
+        if (-not $latest) { throw 'No preceding known release exists for this upgrade target.' }
+        $Versions = @($latest)
+    }
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($version in $Versions) {
         if (-not $version -or $version -notmatch '^\d+\.\d+\.\d+$') {

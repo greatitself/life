@@ -629,7 +629,15 @@ describe.each<Provider>(['codex', 'claude'])(
       await agents.start(start(provider, 'approval'))
       await waitFor(() => eventOf('approval'))
       const approval = eventOf('approval')!
-      expect(approval.text).toBe('npm test')
+      expect(approval.text).toBe(
+        provider === 'codex' ? 'npm test\n\nRun project checks' : 'npm test',
+      )
+      if (provider === 'codex')
+        expect(approval.details).toMatchObject({
+          method: 'item/commandExecution/requestApproval',
+          command: 'npm test',
+          reason: 'Run project checks',
+        })
       expect(eventOf('complete')).toBeUndefined()
       await agents.respond(approval.sessionId, approval.requestId!, true)
       await waitFor(() => eventOf('complete'))

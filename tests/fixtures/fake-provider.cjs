@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Deterministic stand-ins: no provider SDK, credentials, network calls or inference.
-const { basename, join } = require('node:path')
+const { basename, dirname, join } = require('node:path')
 const { appendFileSync, existsSync, readFileSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { createInterface } = require('node:readline')
@@ -428,6 +428,8 @@ if (provider === 'claude' && metadataWorkspace) {
   let active
   const threads = new Map()
   const codexActive = new Map()
+  const usageProbeTurns = new Map()
+  let claudeUsageProbeTurns = 0
   const claudeSettings = { model: 'default', effortLevel: 'low', fastMode: false }
   const sessionId =
     argv.find((arg) => arg.startsWith('--resume='))?.slice('--resume='.length) ||
@@ -456,6 +458,34 @@ if (provider === 'claude' && metadataWorkspace) {
         item: { id: turn.itemId, type: 'agentMessage', phase: 'final_answer', text },
       },
     })
+    if (turn.prompt.startsWith('usage-probe')) {
+      const count = (usageProbeTurns.get(turn.threadId) || 0) + 1
+      usageProbeTurns.set(turn.threadId, count)
+      send({
+        method: 'thread/tokenUsage/updated',
+        params: {
+          threadId: turn.threadId,
+          turnId: turn.turnId,
+          tokenUsage: {
+            total: {
+              inputTokens: 1000 * count,
+              outputTokens: 200 * count,
+              cachedInputTokens: 400 * count,
+              reasoningOutputTokens: 100 * count,
+              totalTokens: 1200 * count,
+            },
+            last: {
+              inputTokens: 400,
+              outputTokens: 100,
+              cachedInputTokens: 200,
+              reasoningOutputTokens: 50,
+              totalTokens: 500,
+            },
+            modelContextWindow: 200000,
+          },
+        },
+      })
+    }
     send({
       method: 'turn/completed',
       params: { threadId: turn.threadId, turn: { id: turn.turnId, status: 'completed' } },
@@ -751,7 +781,29 @@ if (provider === 'claude' && metadataWorkspace) {
       parent_tool_use_id: null,
       message: { id: turn.itemId, role: 'assistant', content: [{ type: 'text', text }] },
     })
-    send({ type: 'result', session_id: sessionId, subtype: 'success', is_error: false })
+    const usage = turn.prompt.startsWith('usage-probe')
+      ? {
+          usage: {
+            input_tokens: 700,
+            cache_read_input_tokens: 300,
+            cache_creation_input_tokens: 50,
+            output_tokens: 150,
+          },
+          modelUsage: {
+            'claude-fixture-model': {
+              inputTokens: 700 * (claudeUsageProbeTurns + 1),
+              cacheReadInputTokens: 300 * (claudeUsageProbeTurns + 1),
+              cacheCreationInputTokens: 50 * (claudeUsageProbeTurns + 1),
+              outputTokens: 150 * (claudeUsageProbeTurns + 1),
+              thinkingTokens: 75 * (claudeUsageProbeTurns + 1),
+              costUSD: 0.12 * (claudeUsageProbeTurns + 1),
+              costBasis: 'list',
+            },
+          },
+          total_cost_usd: 0.12 * ++claudeUsageProbeTurns,
+        }
+      : {}
+    send({ type: 'result', session_id: sessionId, subtype: 'success', is_error: false, ...usage })
     send({ type: 'system', subtype: 'session_state_changed', session_id: sessionId, state: 'idle' })
     send({ type: 'system', subtype: 'ai_title', session_id: sessionId, title: generatedTitle })
     active = undefined
@@ -1006,6 +1058,30 @@ if (provider === 'claude' && metadataWorkspace) {
             data: codexModels,
           },
         })
+      if (
+        message.method === 'account/rateLimits/read' &&
+        existsSync(join(dirname(process.env.RELAY_TEST_LOG), 'usage-limits-error'))
+      )
+        send({
+          id: message.id,
+          error: { code: -32000, message: 'Fixture account limits temporarily unavailable' },
+        })
+      else if (message.method === 'account/rateLimits/read')
+        send({
+          id: message.id,
+          result: {
+            ordinaryUsageAllowed: false,
+            rateLimits: {
+              limitId: 'codex',
+              limitName: 'Codex',
+              planType: 'pro',
+              primary: { usedPercent: 12.5, windowDurationMins: 300, resetsAt: 1791648000 },
+              secondary: { usedPercent: 37, windowDurationMins: 10080, resetsAt: 1792166400 },
+              credits: { hasCredits: true, unlimited: false, balance: '18.00' },
+            },
+            rateLimitResetCredits: { availableCount: 2 },
+          },
+        })
       if (message.method === 'config/read')
         send({
           id: message.id,
@@ -1176,6 +1252,51 @@ if (provider === 'claude' && metadataWorkspace) {
         })
       }
     } else {
+      if (
+        message.type === 'control_request' &&
+        message.request.subtype === 'get_usage' &&
+        existsSync(join(dirname(process.env.RELAY_TEST_LOG), 'usage-limits-error'))
+      )
+        send({
+          type: 'control_response',
+          response: {
+            subtype: 'error',
+            request_id: message.request_id,
+            error: 'Fixture account limits temporarily unavailable',
+          },
+        })
+      else if (message.type === 'control_request' && message.request.subtype === 'get_usage')
+        send({
+          type: 'control_response',
+          response: {
+            subtype: 'success',
+            request_id: message.request_id,
+            response: {
+              session: {
+                total_cost_usd: 0,
+                model_usage: {},
+                total_api_duration_ms: 0,
+                total_duration_ms: 0,
+                total_lines_added: 0,
+                total_lines_removed: 0,
+              },
+              subscription_type: 'pro',
+              rate_limits_available: true,
+              rate_limits: {
+                five_hour: { utilization: 14, resets_at: '2026-10-10T16:00:00Z' },
+                seven_day: { utilization: 43, resets_at: '2026-10-16T16:00:00Z' },
+                extra_usage: {
+                  is_enabled: true,
+                  monthly_limit: 2500,
+                  used_credits: 125,
+                  utilization: 5,
+                  currency: 'USD',
+                },
+              },
+              behaviors: null,
+            },
+          },
+        })
       if (message.type === 'control_request' && message.request.subtype === 'initialize')
         setTimeout(
           () => {

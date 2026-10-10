@@ -7,6 +7,7 @@ import {
   type Thread,
 } from '../src/renderer/state'
 import { normalizeImportedThreadHistory } from '../src/renderer/thread-metadata'
+import { threadHasRunningChildren } from '../src/renderer/thread-presentation'
 import type { AgentEvent } from '../src/shared/types'
 
 const exactUserText = '  Please inspect this code.\n\n```ts\nconst value = "  untouched  ";\n```\n'
@@ -385,6 +386,50 @@ describe('provider events remain visible and distinct in a thread', () => {
     expect(updated.busy).toBe(true)
   })
 
+  it.each(['codex', 'claude'] as const)(
+    'tracks distinct %s native child runs without reviving stale runs or rewriting completed output',
+    (provider) => {
+      const lifecycle = (run: string, status: string) =>
+        event('subagent', {
+          agentId: 'child-agent',
+          itemId: 'child-lifecycle',
+          status,
+          details:
+            provider === 'codex'
+              ? { lifecycle: 'turn', nativeTurnId: run }
+              : { run_id: run, ...(status === 'running' ? {} : { lifecycle: 'turn' }) },
+        })
+      const completed = stream(thread({ provider }), [
+        lifecycle('run-1', 'running'),
+        event('text', { agentId: 'child-agent', itemId: 'answer-1', text: 'Original answer' }),
+        lifecycle('run-1', 'completed'),
+        event('complete', { status: 'completed' }),
+      ])
+      const originalAnswer = completed.messages.find(
+        (message) => message.text === 'Original answer',
+      )
+      expect(threadHasRunningChildren(completed)).toBe(false)
+      const resumed = stream(completed, [
+        lifecycle('run-2', 'running'),
+        event('text', { agentId: 'child-agent', itemId: 'answer-2', text: 'Second answer' }),
+      ])
+      expect(threadHasRunningChildren(resumed)).toBe(true)
+      expect(resumed.busy).toBe(false)
+      expect(applyEvent(resumed, lifecycle('run-1', 'running'))).toBe(resumed)
+      expect(applyEvent(resumed, lifecycle('run-1', 'failed'))).toBe(resumed)
+      const failed = applyEvent(resumed, lifecycle('run-2', 'failed'))
+      expect(threadHasRunningChildren(failed)).toBe(false)
+      expect(failed.messages.find((message) => message.text === 'Original answer')).toBe(
+        originalAnswer,
+      )
+      expect(failed.messages.find((message) => message.text === 'Second answer')).toMatchObject({
+        finishStatus: 'failed',
+        finishedAt: expect.any(Number),
+      })
+      expect(failed.messages.filter((message) => message.kind === 'subagent')).toHaveLength(2)
+    },
+  )
+
   it.each(['error', 'complete'] as const)(
     'records a child %s without settling or failing the running parent turn',
     (type) => {
@@ -500,6 +545,47 @@ describe('provider events remain visible and distinct in a thread', () => {
       serviceTier: 'fast',
     })
   })
+
+  it('shows a temporary provider error while retaining its live turn, requests and queued input', () => {
+    const original = thread({
+      queue: [{ id: 'queued', text: 'Next request', attachments: [], createdAt: 20 }],
+      pending: [event('approval', { requestId: 'approval' })],
+    })
+    const updated = applyEvent(
+      original,
+      event('error', {
+        text: 'Temporary connection failure. Retrying.',
+        details: { recoverable: true, retryAttempt: 2 },
+      }),
+    )
+    expect(updated.busy).toBe(true)
+    expect(updated.turnStatus).toBe('running')
+    expect(updated.pending).toBe(original.pending)
+    expect(updated.queue).toBe(original.queue)
+    expect(updated.messages[0]).toBe(original.messages[0])
+    expect(updated.messages.at(-1)).toMatchObject({
+      role: 'error',
+      text: 'Temporary connection failure. Retrying.',
+      details: { recoverable: true, retryAttempt: 2 },
+      turn: 1,
+    })
+  })
+
+  it('keeps a temporary child error in its original turn without failing the child or parent', () => {
+    const original = thread({ turn: 2, agentTurns: { child: 1 } })
+    const updated = applyEvent(
+      original,
+      event('error', {
+        agentId: 'child',
+        text: 'Child retrying',
+        details: { recoverable: true },
+      }),
+    )
+    expect(updated.messages.at(-1)).toMatchObject({ role: 'error', agentId: 'child', turn: 1 })
+    expect(updated.busy).toBe(true)
+    expect(updated.turnStatus).toBe('running')
+    expect(updated.messages.some((message) => message.kind === 'subagent')).toBe(false)
+  })
 })
 
 describe('provider approvals and questions remain in the transcript after resolution', () => {
@@ -612,6 +698,30 @@ describe('provider approvals and questions remain in the transcript after resolu
     expect(answered.turnStatus).toBe('running')
   })
 
+  it('keeps secret input in the native response and redacts it from persisted request history', () => {
+    const questions = [
+      { id: 'token', question: 'Enter the access token.', isSecret: true },
+      { id: 'scope', question: 'Choose the project.' },
+    ]
+    const answers = { token: ['exact private token'], scope: ['project-a'] }
+    const requested = applyEvent(
+      thread(),
+      event('question', { requestId: 'credentials', questions }),
+    )
+    const answered = resolveAgentRequest(requested, 'credentials', true, answers, 1000)
+    expect(answers).toEqual({ token: ['exact private token'], scope: ['project-a'] })
+    expect(answered.messages.find((message) => message.kind === 'event')).toMatchObject({
+      details: {
+        response: { accepted: true, answers: { token: ['[redacted]'], scope: ['project-a'] } },
+      },
+    })
+    expect(JSON.stringify(answered)).not.toContain('exact private token')
+    const providerResolved = { ...requested, pending: [] }
+    expect(
+      JSON.stringify(resolveAgentRequest(providerResolved, 'credentials', true, answers)),
+    ).not.toContain('exact private token')
+  })
+
   it('retains the original question and every option after the user declines it', () => {
     const requested = applyEvent(
       thread(),
@@ -682,6 +792,55 @@ describe('provider approvals and questions remain in the transcript after resolu
     ).toMatchObject({ status: 'waiting', details: { questions } })
   })
 
+  it.each(['completed', 'cancelled'] as const)(
+    'settles a provider-resolved request as %s without ending the turn or sibling requests',
+    (status) => {
+      const requested = stream(thread(), [
+        event('approval', { requestId: 'first', text: 'Allow first command?' }),
+        event('question', { requestId: 'second', agentId: 'child', questions }),
+      ])
+      const resolved = applyEvent(
+        requested,
+        event('request-resolved', { requestId: 'first', status }),
+      )
+      expect(resolved.pending.map((request) => request.requestId)).toEqual(['second'])
+      expect(
+        resolved.messages.find((message) => message.details?.requestId === 'first'),
+      ).toMatchObject({
+        status,
+        finishedAt: expect.any(Number),
+        text: 'Allow first command?',
+      })
+      expect(
+        resolved.messages.find((message) => message.details?.requestId === 'second')?.status,
+      ).toBe('waiting')
+      expect(resolved.busy).toBe(true)
+      expect(resolved.turnStatus).toBe('running')
+      expect(applyEvent(resolved, event('request-resolved', { requestId: 'first', status }))).toBe(
+        resolved,
+      )
+      expect(
+        applyEvent(resolved, event('approval', { requestId: 'first', text: 'Replayed request' })),
+      ).toBe(resolved)
+    },
+  )
+
+  it('retains an accepted answer when a provider resolution arrives afterwards', () => {
+    const requested = applyEvent(thread(), event('question', { requestId: 'question', questions }))
+    const answers = { scope: ['Changed files'] }
+    const answered = resolveAgentRequest(requested, 'question', true, answers, 1000)
+    expect(
+      applyEvent(
+        answered,
+        event('request-resolved', { requestId: 'question', status: 'completed' }),
+      ),
+    ).toBe(answered)
+    expect(answered.messages.find((message) => message.kind === 'event')).toMatchObject({
+      status: 'answered',
+      details: { response: { accepted: true, answers } },
+    })
+  })
+
   it('keeps a child approval replyable after the parent completes its own turn', () => {
     const requested = stream(thread(), [
       event('approval', { requestId: 'parent-request', text: 'Allow parent command?' }),
@@ -715,44 +874,48 @@ describe('provider approvals and questions remain in the transcript after resolu
     expect(approved.busy).toBe(false)
   })
 
-  it('cancels only a finished child’s unresolved requests while keeping sibling provider controls replyable', () => {
-    const requested = stream(thread(), [
-      event('approval', {
-        requestId: 'child-a-request',
-        agentId: 'child-a',
-        text: 'Allow child A?',
-      }),
-      event('question', { requestId: 'child-b-request', agentId: 'child-b', questions }),
-      event('approval', { requestId: 'parent-request', text: 'Allow parent command?' }),
-    ])
-    const childDone = applyEvent(
-      requested,
-      event('subagent', {
-        agentId: 'child-a',
-        itemId: 'child-a-session',
-        status: 'completed',
-        text: 'Child A is done',
-        details: { lifecycle: 'turn' },
-      }),
-    )
-    expect(childDone.pending.map((request) => request.requestId)).toEqual([
-      'child-b-request',
-      'parent-request',
-    ])
-    expect(
-      childDone.messages.find((message) => message.details?.requestId === 'child-a-request')
-        ?.status,
-    ).toBe('cancelled')
-    expect(
-      childDone.messages.find((message) => message.details?.requestId === 'child-b-request')
-        ?.status,
-    ).toBe('waiting')
-    expect(
-      childDone.messages.find((message) => message.details?.requestId === 'parent-request')?.status,
-    ).toBe('waiting')
-    expect(childDone.turnStatus).toBe('running')
-    expect(childDone.busy).toBe(true)
-  })
+  it.each(['completed', 'stopped', 'killed'])(
+    'cancels only a %s child’s unresolved requests while keeping sibling provider controls replyable',
+    (status) => {
+      const requested = stream(thread(), [
+        event('approval', {
+          requestId: 'child-a-request',
+          agentId: 'child-a',
+          text: 'Allow child A?',
+        }),
+        event('question', { requestId: 'child-b-request', agentId: 'child-b', questions }),
+        event('approval', { requestId: 'parent-request', text: 'Allow parent command?' }),
+      ])
+      const childDone = applyEvent(
+        requested,
+        event('subagent', {
+          agentId: 'child-a',
+          itemId: 'child-a-session',
+          status,
+          text: 'Child A is done',
+          details: { lifecycle: 'turn' },
+        }),
+      )
+      expect(childDone.pending.map((request) => request.requestId)).toEqual([
+        'child-b-request',
+        'parent-request',
+      ])
+      expect(
+        childDone.messages.find((message) => message.details?.requestId === 'child-a-request')
+          ?.status,
+      ).toBe('cancelled')
+      expect(
+        childDone.messages.find((message) => message.details?.requestId === 'child-b-request')
+          ?.status,
+      ).toBe('waiting')
+      expect(
+        childDone.messages.find((message) => message.details?.requestId === 'parent-request')
+          ?.status,
+      ).toBe('waiting')
+      expect(childDone.turnStatus).toBe('running')
+      expect(childDone.busy).toBe(true)
+    },
+  )
 
   it('resolves the latest occurrence of a reused request ID without rewriting an older response', () => {
     const firstAnswers = { scope: ['  First answer\n'] }

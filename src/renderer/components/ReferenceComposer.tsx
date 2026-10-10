@@ -373,6 +373,7 @@ export function ReferenceComposerControls({
                     key={item.id}
                     value={item.id}
                     textValue={item.name}
+                    disabled={item.id === 'auto' && current?.supportsAutoMode === false}
                     aria-label={`${item.name}. ${item.description}`}
                   >
                     <span className="reference-permission-copy">

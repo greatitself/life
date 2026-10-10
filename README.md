@@ -4,13 +4,13 @@ Life is an Electron desktop research workspace for **Codex and Claude Code**, wi
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Desktop installers are included in the [v0.9.0 release](https://github.com/greatitself/life/releases/tag/v0.9.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
+Desktop installers are included in the [v0.10.0 release](https://github.com/greatitself/life/releases/tag/v0.10.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
 
 ## Upgrade your installed Life
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.9.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI installs the actual 0.1.0, 0.5.1, 0.6.0, 0.7.0, and 0.8.0 releases, upgrades each, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.10.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.9.0** for this release, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
 
 Life 0.8 includes all **37 incorporated customizations**: the 27 earlier workspace changes and 10 additions from the October 9 backup. They are installed features with individual enable, disable, delete, and restore controls. Exact matching old source layers remain exportable archives; unrelated or subsequently edited extensions are preserved. See the [incorporation audit](docs/backup-incorporation-2026-10-09.md) and [release notes](docs/release-notes-v0.8.0.md).
 
@@ -21,6 +21,10 @@ Life 0.8 includes all **37 incorporated customizations**: the 27 earlier workspa
 - **Dark and light:** Neutral black, white, and gray surfaces. Theme changes apply to diagrams and the terminal. Windows has rectangular controls on the right; macOS uses native traffic lights. Official Codex and Claude marks come from [SVGL](https://github.com/pheralb/svgl), with its MIT notice bundled in installers.
 
 Fresh installations open Agents. Use the header view controls for **Research** and the project map; existing saved view preferences are respected. See [conversations, environments, and host history](docs/conversations-and-research.md) for the detailed behavior.
+
+Open **Usage** in the header for native token totals, cache/reasoning breakdowns, reported context usage, and provider cost estimates across retained sessions. Filter by machine or provider and open a listed conversation. Account limits and reset times belong to the connected machine; refresh them with **Refresh limits**. Missing costs and quota data remain explicitly unreported.
+
+Open **Provider updates** beside Usage to compare the connected machine's installed Codex and Claude Code versions with published releases. Background checks and **Check for updates** refresh the versions and show newer-release notices. Follow the linked instructions for that machine's installation method and channel. The separate **Updates** controls update Life itself. See the [0.10.0 release notes](docs/release-notes-v0.10.0.md) and [frontier alignment audit](docs/frontier-alignment-v0.10.0.md) for the behavior changes and validation scope.
 
 ![Life agent workspace in light theme](docs/images/life-workspace-light.png)
 
@@ -109,7 +113,7 @@ Life discovers models from the connected Codex or Claude Code CLI. Reasoning-eff
 
 The access menu uses each provider's native terminology and omits Plan: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
 
-Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Conversation history and project maps are stored locally.
+Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Agents and Research histories checkpoint atomically to `conversations.json` in Life's user-data directory, including during continuous streaming and before native close or reload. Existing browser history migrates automatically; a full browser cache cannot block disk saves. Restored queues stay paused, and original provider records remain unchanged. Project maps and separate Studio histories retain their local storage. See [saved conversations and recovery](docs/conversations-and-research.md#saved-conversations-and-recovery).
 
 ## Run and build
 
@@ -127,7 +131,7 @@ npm run dist
 
 Pushing a version tag verifies the desktop application and builds Electron installers for Windows x64, Linux x64, and macOS on Intel and Apple Silicon, including Windows upgrade checks.
 
-To rebuild an existing release, dispatch the release workflow with its `tag` and the verified source commit in `source_ref`. All installers and release notes use that same commit, which is linked in the published notes. The source package version must match the release tag. Replacing a same-version installer requires a manual installation for users who already installed that version.
+To rebuild an existing release, dispatch the release workflow with its `tag` and the verified source commit in `source_ref`. All installers and release notes use that same commit, which is linked in the published notes. The source package version must match the release tag. Release assembly and Windows installer verification use the workflow revision, so older source revisions can be rebuilt with maintained checks. Only the latest preceding known published release is used as the upgrade baseline. Replacing a same-version installer requires a manual installation for users who already installed that version.
 
 ## Verify changes
 
@@ -139,7 +143,7 @@ npm run test:desktop
 npm run format:check
 ```
 
-The desktop smoke test launches real Electron with isolated temporary data and a loopback SSH server. On Linux it uses Xvfb when needed. Protocol tests use deterministic Codex/Claude fixtures, avoiding paid inference; real authenticated model inference requires your remote machine. Extension tests exercise real Node workers and runtime recovery. Source tests exercise the actual compiler and revision/rollback behavior. Windows CI verifies the old installer upgrades to the new one.
+The desktop smoke test launches real Electron with isolated temporary data and a loopback SSH server. On Linux it uses Xvfb when needed. Protocol tests use deterministic Codex/Claude fixtures, avoiding paid inference; real authenticated model inference requires your remote machine. Extension tests exercise real Node workers and runtime recovery. Source tests exercise the actual compiler and revision/rollback behavior. Windows CI verifies that the latest preceding release upgrades to the new installer.
 
 | Action                     | Shortcut             |
 | -------------------------- | -------------------- |

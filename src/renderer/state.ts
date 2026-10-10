@@ -115,9 +115,10 @@ export function normalizeModelChoices(
         : serviceTier,
   }
 }
-export function readThreads(): Thread[] {
+export function readThreads(input?: unknown): Thread[] {
   try {
-    const data: unknown = JSON.parse(localStorage.getItem('relay.threads.v1') || '[]')
+    const data: unknown =
+      input === undefined ? JSON.parse(localStorage.getItem('relay.threads.v1') || '[]') : input
     if (!Array.isArray(data)) return []
     return data
       .filter(
@@ -321,6 +322,28 @@ export function resolveAgentRequest(
       break
     }
   }
+  const recordedQuestions = thread.messages[requestIndex]?.details?.questions
+  const secretQuestions = new Set(
+    [
+      ...(thread.pending.find((request) => request.requestId === requestId)?.questions || []),
+      ...(Array.isArray(recordedQuestions) ? recordedQuestions : []),
+    ].flatMap((question) =>
+      question &&
+      typeof question === 'object' &&
+      question.isSecret === true &&
+      typeof question.id === 'string'
+        ? [question.id]
+        : [],
+    ),
+  )
+  const recordedAnswers = answers
+    ? Object.fromEntries(
+        Object.entries(answers).map(([id, values]) => [
+          id,
+          secretQuestions.has(id) ? values.map(() => '[redacted]') : values,
+        ]),
+      )
+    : undefined
   return {
     ...thread,
     pending: thread.pending.filter((request) => request.requestId !== requestId),
@@ -336,7 +359,7 @@ export function resolveAgentRequest(
             finishedAt: at,
             details: {
               ...message.details,
-              response: { accepted, ...(answers ? { answers } : {}) },
+              response: { accepted, ...(recordedAnswers ? { answers: recordedAnswers } : {}) },
             },
           }
         : message,
@@ -375,9 +398,22 @@ function completedToolText(previous: Message | undefined, output: string | undef
   if (retained.startsWith(output)) return retained
   return `${retained}${retained.endsWith('\n') || output.startsWith('\n') ? '' : '\n'}${output}`
 }
+function childNativeRun(details: Record<string, unknown> | undefined): string | undefined {
+  if (
+    details?.lifecycle === 'turn' &&
+    typeof details.nativeTurnId === 'string' &&
+    details.nativeTurnId
+  )
+    return JSON.stringify(['nativeTurnId', details.nativeTurnId])
+  if (typeof details?.run_id === 'string' && details.run_id)
+    return JSON.stringify(['run_id', details.run_id])
+  return undefined
+}
 export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   if (event.sessionId !== thread.id) return thread
-  if (event.agentId && (event.type === 'complete' || event.type === 'error'))
+  const recoverableError =
+    event.type === 'error' && eventDetails(event.details)?.recoverable === true
+  if (event.agentId && (event.type === 'complete' || (event.type === 'error' && !recoverableError)))
     event = {
       ...event,
       type: 'subagent',
@@ -421,6 +457,39 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         ...(event.status !== undefined ? { status: event.status } : {}),
       },
     }
+  if (event.type === 'account-usage')
+    return {
+      ...thread,
+      agentSettings: { ...thread.agentSettings, accountUsage: eventDetails(event.details) },
+    }
+  if (event.type === 'request-resolved') {
+    if (!event.requestId) return thread
+    let requestIndex = -1
+    for (let index = thread.messages.length - 1; index >= 0; index--) {
+      const message = thread.messages[index]
+      if (message.kind === 'event' && message.details?.requestId === event.requestId) {
+        if (message.status === 'waiting') requestIndex = index
+        break
+      }
+    }
+    const pending = thread.pending.filter((request) => request.requestId !== event.requestId)
+    if (requestIndex < 0 && pending.length === thread.pending.length) return thread
+    if (['approved', 'answered', 'declined'].includes(event.status || ''))
+      return resolveAgentRequest(thread, event.requestId, event.status !== 'declined')
+    const status = ['cancelled', 'canceled', 'interrupted'].includes(event.status || '')
+      ? 'cancelled'
+      : 'completed'
+    return {
+      ...thread,
+      pending,
+      messages:
+        requestIndex < 0
+          ? thread.messages
+          : thread.messages.map((message, index) =>
+              index === requestIndex ? { ...message, status, finishedAt: Date.now() } : message,
+            ),
+    }
+  }
   if (event.type === 'complete') {
     const status =
       event.status === 'interrupted'
@@ -455,6 +524,8 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       : thread.turn
     const id = `${requestTurn}:request:${event.requestId || event.itemId || event.type}`
     const previous = thread.messages.find((message) => message.id === id)
+    // A reconnect can replay the original native request after its answer or cancellation.
+    if (previous?.finishedAt && previous.status !== 'waiting') return thread
     const request: Message = {
       ...previous,
       ...eventMetadata(event),
@@ -525,6 +596,29 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     if (!event.text) return thread
   }
   if (event.type === 'error') {
+    if (recoverableError) {
+      const turn = event.agentId
+        ? ((Object.hasOwn(thread.agentTurns || {}, event.agentId)
+            ? thread.agentTurns?.[event.agentId]
+            : undefined) ??
+          thread.messages.find((message) => message.agentId === event.agentId)?.turn ??
+          thread.turn)
+        : thread.turn
+      return {
+        ...thread,
+        messages: [
+          ...thread.messages,
+          {
+            ...eventMetadata(event),
+            id: crypto.randomUUID(),
+            role: 'error',
+            text: event.text || 'The agent encountered a temporary error and is retrying.',
+            turn,
+            createdAt: Date.now(),
+          },
+        ],
+      }
+    }
     const failed = finishThreadTurn(thread, 'failed')
     return {
       ...failed,
@@ -558,12 +652,27 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     : thread.turn
   if (event.agentId && savedAgentTurn === undefined)
     thread = { ...thread, agentTurns: { ...thread.agentTurns, [event.agentId]: eventTurn } }
+  const nativeRun =
+    event.type === 'subagent' ? childNativeRun(eventDetails(event.details)) : undefined
   if (
     event.type === 'subagent' &&
     event.agentId &&
     eventDetails(event.details)?.lifecycle === 'turn' &&
-    ['completed', 'failed', 'interrupted', 'errored', 'cancelled'].includes(event.status || '')
+    ['completed', 'failed', 'interrupted', 'errored', 'cancelled', 'stopped', 'killed'].includes(
+      event.status || '',
+    )
   ) {
+    if (nativeRun) {
+      const latestRun = thread.messages.findLast(
+        (message) =>
+          message.kind === 'subagent' &&
+          (message.agentId === event.agentId ||
+            (event.parentItemId && message.agentId === event.parentItemId)) &&
+          childNativeRun(message.details),
+      )
+      // A delayed completion for an earlier native run must not settle its successor.
+      if (latestRun && childNativeRun(latestRun.details) !== nativeRun) return thread
+    }
     const finishedAt = Date.now()
     thread = {
       ...thread,
@@ -578,14 +687,18 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
           (!event.parentItemId || message.agentId !== event.parentItemId)
         )
           return message
+        const messageRun = childNativeRun(message.details)
+        if (nativeRun && messageRun && messageRun !== nativeRun) return message
         if (message.kind === 'event' && message.status === 'waiting')
           return { ...message, finishedAt, status: 'cancelled' }
         if (message.role === 'assistant')
-          return {
-            ...message,
-            finishedAt: message.finishedAt ?? finishedAt,
-            finishStatus: event.status,
-          }
+          return message.finishedAt && message.finishStatus !== 'unknown'
+            ? message
+            : {
+                ...message,
+                finishedAt: message.finishedAt ?? finishedAt,
+                finishStatus: event.status,
+              }
         if (
           message.role === 'tool' &&
           ['running', 'inProgress', 'unknown'].includes(message.status || '')
@@ -600,7 +713,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     ? event.type
     : 'response'
   const baseId = `${eventTurn}:${scopedItem || fallbackItem}`
-  let id = `${baseId}${metadata.phase ? `:${metadata.phase}` : ''}`
+  let id = `${baseId}${nativeRun ? `:native-run:${nativeRun}` : ''}${metadata.phase ? `:${metadata.phase}` : ''}`
   let index = thread.messages.findIndex((m) => m.id === id)
   if (index < 0 && ['text', 'reasoning', 'plan'].includes(event.type)) {
     // Some providers reveal the phase only on their final item snapshot.
@@ -617,6 +730,13 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     }
   }
   const previous = index >= 0 ? thread.messages[index] : undefined
+  if (
+    nativeRun &&
+    event.status === 'running' &&
+    previous?.finishedAt &&
+    previous.status !== 'unknown'
+  )
+    return thread
   const text =
     event.status === 'replace'
       ? event.text || ''
@@ -634,7 +754,9 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   const terminalTool =
     (event.type === 'tool' || event.type === 'subagent') &&
     status &&
-    ['completed', 'failed', 'interrupted', 'errored', 'cancelled'].includes(status)
+    ['completed', 'failed', 'interrupted', 'errored', 'cancelled', 'stopped', 'killed'].includes(
+      status,
+    )
   const message: Message = {
     ...previous,
     ...metadata,

@@ -571,7 +571,7 @@ export function useCustomizationStudio(options: StudioOptions) {
       setFeedback(
         api
           ? 'Connect a machine with Codex or Claude Code to customize Life. A project selection is not required.'
-          : 'Open the Life desktop application to run a customization agent. Simple settings requests work in this preview.',
+          : 'Open Life to run a customization agent. Simple settings requests work offline.',
       )
       return false
     }

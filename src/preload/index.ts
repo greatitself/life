@@ -9,6 +9,10 @@ const subscribe = <T>(channel: string, callback: (data: T) => void) => {
 }
 const api: RelayAPI = {
   platform: process.platform,
+  conversations: {
+    load: () => ipcRenderer.invoke('conversations:load'),
+    save: (threads, savedAt) => ipcRenderer.invoke('conversations:save', threads, savedAt),
+  },
   hostHistory: {
     list: (input) => ipcRenderer.invoke('agent-history:list', input),
     read: (input) => ipcRenderer.invoke('agent-history:read', input),
@@ -43,6 +47,11 @@ const api: RelayAPI = {
     download: () => ipcRenderer.invoke('updates:download'),
     install: () => ipcRenderer.invoke('updates:install'),
     onState: (callback) => subscribe('updates:state', callback),
+  },
+  providerUpdates: {
+    get: () => ipcRenderer.invoke('provider-updates:get'),
+    check: () => ipcRenderer.invoke('provider-updates:check'),
+    onState: (callback) => subscribe('provider-updates:state', callback),
   },
   sourceCode: {
     get: () => ipcRenderer.invoke('source-code:get'),
@@ -102,6 +111,7 @@ const api: RelayAPI = {
     respond: (id, requestId, accepted, answers) =>
       ipcRenderer.invoke('agent:respond', id, requestId, accepted, answers),
     models: (provider) => ipcRenderer.invoke('agent:models', provider),
+    usage: (provider) => ipcRenderer.invoke('agent:usage', provider),
   },
   files: {
     list: (path) => ipcRenderer.invoke('files:list', path),

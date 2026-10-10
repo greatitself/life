@@ -27,6 +27,60 @@ export function groupThreadTurns(messages: Message[]): TurnGroup[] {
   return groups
 }
 
+/** Reuse settled turn props while another turn streams, without hiding late child updates. */
+export function createTurnGroupProjector(): (messages: Message[]) => TurnGroup[] {
+  let previous = new Map<number, TurnGroup>()
+  return (messages) => {
+    const groups = groupThreadTurns(messages).map((group) => {
+      const retained = previous.get(group.turn)
+      return retained &&
+        retained.key === group.key &&
+        retained.user === group.user &&
+        retained.messages.length === group.messages.length &&
+        retained.messages.every((message, index) => message === group.messages[index])
+        ? retained
+        : group
+    })
+    previous = new Map(groups.map((group) => [group.turn, group]))
+    return groups
+  }
+}
+
+/** Accepted steering is input to the same turn and must not restart its clock. */
+export function threadTurnStartedAt(thread: Pick<Thread, 'messages' | 'turn'>): number | undefined {
+  let first: Message | undefined
+  for (const message of thread.messages) {
+    if (message.turn !== thread.turn || message.role !== 'user') continue
+    first ||= message
+    if (message.submission !== 'steering') return message.createdAt
+  }
+  return first?.createdAt
+}
+
+function hasOutstandingActivity(group: TurnGroup): boolean {
+  return group.messages.some(
+    (message) =>
+      (message.kind === 'event' && message.status === 'waiting') ||
+      ((message.agentId || message.parentItemId || message.kind === 'subagent') &&
+        ['running', 'inProgress', 'in_progress', 'waiting', 'spawning', 'initializing'].includes(
+          message.status || '',
+        )),
+  )
+}
+
+export function threadHasRunningChildren(thread: Pick<Thread, 'messages' | 'pending'>): boolean {
+  return (
+    thread.pending.some((request) => Boolean(request.agentId)) ||
+    thread.messages.some(
+      (message) =>
+        Boolean(message.agentId || message.parentItemId || message.kind === 'subagent') &&
+        ['running', 'inProgress', 'in_progress', 'waiting', 'spawning', 'initializing'].includes(
+          message.status || '',
+        ),
+    )
+  )
+}
+
 /** Never move a response past a tool, steering request, or error. */
 export function threadOutputSequence(group: TurnGroup): Message[] {
   return group.messages
@@ -38,7 +92,14 @@ export function completedTurnResponse(
   busy: boolean,
   turnStatus?: string,
 ): Message | undefined {
-  if (busy || group.messages.some((message) => message.role === 'error')) return undefined
+  if (
+    busy ||
+    hasOutstandingActivity(group) ||
+    group.messages.some(
+      (message) => message.role === 'error' && message.details?.recoverable !== true,
+    )
+  )
+    return undefined
   const responses = group.messages.filter(
     (message) =>
       message.role === 'assistant' &&
@@ -49,7 +110,7 @@ export function completedTurnResponse(
   )
   const final = responses.filter((message) => message.phase === 'final_answer').at(-1)
   const response = final || responses.filter((message) => message.phase !== 'commentary').at(-1)
-  const status = group.user?.finishStatus || turnStatus || response?.finishStatus
+  const status = turnStatus || group.user?.finishStatus || response?.finishStatus
   return (status ? status === 'completed' : Boolean(final)) ? response : undefined
 }
 

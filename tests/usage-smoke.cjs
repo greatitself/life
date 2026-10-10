@@ -7,6 +7,7 @@ const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { build } = require('esbuild')
 const { chromium } = require('playwright')
+const { openUsageDialog } = require('./helpers/desktop-usage-steps.cjs')
 
 async function run() {
   const directory = await mkdtemp(join(tmpdir(), 'life-usage-'))
@@ -25,7 +26,8 @@ async function run() {
         contents: `
           import React, { StrictMode, useCallback, useState } from 'react'
           import { createRoot } from 'react-dom/client'
-          import { UsageDialog } from './src/renderer/components/UsageDialog'
+          import { UsageDialog as LoadedUsageDialog } from './src/renderer/components/UsageDialog'
+          import { deferredDialog } from './src/renderer/components/DeferredDialogs'
           import './src/renderer/styles.css'
           const codex = { tokenUsage: { total: { inputTokens: 1000, outputTokens: 200, cachedInputTokens: 400, reasoningOutputTokens: 100, totalTokens: 1200 }, last: { inputTokens: 400, outputTokens: 100, totalTokens: 500 }, modelContextWindow: 200000 } }
           const claude = n => ({ usageSessionId: 'native-claude', usageCallId: 'call-a', usageRestoresSessionTotals: true, usage: { input_tokens: 700, output_tokens: 150, cache_read_input_tokens: 300, cache_creation_input_tokens: 50 }, modelUsage: { 'claude-primary': { inputTokens: 700*n, outputTokens: 150*n, cacheReadInputTokens: 300*n, cacheCreationInputTokens: 50*n, thinkingTokens: 75*n, costUSD: .12*n, costBasis: 'list' } }, total_cost_usd: .12*n })
@@ -39,6 +41,9 @@ async function run() {
           ]
           const profiles = [{ id: 'machine-a', name: 'Research machine', host: 'research.example' }, { id: 'machine-b', name: 'Build machine', host: 'build.example' }]
           const fixture = window.usageFixture = { fail: false, defer: false, resetOnly: false, reads: [], pending: [], selected: [] }
+          const UsageDialog = deferredDialog(() => new Promise(resolve => {
+            fixture.resolveDialog = () => resolve({ default: LoadedUsageDialog })
+          }), 'Usage')
           function snapshot(provider, machine) {
             const fetchedAt = Date.now()
             if(fixture.resetOnly && provider === 'codex') return { provider, status: 'available', fetchedAt, limits: [{ id: 'reset-only', label: 'Reset-only allowance', primary: { windowDurationMins: 300, resetsAt: 1791648000 } }] }
@@ -62,7 +67,7 @@ async function run() {
             }, [machine])
             return <div data-theme="dark" style={{ padding: 24 }}>
               <button className="button secondary" onClick={() => setOpen(true)}>Usage</button>
-              {open ? <UsageDialog open={open} onOpenChange={setOpen} threads={retained} profiles={profiles} activeThreadId="codex-a" activeProfileId={machine} connected={connected} accountSnapshots={live} onReadUsage={read} onSelectThread={id => fixture.selected.push(id)} /> : null}
+              <UsageDialog open={open} onOpenChange={setOpen} threads={retained} profiles={profiles} activeThreadId="codex-a" activeProfileId={machine} connected={connected} accountSnapshots={live} onReadUsage={read} onSelectThread={id => fixture.selected.push(id)} />
             </div>
           }
           createRoot(document.getElementById('root')).render(<StrictMode><Fixture /></StrictMode>)
@@ -98,9 +103,27 @@ async function run() {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } })
     page.on('pageerror', (error) => errors.push(error.message))
     await page.goto(`http://127.0.0.1:${server.address().port}`)
-    await page.getByRole('button', { name: 'Usage', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Usage', exact: true })
-    await dialog.waitFor()
+    let contentReady = false
+    const opening = openUsageDialog(page).then(() => {
+      contentReady = true
+    })
+    await dialog.getByRole('status').filter({ hasText: 'Loading…' }).waitFor()
+    assert.equal(
+      contentReady,
+      false,
+      'The native opener does not finish on the named loading modal',
+    )
+    assert.equal(
+      await dialog.getByRole('region', { name: 'Account limits', exact: true }).count(),
+      0,
+    )
+    assert.equal(await page.evaluate(() => window.usageFixture.reads.length), 0)
+    await page.evaluate(() => window.usageFixture.resolveDialog())
+    await opening
+    checks.push(
+      'The native Usage opener waits for loaded account content through a deliberately delayed real deferred dialog',
+    )
     assert.ok(
       await dialog.evaluate((element) => element.getBoundingClientRect().width > 800),
       'Desktop usage dashboard uses its full readable width',

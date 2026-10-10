@@ -6,6 +6,15 @@ const { join } = require('node:path')
 const providers = { codex: 'Codex', claude: 'Claude Code' }
 const tokenKeys = ['input', 'output', 'cached', 'creation', 'reasoning', 'total']
 
+async function openUsageDialog(page) {
+  await page.getByRole('button', { name: 'Usage', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Usage', exact: true })
+  // The deferred loading modal has the same name. Wait for actual content,
+  // rather than treating that temporary modal as the loaded usage dashboard.
+  await dialog.getByRole('region', { name: 'Account limits', exact: true }).waitFor()
+  return dialog
+}
+
 // This oracle reads native wire fields directly. It never imports Life's usage
 // normalizer or totals functions, so a renderer accounting bug cannot validate itself.
 function nativeFacts(threads) {
@@ -206,10 +215,7 @@ async function runUsageChecks(context) {
   const selectedMachine = profiles.find((profile) => profile.id === codex.profileId)
   assert.ok(selectedMachine, 'The measured native thread belongs to a saved machine')
   const dialog = () => page().getByRole('dialog', { name: 'Usage', exact: true })
-  const open = async () => {
-    await page().getByRole('button', { name: 'Usage', exact: true }).click()
-    await dialog().waitFor()
-  }
+  const open = () => openUsageDialog(page())
   const formatted = (value, cost = false) =>
     page().evaluate(
       ({ value, cost }) =>
@@ -523,4 +529,4 @@ async function runUsageChecks(context) {
   )
 }
 
-module.exports = { runUsageChecks }
+module.exports = { runUsageChecks, openUsageDialog }

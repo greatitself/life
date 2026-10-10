@@ -211,6 +211,7 @@ export class Agents {
   >()
   private durableOpening = 0
   private catalogGeneration = 0
+  private codexCatalogGeneration = 0
   private catalogIdentity?: string
   constructor(
     private ssh: SSHConnection,
@@ -238,14 +239,18 @@ export class Agents {
       )
     )
   }
-  private clearModelCatalogs() {
-    this.catalogGeneration++
+  private clearCodexModelCatalogs() {
+    this.codexCatalogGeneration++
     this.defaultCodexModel = undefined
     this.codexModels = undefined
     this.codexDefaultEfforts.clear()
     this.codexDefaultTiers.clear()
     this.codexDiskConfig = undefined
     this.codexConfigStarting = undefined
+  }
+  private clearModelCatalogs() {
+    this.catalogGeneration++
+    this.clearCodexModelCatalogs()
     this.claudeModels = undefined
     this.claudeModelsStarting = undefined
   }
@@ -345,7 +350,7 @@ export class Agents {
     const openingKey = JSON.stringify([machine, cliVersion])
     const existing = this.codexByMachine.get(machine)
     if (existing && !existing.closed && this.codexTransportVersions.get(existing) === cliVersion) {
-      if (this.codex !== existing) this.clearModelCatalogs()
+      if (this.codex !== existing) this.clearCodexModelCatalogs()
       this.codex = existing
       return existing
     }
@@ -412,7 +417,7 @@ export class Agents {
         rpc.send({ method: 'initialized', params: {} })
         if (machine === this.machineIdentity() && cliVersion === (this.ssh.state.codex || '')) {
           this.codexByMachine.set(machine, rpc)
-          if (this.codex !== rpc) this.clearModelCatalogs()
+          if (this.codex !== rpc) this.clearCodexModelCatalogs()
           this.codex = rpc
         }
         return rpc
@@ -440,6 +445,7 @@ export class Agents {
     const cliVersion = this.ssh.state.codex
     const rpc = await this.getCodex()
     const catalogGeneration = this.catalogGeneration
+    const codexCatalogGeneration = this.codexCatalogGeneration
     const config = await this.configuredCodexDefaults(rpc)
     const models: Wire[] = []
     let cursor: string | undefined
@@ -454,7 +460,8 @@ export class Agents {
       generation !== this.generation ||
       machine !== this.machineIdentity() ||
       cliVersion !== this.ssh.state.codex ||
-      catalogGeneration !== this.catalogGeneration
+      catalogGeneration !== this.catalogGeneration ||
+      codexCatalogGeneration !== this.codexCatalogGeneration
     )
       throw new Error('SSH connection cancelled')
     const configuredModel = string(config.model)
@@ -751,6 +758,7 @@ export class Agents {
     const generation = this.generation
     const machine = this.machineIdentity()
     const catalogGeneration = this.catalogGeneration
+    const codexCatalogGeneration = this.codexCatalogGeneration
     const starting = (async () => {
       let config: Wire = {}
       try {
@@ -770,7 +778,8 @@ export class Agents {
       if (
         generation !== this.generation ||
         machine !== this.machineIdentity() ||
-        catalogGeneration !== this.catalogGeneration
+        catalogGeneration !== this.catalogGeneration ||
+        codexCatalogGeneration !== this.codexCatalogGeneration
       )
         throw new Error('SSH connection cancelled')
       this.codexDiskConfig = config

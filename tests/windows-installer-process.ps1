@@ -412,15 +412,24 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     $proof.activeCase.processExitCode = $run.exitCode
     $proof.activeCase.stdout = $run.stdout
     $proof.activeCase.stderr = $run.stderr
+    $trace = @()
     if (Test-Path -LiteralPath ($output + '.trace')) {
-        $proof.activeCase.trace = @(Get-Content -LiteralPath ($output + '.trace'))
+        $trace = @(Get-Content -LiteralPath ($output + '.trace'))
     }
+    $proof.activeCase.trace = $trace
     Assert-Fixture ($run.exitCode -eq 0 -and (Test-Path -LiteralPath $output)) "${Name}: native caller failed: $($run.exitCode) $($run.stderr)"
     $values = @{}
     foreach ($line in (Get-Content -LiteralPath $output)) {
         if ($line -match '^([^=]+)=(.*)$') { $values[$Matches[1]] = $Matches[2] }
     }
     $proof.activeCase.observed = $values
+    if ($Name -eq 'native-present-empty-environment') {
+        foreach ($entry in $trace) {
+            if ($entry -cmatch '^(direct|wrapper)\|empty\|') {
+                Assert-Fixture ($entry -ceq ($Matches[1] + '|empty|1||ok')) "${Name}: the native empty-value proof was invalid: $entry"
+            }
+        }
+    }
     $expected = if ($ExpectedProof) { '1' } else { '0' }
     Assert-Fixture ($values.proof -eq $expected) "${Name}: expected proof $expected, received $($values.proof)"
     $fallback = if ($ExpectedProof) { '0' } else { '1' }
@@ -430,7 +439,7 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     }
     $expectedError = if ($PriorError) { '1' } else { '0' }
     Assert-Fixture ($values.directError -eq $expectedError -and $values.wrapperError -eq $expectedError) "${Name}: the caller's error flag was changed"
-    $results.Add([pscustomobject]@{ name = $Name; kind = 'native-nsis'; ok = $true; proof = $ExpectedProof; stockFallback = -not $ExpectedProof; priorError = $PriorError; preservation = $values })
+    $results.Add([pscustomobject]@{ name = $Name; kind = 'native-nsis'; ok = $true; proof = $ExpectedProof; stockFallback = -not $ExpectedProof; priorError = $PriorError; preservation = $values; trace = $trace })
     $proof.Remove('activeCase')
 }
 

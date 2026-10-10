@@ -72,7 +72,20 @@
         StrCmpS $8 "ok" 0 life_probe_done
         ${If} $2 == 0
         ${AndIf} $3 != 0
-          Goto life_probe_done
+          ; A successful empty read can retain a stale error across separate
+          ; plug-in calls. Prove presence and emptiness with a positive native
+          ; result: expansion includes its NUL, and a missing name stays literal.
+          StrCmpS $5 "1" 0 life_probe_done
+          StrCmpS $3 "203" life_probe_done
+          StrCmpS $1 "" 0 life_probe_done
+          System::Call 'kernel32::ExpandEnvironmentStringsW(w "%${LIFE_PROCESS_PROBE_ENV}%", w .r7, i ${NSIS_MAX_STRLEN}) i .r6 ?r'
+          Pop $8
+          !ifmacrodef LifeProcessProbeTrace
+            !insertmacro LifeProcessProbeTrace empty "$6|$7|$8"
+          !endif
+          StrCmpS $8 "ok" 0 life_probe_done
+          StrCmpS $6 "1" 0 life_probe_done
+          StrCmpS $7 "" 0 life_probe_done
         ${EndIf}
         ; The preflight includes the terminator; a complete read excludes it.
         ; A changed or incomplete value cannot authorize an environment edit.

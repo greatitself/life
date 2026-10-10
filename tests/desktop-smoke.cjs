@@ -1269,6 +1269,7 @@ export function activityLabel(activity: ThreadActivity): string {
           .first()
           .click()
         await finder.waitFor({ state: 'hidden' })
+        await page.locator('.message.user:focus').waitFor({ state: 'visible' })
         assert.equal(await page.locator('.message.user:focus').count(), 1)
         await page.getByRole('button', { name: /^Filters, sorting and arrangement/ }).click()
         const filters = page.getByRole('dialog', {

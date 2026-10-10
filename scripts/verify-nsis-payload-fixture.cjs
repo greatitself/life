@@ -589,7 +589,7 @@ public static class LifeFakeDecoder
                 if (equals <= 0) throw new InvalidOperationException("Malformed fixture config.");
                 config.Add(line.Substring(0,equals),line.Substring(equals+1));
             }
-            if (config.Count != 4 || config["mode"] != "spawn-descendant-nonzero") throw new InvalidOperationException("Unexpected fixture config.");
+            if (config.Count != 4 || (config["mode"] != "spawn-descendant-nonzero" && config["mode"] != "spawn-descendant-zero")) throw new InvalidOperationException("Unexpected fixture config.");
             string root=LifeFixtureNative.Normalize(config["root"]);
             string archive=LifeFixtureNative.Owned(root,args[11]);
             string output=LifeFixtureNative.Owned(root,args[9].Substring(2));
@@ -627,7 +627,7 @@ public static class LifeFakeDecoder
                     Thread.Sleep(5);
                 }
                 if(File.ReadAllText(ack,new UTF8Encoding(false,true)) != identity || child.HasExited) throw new InvalidOperationException("Acknowledgment identity mismatch or child died early.");
-                return 9;
+                return config["mode"] == "spawn-descendant-zero" ? 0 : 9;
             }
         } catch(Exception error) { Console.Error.WriteLine(error.ToString()); return 91; }
     }
@@ -684,6 +684,8 @@ const fakeDecoderObserverScript =
     "$witnessInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_WITNESS')",
     "$exeInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_EXE')",
     "$outputInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_OUTPUT')",
+    "$expectedRootExit = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_ROOT_EXIT')",
+    "if ($expectedRootExit -cne '0' -and $expectedRootExit -cne '9') { throw 'Observer requires exact expected root exit 0 or 9.' }",
     "foreach ($value in @($rootInput,$sourceInput,$witnessInput,$exeInput,$outputInput)) { if ([String]::IsNullOrEmpty($value)) { throw 'Missing literal observer environment.' } }",
     "$preRoot = [IO.Path]::GetFullPath($rootInput).TrimEnd([char]'\\')",
     '$preSource = [IO.Path]::GetFullPath($sourceInput)',
@@ -702,6 +704,7 @@ const fakeDecoderObserverScript =
     '[LifeFixtureNative]::FileIdentity($exe) | Out-Null',
     '$utf8 = [Text.UTF8Encoding]::new($false,$true)',
     '$pinned = $null',
+    '$rootPinned = $null',
     '$primary = $null',
     '$cleanup = $null',
     'function Get-SentinelSnapshot([String]$filename) {',
@@ -710,14 +713,8 @@ const fakeDecoderObserverScript =
     "  try { $hash = [BitConverter]::ToString($digest.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() } finally { $digest.Dispose() }",
     '  [PSCustomObject]@{ Bytes = $bytes.Length; Sha256 = $hash }',
     '}',
-    'try {',
-    '  $clock = [Diagnostics.Stopwatch]::StartNew()',
-    "  $started = $witness + '.child-started'",
-    '  while (-not [IO.File]::Exists($started)) {',
-    "    if ($clock.ElapsedMilliseconds -gt 30000) { throw 'Timed out waiting for child identity witness.' }",
-    '    [Threading.Thread]::Sleep(5)',
-    '  }',
-    '  $identityText = [IO.File]::ReadAllText($started,$utf8)',
+    'function Get-FixtureIdentity([String]$filename) {',
+    '  $identityText = [IO.File]::ReadAllText($filename,$utf8)',
     '  $identity = @{}',
     '  foreach ($line in $identityText.Split([char]"`n")) {',
     '    if ($line.Length -eq 0) { continue }',
@@ -729,6 +726,20 @@ const fakeDecoderObserverScript =
     '  }',
     "  if ($identity.Count -ne 3 -or -not $identity.ContainsKey('pid') -or -not $identity.ContainsKey('creation') -or -not $identity.ContainsKey('image')) { throw 'Incomplete child identity witness.' }",
     "  if ($identity.pid -cnotmatch '^[1-9][0-9]*$' -or $identity.creation -cnotmatch '^[1-9][0-9]*$') { throw 'PID and creation must be positive exact decimal strings.' }",
+    '  return $identity',
+    '}',
+    'try {',
+    '  $clock = [Diagnostics.Stopwatch]::StartNew()',
+    "  $started = $witness + '.child-started'",
+    '  while (-not [IO.File]::Exists($started)) {',
+    "    if ($clock.ElapsedMilliseconds -gt 30000) { throw 'Timed out waiting for child identity witness.' }",
+    '    [Threading.Thread]::Sleep(5)',
+    '  }',
+    '  $identityText = [IO.File]::ReadAllText($started,$utf8)',
+    '  $identity = Get-FixtureIdentity $started',
+    "  $rootIdentity = Get-FixtureIdentity ($witness + '.parent-started')",
+    '  $rootPinned = [LifeFixturePinnedProcess]::new([UInt32]::Parse($rootIdentity.pid,[Globalization.CultureInfo]::InvariantCulture),[String]$rootIdentity.creation,[String]$exe)',
+    "  if ($rootPinned.Image -cne $rootIdentity.image -or -not $rootPinned.IsAlive()) { throw 'Pinned decoder root identity changed or root exited before acknowledgment.' }",
     "  if ([IO.File]::ReadAllText($witness + '.pid',$utf8) -cne $identity.pid) { throw 'Plain native PID marker does not match pinned witness.' }",
     '  $pinned = [LifeFixturePinnedProcess]::new([UInt32]::Parse($identity.pid,[Globalization.CultureInfo]::InvariantCulture),[String]$identity.creation,[String]$exe)',
     "  if ($pinned.Image -cne $identity.image -or -not $pinned.IsAlive()) { throw 'Pinned child identity changed or child is already terminated.' }",
@@ -740,9 +751,9 @@ const fakeDecoderObserverScript =
     "    if (-not $pinned.IsAlive() -or $progress.ElapsedMilliseconds -gt 5000) { throw 'Pinned live child did not continue writing before acknowledgment.' }",
     '    [Threading.Thread]::Sleep(5)',
     '  }',
-    '  $ready = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ImageIdentity = $pinned.ImageIdentity; FirstBytes = $firstLength; ProgressBytes = ([IO.FileInfo]::new($sentinel)).Length }',
+    '  $ready = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ImageIdentity = $pinned.ImageIdentity; FirstBytes = $firstLength; ProgressBytes = ([IO.FileInfo]::new($sentinel)).Length; RootPid = $rootPinned.Pid; RootCreation = $rootPinned.Creation; RootImage = $rootPinned.Image }',
     "  [LifeFixtureNative]::AtomicWitness($witness + '.observer-ready.json',(ConvertTo-Json -InputObject $ready -Depth 4 -Compress))",
-    "  if (-not $pinned.IsAlive()) { throw 'Child died before acknowledgment.' }",
+    "  if (-not $pinned.IsAlive() -or -not $rootPinned.IsAlive()) { throw 'Child or decoder root died before acknowledgment.' }",
     "  [LifeFixtureNative]::AtomicWitness($witness + '.ack',$identityText)",
     "  # The fixture's immediate native post-Launch check must precede Node creating",
     '  # this marker. This observer checks again without a blocking exit wait.',
@@ -753,19 +764,22 @@ const fakeDecoderObserverScript =
     '  }',
     '  if ([IO.File]::ReadAllText($completion,$utf8) -cne "error`n") { throw \'Launch completion marker must report exact error.\' }',
     '  $exitCode = $pinned.RequireExitedNow()',
+    '  $rootExitCode = $rootPinned.RequireExitedNow()',
+    "  if ($rootExitCode -ne [UInt32]::Parse($expectedRootExit,[Globalization.CultureInfo]::InvariantCulture)) { throw 'Decoder root did not exit with its exact configured code.' }",
     "  if ($exitCode -eq 91 -or $exitCode -eq 93) { throw 'Child fixture failed or reached its watchdog instead of launcher cleanup.' }",
     '  $before = Get-SentinelSnapshot $sentinel',
     '  [Threading.Thread]::Sleep(25)',
     '  $after = Get-SentinelSnapshot $sentinel',
     "  if ($before.Bytes -ne $after.Bytes -or $before.Sha256 -cne $after.Sha256 -or $pinned.IsAlive()) { throw 'Terminated child output changed after completed wait.' }",
-    '  $finished = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ExitCode = $exitCode; Bytes = $after.Bytes; Sha256 = $after.Sha256 }',
+    '  $finished = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ExitCode = $exitCode; Bytes = $after.Bytes; Sha256 = $after.Sha256; RootPid = $rootPinned.Pid; RootCreation = $rootPinned.Creation; RootImage = $rootPinned.Image; RootExitCode = $rootExitCode }',
     "  [LifeFixtureNative]::AtomicWitness($witness + '.observer-finished.json',(ConvertTo-Json -InputObject $finished -Depth 4 -Compress))",
     '  [Console]::WriteLine((ConvertTo-Json -InputObject $finished -Depth 4 -Compress))',
     '} catch { $primary = $_.Exception; [Console]::Error.WriteLine($primary.ToString()) }',
     'finally {',
-    '  if ($null -ne $pinned) {',
-    "    if ($null -ne $primary) { try { $pinned.TerminateForCleanup() } catch { $cleanup = $_.Exception; [Console]::Error.WriteLine('Observer cleanup failure: ' + $cleanup.ToString()) } }",
-    '    $pinned.Dispose()',
+    '  foreach ($ownedProcess in @($rootPinned,$pinned)) {',
+    '    if ($null -eq $ownedProcess) { continue }',
+    "    if ($null -ne $primary) { try { $ownedProcess.TerminateForCleanup() } catch { if ($null -eq $cleanup) { $cleanup = $_.Exception } else { $cleanup = [AggregateException]::new('Observer cleanup failures',[Exception[]]@($cleanup,$_.Exception)) }; [Console]::Error.WriteLine('Observer cleanup failure: ' + $_.Exception.ToString()) } }",
+    '    $ownedProcess.Dispose()',
     '  }',
     '}',
     'if ($null -ne $primary -or $null -ne $cleanup) { exit 1 }',
@@ -3397,144 +3411,156 @@ SectionEnd
       }
     }
 
-    const descendantOutput = directory('launcher-descendant-output')
-    const descendantWarm = directory('launcher-descendant-warm')
-    const descendantWitness = path.join(scratch, 'launcher-descendant-witness')
-    const descendantConfig = path.join(scratch, 'launcher-descendant-config.txt')
-    const descendantReport = path.join(scratch, 'launcher-descendant.result')
-    fs.writeFileSync(
-      descendantConfig,
-      `mode=spawn-descendant-nonzero\nroot=${scratch}\nwitness=${descendantWitness}\nexe=${modern.fakeExecutable}\n`,
-    )
-    const descendantObserver = fixtureChild(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        modern.fakeObserverSource,
-      ],
-      windowsPowerShellEnvironment({
+    for (const [descendantMode, descendantName, expectedRootExit] of [
+      ['spawn-descendant-nonzero', 'launcher-descendant', 9],
+      ['spawn-descendant-zero', 'launcher-descendant-zero', 0],
+    ]) {
+      const descendantOutput = directory(`${descendantName}-output`)
+      const descendantWarm = directory(`${descendantName}-warm`)
+      const descendantWitness = path.join(scratch, `${descendantName}-witness`)
+      const descendantConfig = path.join(scratch, `${descendantName}-config.txt`)
+      const descendantReport = path.join(scratch, `${descendantName}.result`)
+      fs.writeFileSync(
+        descendantConfig,
+        `mode=${descendantMode}\nroot=${scratch}\nwitness=${descendantWitness}\nexe=${modern.fakeExecutable}\n`,
+      )
+      const descendantObserver = fixtureChild(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          modern.fakeObserverSource,
+        ],
+        windowsPowerShellEnvironment({
+          ...process.env,
+          TEMP: nativeTemp,
+          TMP: nativeTemp,
+          LIFE_FIXTURE_OBSERVER_ROOT: scratch,
+          LIFE_FIXTURE_OBSERVER_SOURCE: modern.fakeSource,
+          LIFE_FIXTURE_OBSERVER_WITNESS: descendantWitness,
+          LIFE_FIXTURE_OBSERVER_EXE: modern.fakeExecutable,
+          LIFE_FIXTURE_OBSERVER_OUTPUT: descendantOutput,
+          LIFE_FIXTURE_OBSERVER_ROOT_EXIT: String(expectedRootExit),
+        }),
+      )
+      trials++
+      const descendantTrial = fixtureChild(executable, ['/S'], {
         ...process.env,
         TEMP: nativeTemp,
         TMP: nativeTemp,
-        LIFE_FIXTURE_OBSERVER_ROOT: scratch,
-        LIFE_FIXTURE_OBSERVER_SOURCE: modern.fakeSource,
-        LIFE_FIXTURE_OBSERVER_WITNESS: descendantWitness,
-        LIFE_FIXTURE_OBSERVER_EXE: modern.fakeExecutable,
-        LIFE_FIXTURE_OBSERVER_OUTPUT: descendantOutput,
-      }),
-    )
-    trials++
-    const descendantTrial = fixtureChild(executable, ['/S'], {
-      ...process.env,
-      TEMP: nativeTemp,
-      TMP: nativeTemp,
-      LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'launch-once',
-      LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: descendantOutput,
-      LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: 'error',
-      LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: descendantReport,
-      LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: descendantConfig,
-      LIFE_NSIS_PAYLOAD_FIXTURE_DECODER: modern.fakeExecutable,
-      LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT: descendantOutput,
-      LIFE_NSIS_PAYLOAD_FIXTURE_WARM_OUTPUT: descendantWarm,
-      LIFE_NSIS_PAYLOAD_FIXTURE_DESCENDANT_PID_FILE: `${descendantWitness}.pid`,
-    })
-    let descendantFailure
-    try {
-      const pinned = JSON.parse(
-        await waitFixtureFile(
-          `${descendantWitness}.observer-ready.json`,
+        LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'launch-once',
+        LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: descendantOutput,
+        LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: 'error',
+        LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: descendantReport,
+        LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: descendantConfig,
+        LIFE_NSIS_PAYLOAD_FIXTURE_DECODER: modern.fakeExecutable,
+        LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT: descendantOutput,
+        LIFE_NSIS_PAYLOAD_FIXTURE_WARM_OUTPUT: descendantWarm,
+        LIFE_NSIS_PAYLOAD_FIXTURE_DESCENDANT_PID_FILE: `${descendantWitness}.pid`,
+      })
+      let descendantFailure
+      try {
+        const pinned = JSON.parse(
+          await waitFixtureFile(
+            `${descendantWitness}.observer-ready.json`,
+            30000,
+            'Pinned live fake descendant',
+            descendantObserver.completion,
+          ),
+        )
+        assert.ok(pinned.ProgressBytes > pinned.FirstBytes && pinned.FirstBytes > 0)
+        assert.match(pinned.Creation, /^[1-9]\d+$/)
+        assert.match(pinned.RootCreation, /^[1-9]\d+$/)
+        assert.notEqual(pinned.RootPid, pinned.Pid)
+        const exit = await bounded(
+          descendantTrial.completion,
           30000,
-          'Pinned live fake descendant',
+          'Raw launcher did not return after failing decoder',
+        )
+        const diagnostic = maybeRead(`${descendantReport}.diagnostic.txt`, 'utf16le')
+        if (diagnostic) console.error(`${descendantMode} boundary diagnostic:\n${diagnostic}`)
+        assert.equal(
+          exit.code,
+          0,
+          `Raw launcher descendant proof failed\n${JSON.stringify(exit)}\n${diagnostic}`,
+        )
+        assert.equal(fs.readFileSync(descendantReport, 'utf8'), 'ok\r\n')
+        fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
+        const observerExit = await bounded(
           descendantObserver.completion,
-        ),
-      )
-      assert.ok(pinned.ProgressBytes > pinned.FirstBytes && pinned.FirstBytes > 0)
-      assert.match(pinned.Creation, /^[1-9]\d+$/)
-      const exit = await bounded(
-        descendantTrial.completion,
-        30000,
-        'Raw launcher did not return after failing decoder',
-      )
-      const diagnostic = maybeRead(`${descendantReport}.diagnostic.txt`, 'utf16le')
-      if (diagnostic) console.error(`Fake descendant boundary diagnostic:\n${diagnostic}`)
-      assert.equal(
-        exit.code,
-        0,
-        `Raw launcher descendant proof failed\n${JSON.stringify(exit)}\n${diagnostic}`,
-      )
-      assert.equal(fs.readFileSync(descendantReport, 'utf8'), 'ok\r\n')
-      fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
-      const observerExit = await bounded(
-        descendantObserver.completion,
-        30000,
-        'Pinned descendant observer did not terminate',
-      )
-      const finished = maybeRead(`${descendantWitness}.observer-finished.json`, 'utf8')
-      console.log(
-        `Native descendant lifetime evidence: ${finished || JSON.stringify(observerExit)}`,
-      )
-      assert.equal(observerExit.code, 0, observerExit.stderr)
-      const final = JSON.parse(finished)
-      assert.equal(final.Pid, pinned.Pid)
-      assert.equal(final.Creation, pinned.Creation)
-      assert.equal(final.Image, pinned.Image)
-      assert.equal(final.Sha256, sha256(path.join(descendantOutput, 'descendant-writes.bin')))
-      assert.equal(
-        final.Bytes,
-        fs.statSync(path.join(descendantOutput, 'descendant-writes.bin')).size,
-      )
-      assert.deepEqual(
-        fs.readdirSync(descendantOutput),
-        ['descendant-writes.bin'],
-        'Raw descendant failure must remove its owned guard before reporting completion',
-      )
-      for (const action of ['registered', 'launched'])
-        assert.equal(fs.existsSync(`${descendantReport}.${action}`), false)
-    } catch (error) {
-      descendantFailure = error
-    } finally {
-      const cleanupErrors = []
-      if (descendantFailure) {
-        descendantTrial.child.kill('SIGKILL')
-        try {
-          await bounded(
-            descendantTrial.completion,
-            10000,
-            'Failed raw descendant fixture did not terminate',
-          )
-        } catch (error) {
-          cleanupErrors.push(error)
-        }
-        if (!fs.existsSync(`${descendantWitness}.launch-complete`))
+          30000,
+          'Pinned descendant observer did not terminate',
+        )
+        const finished = maybeRead(`${descendantWitness}.observer-finished.json`, 'utf8')
+        console.log(
+          `${descendantMode} native descendant lifetime evidence: ${finished || JSON.stringify(observerExit)}`,
+        )
+        assert.equal(observerExit.code, 0, observerExit.stderr)
+        const final = JSON.parse(finished)
+        assert.equal(final.Pid, pinned.Pid)
+        assert.equal(final.Creation, pinned.Creation)
+        assert.equal(final.Image, pinned.Image)
+        assert.equal(final.RootPid, pinned.RootPid)
+        assert.equal(final.RootCreation, pinned.RootCreation)
+        assert.equal(final.RootImage, pinned.RootImage)
+        assert.equal(final.RootExitCode, expectedRootExit)
+        assert.equal(final.Sha256, sha256(path.join(descendantOutput, 'descendant-writes.bin')))
+        assert.equal(
+          final.Bytes,
+          fs.statSync(path.join(descendantOutput, 'descendant-writes.bin')).size,
+        )
+        assert.deepEqual(
+          fs.readdirSync(descendantOutput),
+          ['descendant-writes.bin'],
+          'Raw descendant failure must remove its owned guard before reporting completion',
+        )
+        for (const action of ['registered', 'launched'])
+          assert.equal(fs.existsSync(`${descendantReport}.${action}`), false)
+      } catch (error) {
+        descendantFailure = error
+      } finally {
+        const cleanupErrors = []
+        if (descendantFailure) {
+          descendantTrial.child.kill('SIGKILL')
           try {
-            fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
+            await bounded(
+              descendantTrial.completion,
+              10000,
+              'Failed raw descendant fixture did not terminate',
+            )
           } catch (error) {
             cleanupErrors.push(error)
           }
-        try {
-          const exit = await bounded(
-            descendantObserver.completion,
-            35000,
-            'Failed descendant observer did not release its pinned handles',
-          )
-          if (exit.code !== 0)
-            cleanupErrors.push(new Error(`Descendant observer teardown: ${JSON.stringify(exit)}`))
-        } catch (error) {
-          cleanupErrors.push(error)
+          if (!fs.existsSync(`${descendantWitness}.launch-complete`))
+            try {
+              fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
+            } catch (error) {
+              cleanupErrors.push(error)
+            }
+          try {
+            const exit = await bounded(
+              descendantObserver.completion,
+              35000,
+              'Failed descendant observer did not release its pinned handles',
+            )
+            if (exit.code !== 0)
+              cleanupErrors.push(new Error(`Descendant observer teardown: ${JSON.stringify(exit)}`))
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
         }
+        finishFixtureCleanup(
+          descendantFailure,
+          () => {
+            if (cleanupErrors.length)
+              throw new AggregateError(cleanupErrors, 'Descendant native teardown failed')
+          },
+          descendantMode,
+        )
       }
-      finishFixtureCleanup(
-        descendantFailure,
-        () => {
-          if (cleanupErrors.length)
-            throw new AggregateError(cleanupErrors, 'Descendant native teardown failed')
-        },
-        'fake descendant trial',
-      )
     }
 
     const hashVectors = directory('native-hash-vectors')

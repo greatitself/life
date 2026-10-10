@@ -17,6 +17,7 @@ $proofPath = [IO.Path]::GetFullPath($OutputPath)
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('life-process-fixture-' + [Guid]::NewGuid().ToString('N'))
 $results = [Collections.Generic.List[object]]::new()
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$parentModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
 $proof = [ordered]@{
     ok = $false
     platform = 'win32'
@@ -37,6 +38,7 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments, [hashtable]$En
     }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
     try {
         if (-not $process.Start()) { throw "Could not start $Executable" }
         $stdout = $process.StandardOutput.ReadToEndAsync()
@@ -48,6 +50,7 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments, [hashtable]$En
         }
         return [pscustomobject]@{
             exitCode = $process.ExitCode
+            elapsedMilliseconds = $elapsed.Elapsed.TotalMilliseconds
             stdout = $stdout.GetAwaiter().GetResult()
             stderr = $stderr.GetAwaiter().GetResult()
         }
@@ -60,6 +63,53 @@ function Assert-Fixture([bool]$Condition, [string]$Message) {
 
 function Write-Utf8([string]$Path, [string]$Content) {
     [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-ProcessProbeCommand {
+    $match = [regex]::Match($moduleSource, '(?m)nsExec::ExecToStack[^\r\n]*-Command "(?<command>.*)"`[^\r\n]*$')
+    Assert-Fixture $match.Success 'Could not extract the actual embedded process-check command.'
+    $command = $match.Groups['command'].Value.Replace('$$', '$')
+    $definitions = @{
+        LIFE_PROCESS_PROBE_ENV = 'LIFE_NSIS_PROCESS_PROBE_TARGET'
+        LIFE_PROCESS_PROBE_MARKER = 'LIFE_NO_SCOPED_PROCESS_V1'
+        LIFE_PROCESS_PROBE_EXIT = '73'
+    }
+    foreach ($entry in $definitions.GetEnumerator()) {
+        $definition = [regex]::Match($moduleSource, ('(?m)^!define\s+' + [regex]::Escape($entry.Key) + '\s+"(?<value>[^"]+)"\s*$'))
+        Assert-Fixture ($definition.Success -and $definition.Groups['value'].Value -ceq $entry.Value) "Unexpected process-probe protocol definition: $($entry.Key)"
+        $command = $command.Replace(('${' + $entry.Key + '}'), $definition.Groups['value'].Value)
+    }
+    Assert-Fixture ($command -notmatch '\$\{[A-Z_]+\}') 'The semantic command contains an unresolved NSIS definition.'
+    return $command
+}
+
+function Invoke-ProbeDiagnostic([string]$Name, [string]$Command, [hashtable]$Environment) {
+    $output = Join-Path $fixtureRoot ($Name + '.clixml')
+    $catch = '} catch { exit 74 }'
+    Assert-Fixture ([regex]::Matches($Command, [regex]::Escape($catch)).Count -eq 1) 'Diagnostic instrumentation requires the exact original fail-closed catch.'
+    # Record the caught exception while retaining the actual command's exit and
+    # stdout. Serialization uses the already-loaded engine, without autoloading.
+    $instrumented = $Command.Replace($catch, '} catch { $script:diagnostic.Exception = $_.Exception.ToString(); exit 74 }')
+    $prefix = @'
+$script:diagnostic = [ordered]@{ Major = $PSVersionTable.PSVersion.Major; Edition = $PSVersionTable.PSEdition; PSHOME = $PSHOME; PointerSize = [IntPtr]::Size; InitialPSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process'); Exception = $null }
+$script:diagnosticClock = [Diagnostics.Stopwatch]::StartNew()
+try {
+'@
+    $suffix = @'
+} finally {
+  $script:diagnostic.ElapsedMilliseconds = $script:diagnosticClock.Elapsed.TotalMilliseconds
+  $script:diagnostic.FinalPSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+  [IO.File]::WriteAllText([Environment]::GetEnvironmentVariable('LIFE_FIXTURE_DIAGNOSTIC_OUTPUT'), [System.Management.Automation.PSSerializer]::Serialize($script:diagnostic), [Text.UTF8Encoding]::new($false))
+}
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($prefix + "`r`n" + $instrumented + "`r`n" + $suffix))
+    $childEnvironment = @{ LIFE_FIXTURE_DIAGNOSTIC_OUTPUT = $output; LIFE_NSIS_PROCESS_PROBE_TARGET = $specialTarget }
+    foreach ($entry in $Environment.GetEnumerator()) { $childEnvironment[$entry.Key] = $entry.Value }
+    $run = Invoke-Native $x86PowerShell @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) $childEnvironment
+    Assert-Fixture (Test-Path -LiteralPath $output -PathType Leaf) "Diagnostic $Name did not retain its native execution observations."
+    $observed = [System.Management.Automation.PSSerializer]::Deserialize((Get-Content -Raw -LiteralPath $output))
+    Assert-Fixture ($observed.Major -eq 5 -and $observed.Edition -ceq 'Desktop' -and $observed.PointerSize -eq 4) 'Diagnostics must use the actual x86 Windows PowerShell 5 runtime.'
+    return [pscustomobject]@{ name = $Name; exitCode = $run.exitCode; stdout = $run.stdout; stderr = $run.stderr; processElapsedMilliseconds = $run.elapsedMilliseconds; native = $observed }
 }
 
 function Get-Compiler {
@@ -158,6 +208,9 @@ Var PriorLastError
 Var AfterLastError
 Var ResultPath
 Var ResultHandle
+Var PriorModulePath
+Var AfterModulePath
+Var ModulePathPreserved
 
 !macro IS_POWERSHELL_AVAILABLE
   IntOp $FallbackAvailability $FallbackAvailability + 1
@@ -235,6 +288,8 @@ Section
   StrCpy $FallbackAvailability "0"
   StrCpy $FallbackRunning "0"
   StrCpy $EnvironmentPreserved "1"
+  StrCpy $ModulePathPreserved "1"
+  ReadEnvStr $PriorModulePath "PSModulePath"
   System::Alloc 65536
   Pop $PriorEnvironment
   System::Alloc 65536
@@ -271,6 +326,9 @@ Section
   ${OrIf} $PriorLastError != $AfterLastError
     StrCpy $EnvironmentPreserved "0"
   ${EndIf}
+  ReadEnvStr $AfterModulePath "PSModulePath"
+  StrCmpS $PriorModulePath $AfterModulePath +2 0
+    StrCpy $ModulePathPreserved "0"
 
   !insertmacro SeedRegisters
   Push "wrapper-stack-sentinel"
@@ -295,6 +353,9 @@ Section
   ${OrIf} $PriorLastError != $AfterLastError
     StrCpy $EnvironmentPreserved "0"
   ${EndIf}
+  ReadEnvStr $AfterModulePath "PSModulePath"
+  StrCmpS $PriorModulePath $AfterModulePath +2 0
+    StrCpy $ModulePathPreserved "0"
   System::Free $AfterEnvironment
   System::Free $PriorEnvironment
   FileOpen $ResultHandle $ResultPath w
@@ -308,6 +369,7 @@ Section
   FileWrite $ResultHandle "directError=$DirectError$\r$\n"
   FileWrite $ResultHandle "wrapperError=$WrapperError$\r$\n"
   FileWrite $ResultHandle "environmentPreserved=$EnvironmentPreserved$\r$\n"
+  FileWrite $ResultHandle "modulePathPreserved=$ModulePathPreserved$\r$\n"
   FileClose $ResultHandle
   SetErrorLevel 0
 SectionEnd
@@ -344,7 +406,7 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     Assert-Fixture ($values.proof -eq $expected) "${Name}: expected proof $expected, received $($values.proof)"
     $fallback = if ($ExpectedProof) { '0' } else { '1' }
     Assert-Fixture ($values.fallbackAvailability -eq $fallback -and $values.fallbackRunning -eq $fallback) "${Name}: the complete stock fallback was not selected correctly"
-    foreach ($field in @('directRegisters', 'wrapperRegisters', 'directStack', 'wrapperStack', 'environmentPreserved')) {
+    foreach ($field in @('directRegisters', 'wrapperRegisters', 'directStack', 'wrapperStack', 'environmentPreserved', 'modulePathPreserved')) {
         Assert-Fixture ($values[$field] -eq '1') "${Name}: $field was not preserved"
     }
     $expectedError = if ($PriorError) { '1' } else { '0' }
@@ -408,10 +470,88 @@ class ProbeHost {
         (Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/Modules')
     ) -join ';'
     $compatibleEnvironment = @{ PSModulePath = $compatibleModulePath }
+    $x86PowerShell = Join-Path $env:WINDIR 'SysWOW64/WindowsPowerShell/v1.0/powershell.exe'
+    Assert-Fixture (Test-Path -LiteralPath $x86PowerShell -PathType Leaf) 'Native diagnostics require the actual x86 Windows PowerShell used by NSIS.'
+    $command = Get-ProcessProbeCommand
+    $bootstrap = '$env:PSModulePath = [IO.Path]::Combine($PSHOME, ''Modules''); '
+    Assert-Fixture ([regex]::Matches($command, [regex]::Escape($bootstrap)).Count -eq 1) 'The diagnostic control requires exactly the actual child-only module-path bootstrap.'
+    $unbootstrappedCommand = $command.Replace($bootstrap, '')
+    $poisonModules = Join-Path $fixtureRoot 'poisoned-modules'
+    foreach ($module in @(@{ name = 'CimCmdlets'; command = 'Get-CimInstance' }, @{ name = 'Microsoft.PowerShell.Security'; command = 'Get-ExecutionPolicy' })) {
+        $directory = Join-Path $poisonModules $module.name
+        [void][IO.Directory]::CreateDirectory($directory)
+        $poisonSource = @'
+$log = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_POISON_LOG')
+if ($log) { [IO.File]::AppendAllText($log, 'LIFE_PROCESS_MODULE_PATH_POISON_V1' + [Environment]::NewLine) }
+throw 'LIFE_PROCESS_MODULE_PATH_POISON_V1'
+'@
+        Write-Utf8 (Join-Path $directory 'poison.psm1') $poisonSource
+        $manifest = "@{ RootModule = 'poison.psm1'; ModuleVersion = '99.0.0'; GUID = '8a2a7d44-516a-46e4-afd1-09c9c84d9ad3'; FunctionsToExport = @('$($module.command)') }"
+        Write-Utf8 (Join-Path $directory ($module.name + '.psd1')) $manifest
+    }
+    $poisonedEnvironment = @{ PSModulePath = $poisonModules }
+    $diagnostics = [Collections.Generic.List[object]]::new()
+    $proof.processDiagnostics = @()
+    foreach ($case in @(
+        @{ name = 'inherited-unbootstrapped'; command = $unbootstrappedCommand; environment = @{} },
+        @{ name = 'inherited-bootstrapped'; command = $command; environment = @{} },
+        @{ name = 'poisoned-unbootstrapped'; command = $unbootstrappedCommand; environment = $poisonedEnvironment },
+        @{ name = 'poisoned-bootstrapped'; command = $command; environment = $poisonedEnvironment }
+    )) {
+        $poisonLog = Join-Path $fixtureRoot ($case.name + '-poison.log')
+        $environment = @{ LIFE_FIXTURE_POISON_LOG = $poisonLog }
+        foreach ($entry in $case.environment.GetEnumerator()) { $environment[$entry.Key] = $entry.Value }
+        $diagnostic = Invoke-ProbeDiagnostic $case.name $case.command $environment
+        $poisonExecuted = Test-Path -LiteralPath $poisonLog -PathType Leaf
+        $diagnostic | Add-Member -NotePropertyName poisonModuleExecuted -NotePropertyValue $poisonExecuted
+        $diagnostics.Add($diagnostic)
+        $proof.processDiagnostics = $diagnostics.ToArray()
+        if ($case.name -like '*-bootstrapped') {
+            Assert-Fixture ($diagnostic.exitCode -eq 73 -and $diagnostic.stdout -ceq 'LIFE_NO_SCOPED_PROCESS_V1' -and -not $poisonExecuted) "Bootstrapped diagnostic $($case.name) did not produce an authentic native proof."
+        }
+        if ($case.name -eq 'poisoned-unbootstrapped') {
+            Assert-Fixture ($diagnostic.exitCode -eq 74 -and $diagnostic.stdout -ceq '' -and $poisonExecuted -and $diagnostic.native.Exception) 'The poisoned negative control must demonstrate a real autoload failure.'
+        }
+    }
+    # Independently verify command origins under the deliberately poisoned
+    # caller environment. Binary exports may use PSHOME as their module base.
+    $originsOutput = Join-Path $fixtureRoot 'native-command-origins.clixml'
+    $originsScript = $bootstrap + @'
+$ErrorActionPreference = 'Stop'
+try {
+  if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop' -or [IntPtr]::Size -ne 4) { throw 'Expected native x86 Windows PowerShell 5.' }
+  $records = @()
+  foreach ($name in @('Get-CimInstance', 'Get-ExecutionPolicy')) {
+    $command = Get-Command $name -ErrorAction Stop
+    $expected = $(if ($name -eq 'Get-CimInstance') { 'CimCmdlets' } else { 'Microsoft.PowerShell.Security' })
+    if ($command.CommandType -ne [System.Management.Automation.CommandTypes]::Cmdlet) { throw ('Unexpected command type for ' + $name) }
+    if ($command.ModuleName -cne $expected) { throw ('Unexpected native module for ' + $name) }
+    $home = [IO.Path]::GetFullPath($PSHOME)
+    $expectedBase = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'Modules', $expected))
+    $actualBase = [IO.Path]::GetFullPath($command.Module.ModuleBase)
+    if (-not $actualBase.Equals($expectedBase, [StringComparison]::OrdinalIgnoreCase) -and -not $actualBase.Equals($home, [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module base for ' + $name + ': ' + $actualBase) }
+    $actualPath = [IO.Path]::GetFullPath($command.Module.Path)
+    if (-not $actualPath.StartsWith(($home + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
+    $records += [pscustomobject]@{ Command = $name; Module = $expected; ModuleBase = $actualBase; ModulePath = $actualPath }
+  }
+  [IO.File]::WriteAllText([Environment]::GetEnvironmentVariable('LIFE_FIXTURE_ORIGINS_OUTPUT'), [System.Management.Automation.PSSerializer]::Serialize([pscustomobject]@{ PSHOME = $PSHOME; PointerSize = [IntPtr]::Size; Modules = $records }, 6), [Text.UTF8Encoding]::new($false))
+} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 75 }
+'@
+    $originsEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($originsScript))
+    $originsPoisonLog = Join-Path $fixtureRoot 'origins-poison.log'
+    $originsRun = Invoke-Native $x86PowerShell @('-NoProfile', '-NonInteractive', '-EncodedCommand', $originsEncoded) @{ PSModulePath = $poisonModules; LIFE_FIXTURE_ORIGINS_OUTPUT = $originsOutput; LIFE_FIXTURE_POISON_LOG = $originsPoisonLog }
+    $proof.nativeCommandOriginsExecution = $originsRun
+    Assert-Fixture ($originsRun.exitCode -eq 0 -and (Test-Path -LiteralPath $originsOutput -PathType Leaf) -and -not (Test-Path -LiteralPath $originsPoisonLog)) "Native command-origin verification failed: $($originsRun.stderr)"
+    $origins = [System.Management.Automation.PSSerializer]::Deserialize((Get-Content -Raw -LiteralPath $originsOutput))
+    $proof.nativeCommandOrigins = $origins
+    $results.Add([pscustomobject]@{ name = 'native-poisoned-command-origins'; kind = 'native-x86-origins'; ok = $true; origins = $origins })
     # The default case inherits the runner's unmodified PowerShell 7 environment.
     # The second explicitly supplies a Windows PowerShell 5-compatible module path.
     Invoke-Harness 'native-parent-powershell7-environment' $nativeHarness $specialTarget $true
     Invoke-Harness 'native-compatible-powershell5-environment' $nativeHarness $specialTarget $true $compatibleEnvironment $true
+    $nativePoisonLog = Join-Path $fixtureRoot 'native-poison.log'
+    Invoke-Harness 'native-poisoned-module-path' $nativeHarness $specialTarget $true @{ PSModulePath = $poisonModules; LIFE_FIXTURE_POISON_LOG = $nativePoisonLog } $true
+    Assert-Fixture (-not (Test-Path -LiteralPath $nativePoisonLog)) 'The actual NSIS child loaded a poisoned caller module.'
     Invoke-Harness 'native-existing-environment' $nativeHarness $specialTarget $true @{ PSModulePath = $compatibleModulePath; LIFE_NSIS_PROCESS_PROBE_TARGET = 'previous "quoted" '' $ ` Ω value' }
     Invoke-Harness 'native-present-empty-environment' $nativeHarness $specialTarget $true @{ PSModulePath = $compatibleModulePath; LIFE_NSIS_PROCESS_PROBE_TARGET = '' } $true
     Invoke-Harness 'native-oversized-environment' $nativeHarness $specialTarget $false @{ PSModulePath = $compatibleModulePath; LIFE_NSIS_PROCESS_PROBE_TARGET = ('z' * 16384) } $true
@@ -453,20 +593,7 @@ class ProbeHost {
 
     # Exercise the actual embedded command, with controlled CIM and policy
     # functions, so a partial enumeration can never produce a false proof.
-    $commandMatch = [regex]::Match($moduleSource, '(?m)nsExec::ExecToStack[^\r\n]*-Command "(?<command>.*)"`[^\r\n]*$')
-    Assert-Fixture $commandMatch.Success 'Could not extract the actual embedded process-check command.'
-    $command = $commandMatch.Groups['command'].Value.Replace('$$', '$')
-    $protocolDefines = @{
-        LIFE_PROCESS_PROBE_ENV = 'LIFE_NSIS_PROCESS_PROBE_TARGET'
-        LIFE_PROCESS_PROBE_MARKER = 'LIFE_NO_SCOPED_PROCESS_V1'
-        LIFE_PROCESS_PROBE_EXIT = '73'
-    }
-    foreach ($entry in $protocolDefines.GetEnumerator()) {
-        $definition = [regex]::Match($moduleSource, ('(?m)^!define\s+' + [regex]::Escape($entry.Key) + '\s+"(?<value>[^"]+)"\s*$'))
-        Assert-Fixture ($definition.Success -and $definition.Groups['value'].Value -ceq $entry.Value) "Unexpected process-probe protocol definition: $($entry.Key)"
-        $command = $command.Replace(('${' + $entry.Key + '}'), $definition.Groups['value'].Value)
-    }
-    Assert-Fixture ($command -notmatch '\$\{[A-Z_]+\}') 'The semantic command contains an unresolved NSIS definition.'
+    $command = Get-ProcessProbeCommand
     $semanticMocks = @'
 $script:mode = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_SEMANTIC_MODE')
 $script:target = [Environment]::GetEnvironmentVariable('LIFE_NSIS_PROCESS_PROBE_TARGET')
@@ -506,6 +633,8 @@ function Get-CimInstance {
         Assert-Fixture ($run.exitCode -eq $expectedExit -and $run.stdout -ceq $expectedOutput) "Semantic fixture $mode returned $($run.exitCode), stdout '$($run.stdout)', stderr '$($run.stderr)'"
         $results.Add([pscustomobject]@{ name = ('semantic-' + $mode); kind = 'actual-command'; ok = $true; exitCode = $run.exitCode; exactOutput = $run.stdout })
     }
+    Assert-Fixture ([string]::Equals($parentModulePath, [Environment]::GetEnvironmentVariable('PSModulePath', 'Process'), [StringComparison]::Ordinal)) 'The outer caller PSModulePath changed.'
+    $proof.parentModulePathPreserved = $true
     $proof.ok = $true
 } catch {
     $proof.error = $_.Exception.Message

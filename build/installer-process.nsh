@@ -84,7 +84,10 @@
       ; Materialize the entire query before testing paths. Terminating failures,
       ; missing commands, restricted policy, matches and timeouts cannot prove
       ; absence. Use precisely the same path comparison as the stock CIM path.
-      nsExec::ExecToStack /TIMEOUT=2000 `"${LIFE_PROCESS_PROBE_EXECUTABLE}" -NoProfile -NonInteractive -Command "try { $$ErrorActionPreference = 'Stop'; $$null = Get-Command Get-CimInstance -ErrorAction Stop; if ((Get-ExecutionPolicy -Scope Process -ErrorAction Stop) -eq 'Restricted') { exit 74 }; $$target = [Environment]::GetEnvironmentVariable('${LIFE_PROCESS_PROBE_ENV}', 'Process'); if ([String]::IsNullOrEmpty($$target)) { exit 74 }; $$processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop); if ($$processes.Count -eq 0) { exit 74 }; if (@($$processes | Where-Object { $$_.Path -and $$_.Path.StartsWith($$target, 'CurrentCultureIgnoreCase') }).Count -gt 0) { exit 74 }; [Console]::Out.Write('${LIFE_PROCESS_PROBE_MARKER}'); exit ${LIFE_PROCESS_PROBE_EXIT} } catch { exit 74 }"`
+      ; A PS7 parent can pass incompatible module paths through this native
+      ; process. Select only this Windows PowerShell child's own modules before
+      ; autoloading; the parent environment and complete stock fallback stay intact.
+      nsExec::ExecToStack /TIMEOUT=2000 `"${LIFE_PROCESS_PROBE_EXECUTABLE}" -NoProfile -NonInteractive -Command "try { $$ErrorActionPreference = 'Stop'; $$env:PSModulePath = [IO.Path]::Combine($$PSHOME, 'Modules'); $$null = Get-Command Get-CimInstance -ErrorAction Stop; if ((Get-ExecutionPolicy -Scope Process -ErrorAction Stop) -eq 'Restricted') { exit 74 }; $$target = [Environment]::GetEnvironmentVariable('${LIFE_PROCESS_PROBE_ENV}', 'Process'); if ([String]::IsNullOrEmpty($$target)) { exit 74 }; $$processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop); if ($$processes.Count -eq 0) { exit 74 }; if (@($$processes | Where-Object { $$_.Path -and $$_.Path.StartsWith($$target, 'CurrentCultureIgnoreCase') }).Count -gt 0) { exit 74 }; [Console]::Out.Write('${LIFE_PROCESS_PROBE_MARKER}'); exit ${LIFE_PROCESS_PROBE_EXIT} } catch { exit 74 }"`
       Pop $6
       Pop $7
 

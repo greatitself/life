@@ -72,6 +72,10 @@ Var fixtureHandleCount
 !macroend
 
 Section
+  ; The payload helper is defined by the real include and must remain linked.
+  Push "$TEMP"
+  Call LifeEmptyPayloadDirectory
+  Pop $lifePayloadVerified
   ; Exercise the real process-info include so makensis -WX sees no unused helper.
   ${'${GetProcessInfo}'} 0 $pid $1 $2 $3 $4
   ReadEnvStr $fixtureReport "LIFE_NSIS_TRACE_FIXTURE_RESULT"

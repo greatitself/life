@@ -7,7 +7,7 @@ $errors = $null
 $syntax = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $SourcePath).Path, [ref]$tokens, [ref]$errors)
 if ($errors.Count -ne 0) { throw "Windows upgrade script has syntax errors: $errors" }
 # Parse and import only pure validation functions; never invoke an installer or cleanup.
-foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance', 'Get-InstallerProfilingValidation', 'Read-InstallerTrace')) {
+foreach ($name in @('Get-ValidatedBaselineVersions', 'Get-UpgradePerformance', 'Get-InstallerPayloadRouteValidation', 'Get-InstallerProfilingValidation', 'Read-InstallerTrace')) {
     $definition = $syntax.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) |
         Where-Object { $_.Name -eq $name } | Select-Object -First 1
     if (-not $definition) { throw "Missing validation function $name." }
@@ -49,14 +49,15 @@ Assert-Throws { Get-UpgradePerformance @() 10000 } 'Missing complete trial'
 $failed = New-Trial 1000
 $failed.timings.targetUpgrade.ok = $false
 Assert-Throws { Get-UpgradePerformance @($failed) 10000 } 'Failed installer cannot pass the time gate'
-function New-ProfileTrial {
+function New-ProfileTrial([string[]]$PayloadPhases = @(
+    'extract-start', 'payload-verification-start', 'payload-verification-complete', 'extract-complete',
+    'payload-copy-start', 'payload-copy-complete', 'payload-verification-start', 'payload-verification-complete', 'payload-complete'
+)) {
     $pair = New-Trial 1000
     foreach ($operation in @('targetUpgrade', 'targetFreshInstall')) {
         $tick = 100
         $phases = @('installer-init', 'process-check-start', 'process-check-complete',
-            'old-uninstaller-complete', 'extract-start', 'extract-complete',
-            'payload-copy-start', 'payload-copy-complete', 'payload-complete',
-            'cache-registration-shortcuts-complete')
+            'old-uninstaller-complete') + $PayloadPhases + @('cache-registration-shortcuts-complete')
         $records = @($phases | ForEach-Object { [pscustomobject]@{ phase = $_; uptimeMilliseconds = $tick++ } })
         $pair.timings[$operation] = [pscustomobject]@{
             kind = 'nsis'; ok = $true; elapsedMilliseconds = 1000
@@ -78,6 +79,57 @@ Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Nonmo
 $profile = New-ProfileTrial
 $profile.timings.targetUpgrade.installerTrace.errors = @('Unrecognized raw marker')
 Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Trace parser errors fail profiling validation'
+$direct = @('payload-direct-start', 'extract-start', 'extract-complete',
+    'payload-verification-start', 'payload-verification-complete', 'payload-direct-complete', 'payload-complete')
+Assert-Equal (Get-InstallerProfilingValidation @((New-ProfileTrial $direct))).passed $true 'Complete verified direct route'
+Assert-Equal (Get-InstallerPayloadRouteValidation $direct).route 'direct' 'Direct route retained in proof'
+$stockStart = @('extract-start', 'payload-verification-start', 'payload-verification-complete', 'extract-complete')
+$stockEnd = @('payload-verification-start', 'payload-verification-complete', 'payload-complete')
+$copy = @('payload-copy-start', 'payload-copy-complete')
+$retry = $stockStart + $copy + $copy + $stockEnd
+Assert-Equal (Get-InstallerProfilingValidation @((New-ProfileTrial $retry))).passed $true 'Complete stock retry with intact verification'
+$fallback = @('extract-fallback-cleanup-start', 'extract-fallback-cleanup-complete', 'extract-fallback-start', 'extract-fallback-complete')
+$fiveCopies = @()
+for ($attempt = 0; $attempt -lt 5; $attempt++) { $fiveCopies += $copy }
+$stockFallback = $stockStart + $fiveCopies + $fallback + $stockEnd
+Assert-Equal (Get-InstallerProfilingValidation @((New-ProfileTrial $stockFallback))).passed $true 'Five-copy stock fallback requires final verification'
+$directFailed = $direct[0..4] + @('payload-direct-fallback')
+$recovered = $directFailed + $stockStart + $copy + $stockEnd
+Assert-Equal (Get-InstallerProfilingValidation @((New-ProfileTrial $recovered))).passed $true 'Failed direct verification followed by complete verified stock recovery'
+Assert-Equal (Get-InstallerPayloadRouteValidation $recovered).route 'direct-fallback-stock' 'Fallback route retained in proof'
+$invalidRoutes = @(
+    @{ phases = @('payload-direct-start', 'extract-start', 'extract-complete', 'payload-direct-complete', 'payload-complete'); name = 'Direct route without payload verification' },
+    @{ phases = @($direct | Where-Object { $_ -cne 'payload-verification-complete' }); name = 'Incomplete direct verification' },
+    @{ phases = $direct[0..4] + $stockStart + $copy + $stockEnd; name = 'Direct recovery without fallback marker' },
+    @{ phases = $stockStart + @('payload-copy-start') + $stockEnd; name = 'Incomplete stock copy attempt' },
+    @{ phases = @('extract-start', 'extract-complete') + $copy + $stockEnd; name = 'Stock route without staged verification' },
+    @{ phases = $stockStart + $copy + @('payload-complete'); name = 'Stock route without installed verification' },
+    @{ phases = $stockStart + $copy + @('payload-verification-complete', 'payload-verification-start', 'payload-complete'); name = 'Reversed verification pair' },
+    @{ phases = $stockStart + $copy + $fallback + $stockEnd; name = 'Fallback before all five copy attempts' },
+    @{ phases = $stockStart + $fiveCopies + $copy + $stockEnd; name = 'More than five stock copy attempts' },
+    @{ phases = $stockStart + $fiveCopies + $fallback[0..2] + $stockEnd; name = 'Incomplete stock extraction fallback' },
+    @{ phases = $direct + $copy; name = 'Copy markers after a completed direct route' },
+    @{ phases = @(); name = 'Missing payload route' }
+)
+foreach ($case in $invalidRoutes) {
+    Assert-Equal (Get-InstallerProfilingValidation @((New-ProfileTrial $case.phases))).passed $false $case.name
+}
+$profile = New-ProfileTrial $direct
+$profile.timings.targetUpgrade.installerTrace.records[3].phase = 'old-uninstaller-missing'
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'Upgrade must retain previous-version uninstaller completion'
+$profile = New-ProfileTrial $direct
+$records = $profile.timings.targetUpgrade.installerTrace.records
+$old = $records[3]
+$records = $records[0..2] + $records[4..10] + @($old) + $records[11..($records.Count - 1)]
+$tick = 100
+foreach ($record in $records) { $record.uptimeMilliseconds = $tick++ }
+$profile.timings.targetUpgrade.installerTrace.records = $records
+$validation = Get-InstallerProfilingValidation @($profile)
+Assert-Equal $validation.passed $false 'Uninstaller completion must precede payload deployment'
+Assert-Equal (@($validation.trials[0].errors | Where-Object { $_ -like 'Previous-version uninstaller marker outside*' }).Count -gt 0) $true 'Late uninstaller fails the lifecycle requirement'
+$profile = New-ProfileTrial $direct
+$profile.timings.targetFreshInstall.installerTrace.records = @()
+Assert-Equal (Get-InstallerProfilingValidation @($profile)).passed $false 'An empty trace fails without discarding raw trial'
 $traceDirectory = Join-Path ([IO.Path]::GetTempPath()) ('life-nsis-trace-parser-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $traceDirectory
 try {

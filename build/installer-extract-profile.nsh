@@ -1,13 +1,15 @@
 ; Mirrored from app-builder-lib/templates/nsis/include/extractAppPackage.nsh.
 ; scripts/verify-nsis-trace.cjs requires exact stock statements after removing
-; trace calls. Keep all labels, retries, error handling and fallback unchanged.
-!macro extractUsing7za FILE
+; trace and payload verification calls. All upstream retry/fallback behavior is
+; retained for nonempty targets and uncertain environments.
+!macro LifeStockExtractUsing7za FILE
   Push $OUTDIR
   CreateDirectory "$PLUGINSDIR\7z-out"
   ClearErrors
   SetOutPath "$PLUGINSDIR\7z-out"
   !insertmacro LifeInstallerTrace "extract-start"
   Nsis7z::Extract "${FILE}"
+  !insertmacro LifeRequireVerifiedStagedPayload "$PLUGINSDIR\7z-out"
   !insertmacro LifeInstallerTrace "extract-complete"
   Pop $R0
   SetOutPath $R0
@@ -55,5 +57,45 @@
     Goto LoopExtract7za
 
   DoneExtract7za:
+    !insertmacro LifeRequireVerifiedPayload "$INSTDIR"
     !insertmacro LifeInstallerTrace "payload-complete"
+!macroend
+
+!macro extractUsing7za FILE
+  Push "$INSTDIR"
+  Call LifeEmptyPayloadDirectory
+  Pop $lifePayloadVerified
+  ${if} $lifePayloadVerified == "2"
+    !insertmacro LifeRejectUnsafePayloadDirectory
+  ${endif}
+  ; Inspect every expected destination before the first write, including paths
+  ; that will be merged by the unchanged fallback copy routine.
+  Push $lifePayloadVerified
+  !insertmacro LifePreflightSelectedPayload "$INSTDIR" $lifePayloadVerified
+  ${if} $lifePayloadVerified != "1"
+    Pop $lifePayloadVerified
+    !insertmacro LifeRejectUnsafePayloadDirectory
+  ${endif}
+  Pop $lifePayloadVerified
+  ${if} $lifePayloadVerified == "1"
+    !insertmacro LifeInstallerTrace "payload-direct-start"
+    !insertmacro LifeInstallerTrace "extract-start"
+    Nsis7z::Extract "${FILE}"
+    !insertmacro LifeInstallerTrace "extract-complete"
+    !insertmacro LifeInstallerTrace "payload-verification-start"
+    !insertmacro LifeVerifySelectedStagedPayload "$INSTDIR" $lifePayloadVerified
+    !insertmacro LifeInstallerTrace "payload-verification-complete"
+    ${if} $lifePayloadVerified == "1"
+      !insertmacro LifeInstallerTrace "payload-direct-complete"
+      !insertmacro LifeInstallerTrace "payload-complete"
+      Goto LifeExtractComplete
+    ${else}
+      ; A failed direct extraction never registers or launches the application.
+      ; Re-extract into the stock stage, verify it before copying, and retain
+      ; every original copy retry and final installed-payload verification.
+      !insertmacro LifeInstallerTrace "payload-direct-fallback"
+    ${endif}
+  ${endif}
+  !insertmacro LifeStockExtractUsing7za "${FILE}"
+  LifeExtractComplete:
 !macroend

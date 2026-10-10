@@ -87,10 +87,33 @@ function Get-UpgradePerformance([object[]]$Pairs, [double]$MaximumMilliseconds) 
     }
 }
 
+function Get-InstallerPayloadRouteValidation([string[]]$Phases) {
+    $errors = [Collections.Generic.List[string]]::new()
+    $sequence = $Phases -join ','
+    $verification = 'payload-verification-start,payload-verification-complete'
+    $direct = "payload-direct-start,extract-start,extract-complete,$verification,payload-direct-complete,payload-complete"
+    $directFallback = "payload-direct-start,extract-start,extract-complete,$verification,payload-direct-fallback,"
+    $stock = "extract-start,$verification,extract-complete,(?:payload-copy-start,payload-copy-complete,){1,5}(?:extract-fallback-cleanup-start,extract-fallback-cleanup-complete,extract-fallback-start,extract-fallback-complete,)?$verification,payload-complete"
+    $route = 'invalid'
+    if ($sequence -cmatch "^$direct`$") {
+        $route = 'direct'
+    } elseif ($sequence -cmatch "^$stock`$") {
+        $route = 'stock'
+    } elseif ($sequence -cmatch "^$directFallback$stock`$") {
+        $route = 'direct-fallback-stock'
+    } else {
+        $errors.Add('The payload route must contain a complete ordered direct extraction and verification, or a complete verified stock extraction/copy route.')
+    }
+    if ('extract-fallback-start' -cin $Phases -and
+        @($Phases | Where-Object { $_ -ceq 'payload-copy-start' }).Count -ne 5) {
+        $errors.Add('The stock extraction fallback requires all five complete copy attempts.')
+    }
+    return [pscustomobject]@{ route = $route; passed = $errors.Count -eq 0; errors = $errors.ToArray() }
+}
+
 function Get-InstallerProfilingValidation([object[]]$Pairs) {
     $trials = [Collections.Generic.List[object]]::new()
     $required = @('installer-init', 'process-check-start', 'process-check-complete',
-        'extract-start', 'extract-complete', 'payload-copy-start', 'payload-copy-complete',
         'payload-complete', 'cache-registration-shortcuts-complete')
     foreach ($pair in $Pairs) {
         foreach ($operation in @('targetUpgrade', 'targetFreshInstall')) {
@@ -100,15 +123,38 @@ function Get-InstallerProfilingValidation([object[]]$Pairs) {
             $records = @($trace.records)
             $names = @($records | ForEach-Object { $_.phase })
             foreach ($phase in $required) {
-                if ($phase -notin $names) { $errors.Add("Missing required marker: $phase") }
+                if (@($names | Where-Object { $_ -ceq $phase }).Count -ne 1) {
+                    $errors.Add("Expected exactly one required marker: $phase")
+                }
             }
             if ($operation -eq 'targetUpgrade' -and
-                'old-uninstaller-complete' -notin $names -and 'old-user-uninstaller-complete' -notin $names) {
+                'old-uninstaller-complete' -cnotin $names -and 'old-user-uninstaller-complete' -cnotin $names) {
                 $errors.Add('Missing previous-version uninstaller completion marker.')
             }
             if (-not $trace.emitted) { $errors.Add('The target installer emitted no trace file.') }
-            if ($records.Count -gt 0 -and $records[0].phase -ne 'installer-init') {
+            if ($records.Count -gt 0 -and $records[0].phase -cne 'installer-init') {
                 $errors.Add('The first retained marker must be installer-init.')
+            }
+            $routePhases = @($names | Where-Object { $_ -cmatch '^(?:payload|extract)-' })
+            $payloadRoute = Get-InstallerPayloadRouteValidation $routePhases
+            foreach ($errorMessage in $payloadRoute.errors) { $errors.Add($errorMessage) }
+            $lifecycle = @('installer-init', 'process-check-start', 'process-check-complete')
+            if ($routePhases.Count -gt 0) { $lifecycle += $routePhases[0] }
+            $lifecycle += @('payload-complete', 'cache-registration-shortcuts-complete')
+            $lastIndex = -1
+            foreach ($phase in $lifecycle) {
+                $index = [Array]::IndexOf($names, $phase)
+                if ($index -le $lastIndex) { $errors.Add("Marker outside lifecycle order: $phase") }
+                $lastIndex = $index
+            }
+            $firstPayloadIndex = if ($routePhases.Count -gt 0) { [Array]::IndexOf($names, $routePhases[0]) } else { -1 }
+            foreach ($phase in @('old-uninstaller-complete', 'old-user-uninstaller-complete')) {
+                for ($index = 0; $index -lt $names.Count; $index++) {
+                    if ($names[$index] -ceq $phase -and
+                        ($index -le [Array]::IndexOf($names, 'process-check-complete') -or $index -ge $firstPayloadIndex)) {
+                        $errors.Add("Previous-version uninstaller marker outside pre-payload lifecycle: $phase")
+                    }
+                }
             }
             $previous = $trace.outerProcessUptime.beforeLaunchMilliseconds
             foreach ($record in $records) {
@@ -121,14 +167,15 @@ function Get-InstallerProfilingValidation([object[]]$Pairs) {
             $trials.Add([pscustomobject]@{
                 baselineVersion = $pair.baselineVersion; targetVersion = $pair.targetVersion
                 operation = $operation; passed = $errors.Count -eq 0
-                requiredMarkers = $required; errors = $errors.ToArray()
+                requiredMarkers = $required; payloadRoute = $payloadRoute.route
+                payloadRouteMarkers = $routePhases; errors = $errors.ToArray()
             })
         }
     }
     return [pscustomobject]@{
         passed = $trials.Count -gt 0 -and @($trials | Where-Object { -not $_.passed }).Count -eq 0
         trials = $trials.ToArray()
-        scope = 'Target marker completeness and monotonic native uptime; full raw installer timing and functional checks are unchanged.'
+        scope = 'Complete verified target payload route, pre-payload uninstaller lifecycle and monotonic native uptime; full raw installer timing and functional checks are unchanged.'
     }
 }
 

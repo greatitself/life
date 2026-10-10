@@ -12,16 +12,25 @@ function macroBody(source, name) {
   return lines.slice(start + 1, end).join('\n')
 }
 
-function statements(source, removeTrace = false) {
+function statements(source, removeTrace = false, removeVerification = false) {
   return source
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line && !/^[;#]/.test(line))
     .filter((line) => !removeTrace || !/^!insertmacro LifeInstallerTrace "[a-z-]+"$/.test(line))
+    .filter(
+      (line) =>
+        !removeVerification ||
+        (!/^!insertmacro LifeRequireVerifiedStagedPayload "\$PLUGINSDIR\\7z-out"$/.test(line) &&
+          !/^!insertmacro LifeRequireVerifiedPayload "\$INSTDIR"$/.test(line)),
+    )
 }
 
-function assertStockStatements(actual, expected, name) {
-  if (JSON.stringify(statements(actual, true)) !== JSON.stringify(statements(expected))) {
+function assertStockStatements(actual, expected, name, removeVerification = false) {
+  if (
+    JSON.stringify(statements(actual, true, removeVerification)) !==
+    JSON.stringify(statements(expected))
+  ) {
     throw new Error(
       `Life NSIS profiling ${name} differs from the resolved upstream routine. Review the upstream change before building.`,
     )
@@ -40,11 +49,31 @@ function verify(root = path.join(__dirname, '..')) {
     path.join(root, 'build', 'installer-extract-profile.nsh'),
     'utf8',
   )
+  const stockExtraction = macroBody(profiledExtraction, 'LifeStockExtractUsing7za')
   assertStockStatements(
-    macroBody(profiledExtraction, 'extractUsing7za'),
+    stockExtraction,
     macroBody(extraction, 'extractUsing7za'),
     'extraction',
+    true,
   )
+  const verification = statements(stockExtraction).filter((line) =>
+    /^!insertmacro LifeRequireVerified(?:Staged)?Payload /.test(line),
+  )
+  if (
+    JSON.stringify(verification) !==
+      JSON.stringify([
+        '!insertmacro LifeRequireVerifiedStagedPayload "$PLUGINSDIR\\7z-out"',
+        '!insertmacro LifeRequireVerifiedPayload "$INSTDIR"',
+      ]) ||
+    !/Nsis7z::Extract "\$\{FILE\}"\s+!insertmacro LifeRequireVerifiedStagedPayload "\$PLUGINSDIR\\7z-out"/.test(
+      stockExtraction,
+    ) ||
+    !/DoneExtract7za:\s+!insertmacro LifeRequireVerifiedPayload "\$INSTDIR"/.test(stockExtraction)
+  ) {
+    throw new Error(
+      'The stock extraction must verify the complete stage before copying and the installed payload before completion.',
+    )
+  }
 
   const utility = fs
     .readFileSync(path.join(upstream, 'installUtil.nsh'), 'utf8')

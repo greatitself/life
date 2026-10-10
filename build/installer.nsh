@@ -1,11 +1,12 @@
-; Optional installer profiling. Normal installation retains the upstream process
-; checks, uninstall result handling, extraction, copy retries and updater cache.
+; Optional installer profiling and verified empty-directory extraction. Retain
+; upstream process checks, uninstall result handling, retries and updater cache.
 ; Verify the mirrored upstream routines before either NSIS executable is built.
 !system 'node "${PROJECT_DIR}/scripts/verify-nsis-trace.cjs"' = 0
 
 ; A custom check suppresses these declarations in the upstream include, even
 ; though this wrapper still invokes the complete upstream check.
 !include "getProcessInfo.nsh"
+!include "installer-payload.nsh"
 Var pid
 
 !macro LifeInstallerTrace PHASE
@@ -15,6 +16,20 @@ Var pid
 
 !macro customHeader
   !ifndef BUILD_UNINSTALLER
+    Var /GLOBAL lifePayloadVerified
+    !insertmacro LifeDefineEmptyPayloadDirectory
+    !ifdef APP_64
+      !system 'node "${PROJECT_DIR}/scripts/generate-installer-payload.cjs" --archive "${APP_64}" --arch 64 --output "${APP_64}.life-payload.nsh"' = 0
+      !include "${APP_64}.life-payload.nsh"
+    !endif
+    !ifdef APP_32
+      !system 'node "${PROJECT_DIR}/scripts/generate-installer-payload.cjs" --archive "${APP_32}" --arch 32 --output "${APP_32}.life-payload.nsh"' = 0
+      !include "${APP_32}.life-payload.nsh"
+    !endif
+    !ifdef APP_ARM64
+      !system 'node "${PROJECT_DIR}/scripts/generate-installer-payload.cjs" --archive "${APP_ARM64}" --arch ARM64 --output "${APP_ARM64}.life-payload.nsh"' = 0
+      !include "${APP_ARM64}.life-payload.nsh"
+    !endif
     Function LifeInstallerTrace
       ; Consume the phase argument while restoring all registers and the stack.
       Exch $0
@@ -67,12 +82,24 @@ Var pid
 !macroend
 
 ; This is expanded after installer.nsh has defined extractUsing7za and before
-; installApplicationFiles uses it. Replace only that macro with its exact stock
-; body plus trace calls, avoiding template shadowing or a custom installer script.
+; installApplicationFiles uses it. Preserve the stock staging/copy routine behind
+; an empty-target fast path and require complete verification before completion.
 !macro customCheckAppRunning
   !ifndef BUILD_UNINSTALLER
     !ifndef LIFE_PROFILE_EXTRACT_DEFINED
       !define LIFE_PROFILE_EXTRACT_DEFINED
+      !ifdef UNINSTALLER_ICON
+        !error "Life's verified installer must include the uninstaller icon in its trusted payload before enabling UNINSTALLER_ICON."
+      !endif
+      !ifmacrodef customFiles_x64
+        !error "Life's verified installer does not support files outside the trusted x64 payload."
+      !endif
+      !ifmacrodef customFiles_ia32
+        !error "Life's verified installer does not support files outside the trusted ia32 payload."
+      !endif
+      !ifmacrodef customFiles_arm64
+        !error "Life's verified installer does not support files outside the trusted ARM64 payload."
+      !endif
       !macroundef extractUsing7za
       !include "installer-extract-profile.nsh"
     !endif

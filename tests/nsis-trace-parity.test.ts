@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 const require = createRequire(import.meta.url)
 const { assertStockStatements, macroBody, verify } = require('../scripts/verify-nsis-trace.cjs')
 
-describe('NSIS diagnostic upstream parity', () => {
+describe('NSIS installer upstream fallback parity', () => {
   it('retains the resolved extraction and uninstall-result routines', () => {
     expect(() => verify()).not.toThrow()
   })
@@ -16,6 +16,19 @@ describe('NSIS diagnostic upstream parity', () => {
       stock +
       '\n!insertmacro LifeInstallerTrace "payload-copy-complete"'
     expect(() => assertStockStatements(traced, stock, 'fixture')).not.toThrow()
+  })
+
+  it('allows only the explicit complete stage and installed-payload gates for extraction', () => {
+    const stock = 'CopyFiles /SILENT "source" "target"\nIfErrors 0 Done'
+    const verified =
+      '!insertmacro LifeRequireVerifiedStagedPayload "$PLUGINSDIR\\7z-out"\n' +
+      stock +
+      '\n!insertmacro LifeRequireVerifiedPayload "$INSTDIR"'
+    expect(() => assertStockStatements(verified, stock, 'extraction', true)).not.toThrow()
+    expect(() => assertStockStatements(verified, stock, 'uninstall')).toThrow('differs')
+    expect(() =>
+      assertStockStatements(verified.replace('$INSTDIR', '$OTHERDIR'), stock, 'extraction', true),
+    ).toThrow('differs')
   })
 
   it.each([

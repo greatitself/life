@@ -43,8 +43,20 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx electron-builder --win --x64 --publish never
+        env:
+          LIFE_NSIS_PAYLOAD_SNAPSHOT_DIR: ${{ runner.temp }}/life-nsis-payload
+      - name: Save exact archived installer payload for later diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-payload
+          path: |
+            ${{ runner.temp }}/life-nsis-payload/app-64.7z
+            ${{ runner.temp }}/life-nsis-payload/app-64.json
+          if-no-files-found: error
       - name: Verify native NSIS marker append and register preservation
         run: node scripts/verify-nsis-trace-fixture.cjs
+      - name: Verify native installer payload integrity and guarded deployment
+        run: node scripts/verify-nsis-payload-fixture.cjs
       - name: Verify actual packaged Windows compiler and source customization
         shell: pwsh
         run: ./tests/windows-source-runtime.ps1
@@ -64,6 +76,15 @@ jobs:
             release/*.blockmap
             release/latest.yml
           if-no-files-found: error
+      - name: Prepare isolated decoder comparison tools
+        shell: pwsh
+        run: node scripts/prepare-windows-decoder-comparison.cjs --output "$env:RUNNER_TEMP/life-decoder-fixture"
+      - name: Save isolated decoder comparison tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-decoder-fixture
+          path: ${{ runner.temp }}/life-decoder-fixture
+          if-no-files-found: error
 
   benchmark:
     needs: build
@@ -79,10 +100,21 @@ jobs:
         with:
           name: life-windows-performance-installer
           path: release
+      - name: Download archived payload without extracting it before the trial
+        uses: actions/download-artifact@v4
+        with:
+          name: life-windows-performance-payload
+          path: ${{ runner.temp }}/life-nsis-payload
+      - name: Download tools for optional diagnostics after the trial
+        uses: actions/download-artifact@v4
+        with:
+          name: life-windows-performance-decoder-fixture
+          path: ${{ runner.temp }}/life-decoder-fixture
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Measure complete 0.11.0 to 0.11.1 upgrade and preserve saved data
+        id: upgrade
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem release/*.exe)
@@ -100,4 +132,25 @@ jobs:
           path: |
             output/windows-upgrade-proof.json
             output/windows-installation-benchmark.md
+          if-no-files-found: error
+      - name: Compare decoders only after a complete failed time trial
+        if: always() && steps.upgrade.outcome == 'failure' && hashFiles('output/windows-upgrade-proof.json') != ''
+        shell: pwsh
+        run: |
+          $proofPath = Join-Path $env:GITHUB_WORKSPACE 'output/windows-upgrade-proof.json'
+          $proof = Get-Content -Raw -LiteralPath $proofPath | ConvertFrom-Json
+          if ($proof.runner.sourceSHA -cne $env:LIFE_SOURCE_SHA) { throw 'Original installer proof source does not match this candidate.' }
+          if ($proof.functionalValidationPassed -and $proof.profilingValidation.passed -and $proof.performanceGate.passed -eq $false) {
+            $fixtureRoot = Join-Path $env:RUNNER_TEMP 'life-decoder-fixture'
+            $snapshotRoot = Join-Path $env:RUNNER_TEMP 'life-nsis-payload'
+            & "$fixtureRoot/windows-decoder-comparison.ps1" -ArchivePath "$snapshotRoot/app-64.7z" -ManifestPath "$snapshotRoot/app-64.json" -InstallerTrialCompleted -InstallerProofPath $proofPath -ReportDirectory "$env:GITHUB_WORKSPACE/output/decoder-comparison"
+          } else {
+            Write-Host 'Decoder diagnostics skipped: no complete validated installer time-failure trial.'
+          }
+      - name: Save separate post-trial decoder diagnostics
+        if: always() && hashFiles('output/decoder-comparison/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-performance-decoder-comparison
+          path: output/decoder-comparison
           if-no-files-found: error

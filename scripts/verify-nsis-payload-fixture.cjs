@@ -389,6 +389,14 @@ function requireSuccess(command, args, options) {
   return result
 }
 
+function windowsPowerShellEnvironment(environment) {
+  // pwsh -> Node -> Windows PowerShell otherwise inherits incompatible PS7
+  // module paths. Let this child reconstruct its native defaults at startup.
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'),
+  )
+}
+
 function sha256(filename) {
   return createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
 }
@@ -882,20 +890,143 @@ SectionEnd
 
     const metadataSource = path.join(scratch, 'metadata.ps1')
     fs.writeFileSync(metadataSource, '\ufeff' + metadataScript)
+    const startupSource = path.join(scratch, 'powershell-startup.ps1')
+    const startupOutput = path.join(scratch, 'powershell-startup.json')
+    const poisonModules = directory('poisoned-powershell-modules')
+    const poisonSecurity = path.join(poisonModules, 'Microsoft.PowerShell.Security')
+    fs.mkdirSync(poisonSecurity)
+    const poisonSentinel = 'LIFE_PS_MODULE_PATH_POISON_v1'
+    fs.writeFileSync(path.join(poisonSecurity, 'poison.psm1'), `throw '${poisonSentinel}'\n`)
+    fs.writeFileSync(
+      path.join(poisonSecurity, 'Microsoft.PowerShell.Security.psd1'),
+      String.raw`@{
+  RootModule = 'poison.psm1'
+  ModuleVersion = '99.0.0'
+  GUID = '2e1cde56-39f2-43b1-b61c-d059cb469e10'
+  FunctionsToExport = @('Get-Acl')
+}
+`,
+    )
+    fs.writeFileSync(
+      startupSource,
+      '\ufeff' +
+        String.raw`$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+try {
+  if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop') { throw 'The fixture requires native Windows PowerShell 5.' }
+  Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+  Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+  $acl = Get-Acl -LiteralPath $env:LIFE_PS_STARTUP_DIRECTORY
+  if ($acl -isnot [Security.AccessControl.DirectorySecurity]) { throw 'Get-Acl did not return the native .NET directory security object.' }
+  $hash = Get-FileHash -LiteralPath $env:LIFE_PS_STARTUP_FILE -Algorithm SHA256
+  $records = @()
+  foreach ($name in @('Get-Acl', 'Get-FileHash', 'ConvertTo-Json')) {
+    $command = Get-Command $name -ErrorAction Stop
+    $expected = $(if ($name -eq 'Get-Acl') { 'Microsoft.PowerShell.Security' } else { 'Microsoft.PowerShell.Utility' })
+    if ($command.ModuleName -cne $expected) { throw ('Unexpected native module for ' + $name) }
+    $expectedBase = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'Modules', $expected))
+    $nativeHome = [IO.Path]::GetFullPath($PSHOME)
+    $actualBase = [IO.Path]::GetFullPath($command.Module.ModuleBase)
+    if (-not $actualBase.Equals($expectedBase, [StringComparison]::OrdinalIgnoreCase) -and -not $actualBase.Equals($nativeHome, [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module base for ' + $name + ': ' + $actualBase) }
+    $actualPath = [IO.Path]::GetFullPath($command.Module.Path)
+    if (-not $actualPath.StartsWith(($nativeHome + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw ('Unexpected native module path for ' + $name + ': ' + $actualPath) }
+    $records += [PSCustomObject]@{ Command = $name; Module = $expected; ModuleBase = $actualBase; ModulePath = $actualPath }
+  }
+  $json = ConvertTo-Json -InputObject ([PSCustomObject]@{ Major = $PSVersionTable.PSVersion.Major; Edition = $PSVersionTable.PSEdition; Sha256 = $hash.Hash.ToLowerInvariant(); Modules = $records }) -Depth 4 -Compress
+  [IO.File]::WriteAllText($env:LIFE_PS_STARTUP_OUTPUT, $json, [Text.UTF8Encoding]::new($false))
+} catch {
+  [Console]::Error.WriteLine($_.Exception.ToString())
+  exit 9
+}
+`,
+    )
+    const beforeProcessEnvironment = { ...process.env }
+    const poisonedCallerEnvironment = {
+      ...windowsPowerShellEnvironment(process.env),
+      TEMP: nativeTemp,
+      TMP: nativeTemp,
+      LIFE_PS_STARTUP_DIRECTORY: payload,
+      LIFE_PS_STARTUP_FILE: path.join(payload, 'payload.bin'),
+      LIFE_PS_STARTUP_OUTPUT: startupOutput,
+      PSModulePath: poisonModules,
+    }
+    const beforeCallerEnvironment = { ...poisonedCallerEnvironment }
+    const startupArgs = [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      startupSource,
+    ]
+    const poisonedStartup = run('powershell.exe', startupArgs, { env: poisonedCallerEnvironment })
+    assert.equal(
+      poisonedStartup.status,
+      9,
+      'Unsanitized child must resolve and reject the fixture-owned poisoned module',
+    )
+    assert.ok(
+      (poisonedStartup.stdout + poisonedStartup.stderr).includes(poisonSentinel),
+      'Negative child must fail through the actual poisoned module import',
+    )
+    assert.equal(
+      fs.existsSync(startupOutput),
+      false,
+      'Poisoned child must not produce a successful startup result',
+    )
+    const mixedCaseCallerEnvironment = {
+      ...poisonedCallerEnvironment,
+      psmodulepath: poisonModules,
+      PsMoDuLePaTh: poisonModules,
+    }
+    const beforeMixedCaseEnvironment = { ...mixedCaseCallerEnvironment }
+    const startupEnvironment = windowsPowerShellEnvironment(mixedCaseCallerEnvironment)
+    assert.equal(
+      Object.keys(startupEnvironment).some((key) => key.toUpperCase() === 'PSMODULEPATH'),
+      false,
+      'Child environment must remove every casing of PSModulePath',
+    )
+    requireSuccess('powershell.exe', startupArgs, { env: startupEnvironment })
+    const startup = JSON.parse(fs.readFileSync(startupOutput, 'utf8'))
+    assert.equal(startup.Major, 5)
+    assert.equal(startup.Edition, 'Desktop')
+    assert.equal(startup.Sha256, sha256(path.join(payload, 'payload.bin')))
+    assert.deepEqual(
+      startup.Modules.map((entry) => entry.Command),
+      ['Get-Acl', 'Get-FileHash', 'ConvertTo-Json'],
+    )
+    assert.deepEqual(
+      poisonedCallerEnvironment,
+      beforeCallerEnvironment,
+      'Startup probe must preserve its caller environment object',
+    )
+    assert.deepEqual(
+      mixedCaseCallerEnvironment,
+      beforeMixedCaseEnvironment,
+      'Sanitization must preserve every original environment key/value',
+    )
+    assert.deepEqual(
+      { ...process.env },
+      beforeProcessEnvironment,
+      'Startup probe must preserve the process environment',
+    )
+    console.log(
+      'Native Windows PowerShell startup probe passed: poisoned inherited module rejected, sanitized child loaded native Security/Utility cmdlets, and caller environment remained unchanged.',
+    )
     function metadata(name, target, action = 'snapshot') {
       const output = path.join(scratch, `${name}.metadata.json`)
       requireSuccess(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', metadataSource],
         {
-          env: {
+          env: windowsPowerShellEnvironment({
             ...process.env,
             TEMP: nativeTemp,
             TMP: nativeTemp,
             LIFE_NSIS_METADATA_ROOT: target,
             LIFE_NSIS_METADATA_OUTPUT: output,
             LIFE_NSIS_METADATA_ACTION: action,
-          },
+          }),
         },
       )
       const records = JSON.parse(fs.readFileSync(output, 'utf8'))

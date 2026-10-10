@@ -103,6 +103,9 @@ async function run() {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } })
     page.on('pageerror', (error) => errors.push(error.message))
     await page.goto(`http://127.0.0.1:${server.address().port}`)
+    const openerElement = await page
+      .getByRole('button', { name: 'Usage', exact: true })
+      .elementHandle()
     const dialog = page.getByRole('dialog', { name: 'Usage', exact: true })
     let contentReady = false
     const opening = openUsageDialog(page).then(() => {
@@ -342,7 +345,9 @@ async function run() {
     await page.screenshot({ path: join(output, 'usage-narrow.png') })
     await page.keyboard.press('Escape')
     await dialog.waitFor({ state: 'hidden' })
-    await page.waitForFunction(() => document.activeElement?.textContent === 'Usage', undefined, {
+    // The closed fixture's body also contains exactly "Usage". Wait for the
+    // trigger itself while Radix and the deferred wrapper finish restoring focus.
+    await page.waitForFunction((element) => document.activeElement === element, openerElement, {
       timeout: 2000,
     })
     assert.equal(

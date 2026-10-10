@@ -1,0 +1,3 @@
+LIBRARY LifeInstallerLauncher
+EXPORTS
+  Launch

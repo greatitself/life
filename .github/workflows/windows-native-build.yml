@@ -1,0 +1,55 @@
+name: Compile Windows native launcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Full source commit SHA for the native compiler preflight'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      LIFE_SOURCE_REF: ${{ inputs.source_ref }}
+    steps:
+      - name: Validate exact source commit
+        shell: pwsh
+        run: |
+          if ($env:LIFE_SOURCE_REF -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw 'Provide exactly 40 lowercase hexadecimal characters for the source commit SHA.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Verify pinned checkout
+        shell: pwsh
+        run: |
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:LIFE_SOURCE_REF) {
+            throw 'Native compiler checkout does not match the requested source commit.'
+          }
+          Write-Output "Native compiler source: $source"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile native launcher and verify PE exports
+        run: node scripts/build-modern-extractor.cjs --output-directory output/native-compiler-proof
+      - name: Save native compiler evidence
+        if: always() && hashFiles('output/native-compiler-proof/LifeInstallerLauncher.dll', 'output/native-compiler-proof/launcher-metadata.json', 'output/native-compiler-proof/launcher-compile-output.txt', 'output/native-compiler-proof/.launcher-build-*/compile-output.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-native-compiler-proof
+          path: |
+            output/native-compiler-proof/LifeInstallerLauncher.dll
+            output/native-compiler-proof/launcher-metadata.json
+            output/native-compiler-proof/launcher-compile-output.txt
+            output/native-compiler-proof/.launcher-build-*/compile-output.txt
+          if-no-files-found: error
+          include-hidden-files: true

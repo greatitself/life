@@ -62,10 +62,6 @@
 !macroend
 
 !macro extractUsing7za FILE
-  !ifndef LIFE_MODERN_RESULT_VAR_DEFINED
-    !define LIFE_MODERN_RESULT_VAR_DEFINED
-    Var /GLOBAL lifeModernResult
-  !endif
   Push "$INSTDIR"
   Call LifeEmptyPayloadDirectory
   Pop $lifePayloadVerified
@@ -84,17 +80,11 @@
   ${if} $lifePayloadVerified == "1"
     !insertmacro LifeInstallerTrace "payload-direct-start"
     !insertmacro LifeInstallerTrace "extract-start"
-    !insertmacro LifeModernExtract "${FILE}" $lifeModernResult
-    ${if} $lifeModernResult == "unavailable"
-      Nsis7z::Extract "${FILE}"
-    ${endif}
+    Nsis7z::Extract "${FILE}"
     !insertmacro LifeInstallerTrace "extract-complete"
     !insertmacro LifeInstallerTrace "payload-verification-start"
     !insertmacro LifeVerifySelectedStagedPayload "$INSTDIR" $lifePayloadVerified
     !insertmacro LifeInstallerTrace "payload-verification-complete"
-    ${if} $lifeModernResult == "error"
-      StrCpy $lifePayloadVerified "0"
-    ${endif}
     ${if} $lifePayloadVerified == "1"
       !insertmacro LifeInstallerTrace "payload-direct-complete"
       !insertmacro LifeInstallerTrace "payload-complete"

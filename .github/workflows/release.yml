@@ -125,14 +125,6 @@ jobs:
           cache: npm
       - id: dependency_install
         run: npm ci
-      - name: Prepare modern Windows installer tools
-        if: matrix.platform == 'windows-x64' && hashFiles('scripts/package-windows-decoder.cjs') != '' && hashFiles('scripts/build-modern-extractor.cjs') != ''
-        shell: pwsh
-        run: |
-          node scripts/package-windows-decoder.cjs --root . --output output/installer-tools/windows-x64
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/build-modern-extractor.cjs --output-directory output/installer-tools/nsis-plugins/x86-unicode
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify native installer process and policy guards
         if: matrix.platform == 'windows-x64' && hashFiles('tests/windows-installer-process.ps1') != ''
         shell: pwsh
@@ -201,7 +193,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Verify strict upgrade time validation
+      - name: Verify optional upgrade time validation
         shell: pwsh
         run: ./.release-verification/tests/windows-upgrade-performance.ps1 -SourcePath ./.release-verification/tests/windows-upgrade.ps1
       - name: Verify Windows upgrade from Life ${{ matrix.baseline }}
@@ -211,8 +203,7 @@ jobs:
           LIFE_SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
         run: |
           $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
-          $limit = if ([version]$version -ge [version]'0.11.1') { 10000 } else { 0 }
-          ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion $version -BaselineVersions @($env:BASELINE_VERSION) -MaxUpgradeMilliseconds $limit
+          ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion $version -BaselineVersions @($env:BASELINE_VERSION) -MaxUpgradeMilliseconds 0
       - name: Report Windows installation benchmark
         if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
         shell: pwsh

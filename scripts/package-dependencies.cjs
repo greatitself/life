@@ -4,7 +4,6 @@ const { stat, writeFile } = require('node:fs/promises')
 const { createRequire } = require('node:module')
 const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
-const { packageWindowsDecoderResources } = require('./package-windows-decoder.cjs')
 
 module.exports = async function packageDependencies(context) {
   const builderRequire = createRequire(require.resolve('app-builder-lib'))
@@ -16,7 +15,6 @@ module.exports = async function packageDependencies(context) {
   console.log(
     `  • compiler dependencies archived: ${manifest.files.length} files, cache ${manifest.key.slice(0, 12)}`,
   )
-  await packageWindowsDecoderResources(context)
 }
 
 async function collectDependencyManifest(archive, asar, filesystem = {}) {

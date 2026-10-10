@@ -3369,9 +3369,15 @@ SectionEnd
         assert.equal(lifetime.ParentPid, trial.child.pid)
         assert.equal(lifetime.ParentWait, 0)
         assert.equal(lifetime.DecoderWait, 0)
+        assert.equal(
+          fs.existsSync(path.join(output, '.life-installer-extractor-guard')),
+          false,
+          'Both exact process exits must release the owned guard before cleanup or verification',
+        )
         if (mode === 'fail-job-query') {
           assert.equal(exit.code, 77)
           assert.equal(lifetime.ParentExit, 77)
+          assert.equal(lifetime.DecoderExit, 0)
           assert.equal(lifetime.ParentKilled, false)
           assert.equal(
             fs.readFileSync(config.AckFile, 'ascii'),
@@ -3392,11 +3398,31 @@ SectionEnd
           fs.mkdirSync(output)
         }
         assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolicLink())
-        assert.deepEqual(
-          fs.readdirSync(output),
-          [],
-          'Both exact process exits must release the owned guard before cleanup or verification',
-        )
+        if (mode === 'fail-job-query') {
+          const completedInventory = inventory(output)
+          assert.deepEqual(
+            completedInventory,
+            inventory(payload),
+            'Forced accounting failure after decoder exit 0 must retain every trusted payload hash',
+          )
+          for (const entry of completedInventory.filter((item) => !item.directory))
+            assert.equal(
+              fs.statSync(path.join(output, entry.name)).size,
+              fs.statSync(path.join(payload, entry.name)).size,
+              'Completed fatal-query payload must retain each exact trusted file size',
+            )
+          await new Promise((resolve) => setTimeout(resolve, 25))
+          assert.deepEqual(
+            inventory(output),
+            completedInventory,
+            'Fatal-query payload cannot change after both exact process waits',
+          )
+        } else
+          assert.deepEqual(
+            fs.readdirSync(output),
+            [],
+            'A decoder suspended before extraction must leave its output exactly empty',
+          )
         for (const item of [report, `${report}.registered`, `${report}.launched`])
           assert.equal(
             fs.existsSync(item),

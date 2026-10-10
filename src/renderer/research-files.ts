@@ -12,7 +12,6 @@ import {
 } from './workbench'
 import { collectLegacyResearch, researchLinkedThreadIds } from './research-legacy'
 import { researchInvocationGuidance, researchWorkspaceGuidance } from './research-guidance'
-import { webInterface } from './web-interface'
 
 import {
   makeResearchScope as makeScope,
@@ -197,12 +196,6 @@ async function call<T>(
   if (!api || !matches(scope, await api.connection.state()))
     throw new Error('Connect to this Research machine before syncing.')
   guard()
-  if (import.meta.env?.VITE_LIFE_WEB_PREVIEW === 'true') {
-    const { performWebResearchOperation } = await import('./web-research')
-    const value = await performWebResearchOperation<T>(scope, input)
-    guard()
-    return value
-  }
   const command = await researchCommand(worker, input)
   guard()
   const output = await api.connection.execute({
@@ -466,8 +459,7 @@ export function useResearchFiles(
     return true
   }
   useLayoutEffect(() => {
-    if (enabled && shouldUseResearchConnection(session.scope, connection, webInterface))
-      useWorkspace(connection)
+    if (enabled && shouldUseResearchConnection(session.scope, connection)) useWorkspace(connection)
   }, [enabled, session, connection.status, connection.profile?.id, connection.home])
   function publish(target: Session) {
     const goals = [...target.remote.values()].map((entry) => entry.goal)
@@ -603,7 +595,7 @@ export function useResearchFiles(
         {
           op: 'init',
           readme,
-          ...researchWorkspaceGuidance(webInterface),
+          ...researchWorkspaceGuidance(),
           methodSchema: researchMethodSchema,
           legacyWorkspaces: [...(legacy?.workspaces || []), connectionNow.current.workspace].filter(
             Boolean,
@@ -830,7 +822,7 @@ export function useResearchFiles(
         ...(problem
           ? { problemId: problem.id, problemDirectory: researchStorageName({ id: problem.id }) }
           : {}),
-        ...researchInvocationGuidance(webInterface, operation || goal.method?.activeOperation),
+        ...researchInvocationGuidance(),
         invocationId: crypto.randomUUID(),
       },
       guard,

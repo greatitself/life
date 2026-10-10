@@ -54,7 +54,7 @@ export class RendererErrorBoundary extends Component<Props, State> {
     if (this.recoveryRequested) return
     const api = this.props.recoveryApi
     if (!api) {
-      // A browser preview has no native sessions to leave behind.
+      // No native sessions exist when the desktop bridge is unavailable.
       this.setState({ error: undefined, recoveryError: undefined, recovering: undefined })
       return
     }

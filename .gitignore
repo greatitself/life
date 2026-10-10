@@ -1,7 +1,6 @@
 node_modules/
 out/
 dist/
-dist-web/
 release/
 output/
 *.log

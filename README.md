@@ -1,16 +1,10 @@
 # Life
 
-Life is a web and desktop research workspace for **Codex and Claude Code**, with local and SSH connections, an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
+Life is an Electron desktop research workspace for **Codex and Claude Code**, with SSH connections, an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Download the complete web app from [Life v0.9.0](https://github.com/greatitself/life/releases/tag/v0.9.0), extract its ZIP or tar.gz bundle, then run `npm ci` and `npm run start:web`. See the [v0.9.0 release notes](docs/release-notes-v0.9.0.md).
-
 Desktop installers are included in the [v0.9.0 release](https://github.com/greatitself/life/releases/tag/v0.9.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
-
-Run `npm run dev:web` and open [Life on localhost](http://localhost:5173/life/) for the web app with real Codex and Claude Code conversations, project files, Git, an interactive terminal, Research, and customization. It uses the CLIs and credentials on the server, and also supports SSH connections. See [web app setup](docs/web-app.md).
-
-Try the [public browser preview](https://greatitself.github.io/life/) to explore the same interface with editable sample Research stored in that browser. The public demo runs independently of the local web application's backend.
 
 ## Upgrade your installed Life
 
@@ -34,7 +28,7 @@ Fresh installations open Agents. Use the header view controls for **Research** a
 
 Research supports a trace from requirements and blockers to candidate solutions, interactions, and verification. **Anti-abstraction** decomposes a whole into constituent parts; **abstraction** composes parts into a higher-level whole. **Grounding** separately records the evidence, constraints, and assumptions supporting a claim. A cited source or proposed solution does not become a verified result automatically.
 
-The 12 approaches are Explore, Anti-abstraction, Abstraction, Grounding, Constructive interference, Counterfactual, Analogy transfer, Constraint inversion, Reverse design, Morphological search, Causal intervention, and Verification. Each produces inspectable records linked by stable IDs. A submitted operation has its own immutable invocation file; the native method guide and schema supply context without adding words to your message. See the [research methodology](docs/research-method.md) for the workbench, evidence states, composition, and testing workflow.
+The 12 approaches are Explore, Anti-abstraction, Abstraction, Grounding, Constructive interference, Counterfactual, Analogy transfer, Constraint inversion, Reverse design, Morphological search, Causal intervention, and Verification. Each produces inspectable records linked by stable IDs. Describe the desired research approach in your prompt. Each submitted request has its own immutable invocation file; the native method guide and schema supply context without adding words to your message. See the [research methodology](docs/research-method.md) for the workbench, evidence states, composition, and testing workflow.
 
 ## Customize Life in Life Studio
 
@@ -111,9 +105,9 @@ claude auth login
 
 Life starts the installed CLI through SSH, using its remote account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard local CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
 
-Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The web controls update immediately without routine settings notices. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the CLI version, account, and managed policy.
+Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The desktop controls update immediately without routine settings notices. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the CLI version, account, and managed policy.
 
-The web access menu uses each provider's native terminology and omits Plan: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
+The access menu uses each provider's native terminology and omits Plan: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
 
 Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Conversation history and project maps are stored locally.
 
@@ -122,28 +116,26 @@ Remote text previews are limited to 1 MB and confined to the connected project, 
 Use Node.js **22.12 or newer**:
 
 ```bash
-npm install
-npm run dev:web
+npm ci
+npm run dev
 ```
 
 ```bash
-npm run build:web
-npm run start:web
-npm run pack:web
+npm run build
+npm run dist
 ```
 
-The web app opens at [http://localhost:5173/life/](http://localhost:5173/life/). `npm run build:web` builds the frontend into `dist-web/` and the Node.js backend into `out/web/`. `npm run pack:web` creates ZIP and tar.gz bundles with checksums in `release/web/`. Saved connections, history, Research, and private backups are excluded from those bundles. See [web app setup](docs/web-app.md) for provider authentication and production configuration.
+Pushing a version tag verifies the desktop application and builds Electron installers for Windows x64, Linux x64, and macOS on Intel and Apple Silicon, including Windows upgrade checks.
 
-Pushing a version tag runs verification and publishes the target declared by `lifeReleaseTarget` in `package.json`. Version 0.9.0 uses `all`: CI verifies the web bundles and builds Electron installers for Windows x64, Linux x64, and macOS on Intel and Apple Silicon, including Windows upgrade checks. Desktop development and packaging use `npm run dev`, `npm run build`, and `npm run dist`.
+To rebuild an existing release, dispatch the release workflow with its `tag` and the verified source commit in `source_ref`. All installers and release notes use that same commit, which is linked in the published notes. The source package version must match the release tag. Replacing a same-version installer requires a manual installation for users who already installed that version.
 
 ## Verify changes
 
 ```bash
 npm run typecheck
 npm test
-npm run build:web
+npm run build
 npm run test:desktop
-npm run test:web-preview
 npm run format:check
 ```
 

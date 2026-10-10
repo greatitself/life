@@ -172,10 +172,10 @@ async function run() {
     current = await state()
     assert.equal(current.reference.model, 'model-b')
     assert.deepEqual(current.records.reference, [{ model: 'model-b' }])
-    await dispatchNative('reference-form', 1, 'plan')
+    await dispatchNative('reference-form', 1, 'read-only')
     current = await state()
-    assert.equal(current.reference.mode, 'plan')
-    assert.deepEqual(current.records.reference.at(-1), { mode: 'plan' })
+    assert.equal(current.reference.mode, 'read-only')
+    assert.deepEqual(current.records.reference.at(-1), { mode: 'read-only' })
     record('Valid native model and permission changes still reach their controlled settings')
 
     await dispatchNative('run-form', 0, 'choice:model-b')

@@ -16,8 +16,7 @@ import type { ConnectionState, ModelOption, PermissionMode, Provider } from '../
 import type { Thread } from '../state'
 import { fallbackModelCatalog } from '../model-catalog'
 import { parseModelSelection, parsePrefixedSelection } from '../selector-values'
-import { webPermissionMode } from '../../shared/permissions'
-import { webInterface } from '../web-interface'
+import { providerPermissionMode } from '../../shared/permissions'
 import { ProviderIcon } from './Icons'
 import { useBuiltinFeature } from '../builtin-extensions'
 import './reference-composer.css'
@@ -29,32 +28,13 @@ const effortName = (value: string) =>
         /(^|[_-])([a-z])/g,
         (_, separator, letter: string) => `${separator ? ' ' : ''}${letter.toUpperCase()}`,
       )
-const legacyPermissionChoices: {
+type PermissionChoice = {
   id: PermissionMode
   name: string
   description: string
   icon: typeof LockKeyhole
-}[] = [
-  {
-    id: 'review',
-    name: 'Supervised',
-    description: 'Review commands and file changes that need approval.',
-    icon: LockKeyhole,
-  },
-  {
-    id: 'edit',
-    name: 'Auto-accept edits',
-    description: 'Auto-approve workspace edits; ask for other actions.',
-    icon: PenLine,
-  },
-  {
-    id: 'plan',
-    name: 'Plan only',
-    description: 'Explore and plan without changing files.',
-    icon: ClipboardList,
-  },
-]
-const nativePermissionChoices = (provider: Provider): typeof legacyPermissionChoices =>
+}
+const nativePermissionChoices = (provider: Provider): PermissionChoice[] =>
   provider === 'codex'
     ? [
         {
@@ -166,10 +146,8 @@ export function ReferenceComposerControls({
   const efforts = current?.supportedReasoningEfforts || []
   const tiers = current?.serviceTiers || []
   const displayedEffort = reasoningEffort || current?.defaultReasoningEffort || ''
-  const permissionChoices = webInterface
-    ? nativePermissionChoices(provider)
-    : legacyPermissionChoices
-  const selectedMode = webInterface ? webPermissionMode(provider, mode) : mode
+  const permissionChoices = nativePermissionChoices(provider)
+  const selectedMode = providerPermissionMode(provider, mode)
   const permission =
     permissionChoices.find((item) => item.id === selectedMode) || permissionChoices[0]
   return (

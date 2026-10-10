@@ -7,9 +7,9 @@ const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { build } = require('esbuild')
 const { chromium } = require('playwright')
-const preview = process.argv.includes('--preview')
+const presentation = process.argv.includes('--presentation')
 
-async function previewChecks(page, checks) {
+async function presentationChecks(page, checks) {
   const artifacts = resolve(__dirname, '../output/playwright/v0.8.0')
   await mkdir(artifacts, { recursive: true })
   assert.equal(
@@ -99,7 +99,9 @@ async function previewChecks(page, checks) {
   assert.equal(await page.locator('.run-settings-note').count(), 0)
   await page.evaluate(() => window.controlsTest.resolveConfiguration(0, 'Saved for next turn'))
   assert.equal(await page.getByText('Saved for next turn', { exact: true }).count(), 0)
-  checks.push('Running web controls update immediately and apply settings without status notices')
+  checks.push(
+    'Running desktop controls update immediately and apply settings without status notices',
+  )
 
   const composer = page.getByRole('textbox', { name: 'Message your coding agent' })
   const send = page.getByRole('button', { name: 'Steer current response', exact: true })
@@ -173,7 +175,9 @@ async function previewChecks(page, checks) {
   await page.evaluate(() => window.controlsTest.resolveConfiguration(1, 'Idle settings saved'))
   assert.equal(await page.locator('.run-settings-note').count(), 0)
   assert.equal(await page.getByText('Idle settings saved', { exact: true }).count(), 0)
-  checks.push('Idle web conversations send settings changes immediately without a status notice')
+  checks.push(
+    'Idle desktop conversations send settings changes immediately without a status notice',
+  )
 
   for (const provider of ['codex', 'claude']) {
     await page.getByRole('button', { name: 'Host chat history', exact: true }).click()
@@ -225,7 +229,6 @@ async function run() {
           import {App} from './src/renderer/App'
           import {defaultLifeConfig} from './src/shared/customization'
           import './src/renderer/styles.css'
-          ${preview ? "import './src/renderer/web-preview.css'; document.documentElement.classList.add('life-browser-preview');" : ''}
           window.testConfig = {...defaultLifeConfig, workspacePanel:false}
           createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>)
         `,
@@ -235,7 +238,6 @@ async function run() {
       outfile: join(directory, 'fixture.js'),
       define: {
         'process.env.NODE_ENV': '"development"',
-        'import.meta.env.VITE_LIFE_WEB_PREVIEW': JSON.stringify(preview ? 'true' : 'false'),
       },
       logLevel: 'silent',
       loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
@@ -587,11 +589,11 @@ async function run() {
     await page.getByRole('textbox', { name: 'Message your coding agent' }).waitFor()
     await page.waitForFunction(() => window.controlsTest.records.stateReads >= 2)
     await settle()
-    if (preview) {
-      await previewChecks(page, checks)
+    if (presentation) {
+      await presentationChecks(page, checks)
       assert.deepEqual(errors, [])
       console.log(
-        JSON.stringify({ ok: true, preview: true, checks, browserErrors: errors }, null, 2),
+        JSON.stringify({ ok: true, presentation: true, checks, browserErrors: errors }, null, 2),
       )
       return
     }
@@ -688,15 +690,16 @@ async function run() {
     await chooseEffort('High')
     await page.waitForFunction(() => window.controlsTest.records.configure.length === 4)
     await page.evaluate(() => window.controlsTest.resolveConfiguration(3, 'LATEST ALPHA NOTICE'))
-    await page.getByText('LATEST ALPHA NOTICE', { exact: true }).waitFor()
+    await settle()
+    assert.equal(await page.locator('.run-settings-note').count(), 0)
     await page.evaluate(() =>
       window.controlsTest.resolveConfiguration(2, 'SUPERSEDED ALPHA NOTICE'),
     )
     await settle()
     assert.equal(await page.getByText('SUPERSEDED ALPHA NOTICE', { exact: true }).count(), 0)
-    assert.equal(await page.getByText('LATEST ALPHA NOTICE', { exact: true }).count(), 1)
+    assert.equal(await page.getByText('LATEST ALPHA NOTICE', { exact: true }).count(), 0)
     checks.push(
-      'Out-of-order acknowledgements preserve the latest settings notice in the same thread',
+      'Out-of-order acknowledgements stay quiet and preserve the latest selected settings',
     )
 
     const openNativeHistory = async (title) => {

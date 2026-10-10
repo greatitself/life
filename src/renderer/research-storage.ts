@@ -34,7 +34,7 @@ export function researchScopeMatches(scope: ResearchScope, connection: Connectio
   )
 }
 
-/** The web Research panel follows the connected host because it has no separate host picker. */
+/** Initialize from the connected host while preserving a separately selected Research host. */
 export function shouldUseResearchConnection(
   scope: ResearchScope | undefined,
   connection: ConnectionState,

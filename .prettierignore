@@ -2,7 +2,6 @@ node_modules
 out
 release
 dist
-dist-web
 output
 .playwright-cli
 package-lock.json

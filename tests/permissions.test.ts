@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { configPatchSchema } from '../src/shared/customization'
-import { webPermissionMode } from '../src/shared/permissions'
+import { providerPermissionMode } from '../src/shared/permissions'
 import { agentSettingsSchema, startSchema } from '../src/shared/validation'
 import { readThreads } from '../src/renderer/state'
 import {
@@ -12,14 +12,14 @@ import type { PermissionMode } from '../src/shared/types'
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe('native web permissions', () => {
-  it('migrates older web choices without retaining Plan or broadening access', () => {
-    expect(webPermissionMode('codex', 'review')).toBe('ask-for-approval')
-    expect(webPermissionMode('codex', 'edit')).toBe('ask-for-approval')
-    expect(webPermissionMode('codex', 'plan')).toBe('read-only')
-    expect(webPermissionMode('claude', 'plan')).toBe('review')
-    expect(webPermissionMode('claude', 'auto-review')).toBe('review')
-    expect(webPermissionMode('codex', 'auto')).toBe('ask-for-approval')
+describe('native provider permissions', () => {
+  it('migrates legacy choices without retaining Plan or broadening access', () => {
+    expect(providerPermissionMode('codex', 'review')).toBe('ask-for-approval')
+    expect(providerPermissionMode('codex', 'edit')).toBe('ask-for-approval')
+    expect(providerPermissionMode('codex', 'plan')).toBe('read-only')
+    expect(providerPermissionMode('claude', 'plan')).toBe('review')
+    expect(providerPermissionMode('claude', 'auto-review')).toBe('review')
+    expect(providerPermissionMode('codex', 'auto')).toBe('ask-for-approval')
   })
 
   it.each<PermissionMode>([

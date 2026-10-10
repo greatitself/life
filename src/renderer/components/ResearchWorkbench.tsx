@@ -7,8 +7,6 @@ import {
   ChevronDown,
   Circle,
   FlaskConical,
-  Folder,
-  LayoutGrid,
   Pause,
   Pencil,
   Plus,
@@ -18,7 +16,6 @@ import {
 } from 'lucide-react'
 import type { Provider } from '../../shared/types'
 import type { Thread } from '../state'
-import { webInterface } from '../web-interface'
 import type {
   ProblemStatus,
   ResearchGoal,
@@ -305,16 +302,6 @@ export function ResearchSidebar({
         </details>
       </div>
     ) : null
-  const storageLabel =
-    workbench.storageStatus === 'saved'
-      ? 'Saved to machine'
-      : workbench.storageStatus === 'saving'
-        ? 'Saving…'
-        : workbench.storageStatus === 'loading'
-          ? 'Refreshing…'
-          : workbench.storageStatus === 'error'
-            ? 'Sync needs attention'
-            : 'Offline · edits cached'
   function downloadLocalEdits() {
     const url = URL.createObjectURL(
       new Blob([workbench.exportLocal()], { type: 'application/json' }),
@@ -368,43 +355,7 @@ export function ResearchSidebar({
           </button>
         </div>
       </div>
-      {!webInterface ? (
-        <>
-          <button
-            type="button"
-            className="research-storage-selector"
-            onClick={onChooseWorkspace}
-            title={
-              workbench.scope
-                ? workbench.scope.host + ' · ' + workbench.scope.root
-                : 'Choose the machine for Research'
-            }
-          >
-            <Folder size={13} />
-            <span>
-              {workbench.scope
-                ? workbench.scope.host + ' · Research'
-                : 'Choose Research environment'}
-            </span>
-            <ChevronDown size={12} />
-          </button>
-          <div className="research-storage-status" data-status={workbench.storageStatus}>
-            <span role="status" title={workbench.storageError || undefined}>
-              {storageLabel}
-            </span>
-            {workbench.storageError ? (
-              <button
-                type="button"
-                onClick={
-                  workbench.storageConflict ? () => setConflictOpen(true) : workbench.refresh
-                }
-              >
-                {workbench.storageConflict ? 'Resolve' : 'Retry'}
-              </button>
-            ) : null}
-          </div>
-        </>
-      ) : null}
+
       {workbench.storageNotice ? (
         <div className="research-migration-notice" role="status">
           <p>{workbench.storageNotice}</p>
@@ -429,39 +380,9 @@ export function ResearchSidebar({
           </button>
         </div>
       ) : null}
-      {!webInterface ? (
-        <div className="research-goals-heading">
-          <span>Goals</span>
-        </div>
-      ) : null}
-      {!webInterface && workbench.goals.length ? (
-        <ResearchGoalMenu
-          workbench={workbench}
-          goals={goals}
-          trigger={
-            <button type="button" className="research-goal-picker">
-              <Target size={15} />
-              <span>{goal?.title || 'Research'}</span>
-              <ChevronDown size={13} />
-            </button>
-          }
-        />
-      ) : null}
+
       {goal ? (
         <>
-          {!webInterface ? (
-            <button
-              className={'research-overview-button' + (!workbench.problem ? ' selected' : '')}
-              onClick={workbench.overview}
-            >
-              <LayoutGrid size={14} />
-              <span>Overview</span>
-              <small>
-                {goal.problems.filter((problem) => problem.status === 'solved').length}/
-                {goal.problems.length}
-              </small>
-            </button>
-          ) : null}
           <div className="research-problem-filters" aria-label="Problem status">
             {(['all', 'open', 'blocked'] as const).map((status) => (
               <button

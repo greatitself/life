@@ -9,19 +9,23 @@ on:
         description: 'Existing version tag to build and release'
         required: true
         type: string
+      source_ref:
+        description: 'Source commit, branch, or tag for a rebuild (defaults to the version tag)'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 env:
-  LIFE_RELEASE_REF: ${{ inputs.tag || github.ref }}
+  LIFE_RELEASE_REF: ${{ inputs.source_ref || inputs.tag || github.ref }}
   LIFE_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
-      target: ${{ steps.target.outputs.value }}
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,49 +36,26 @@ jobs:
           cache: npm
       - name: Verify release version
         run: node -e "if (process.env.LIFE_RELEASE_TAG !== 'v' + require('./package.json').version) throw new Error('Release tag must match package.json version')"
-      - name: Select release target
-        id: target
-        run: node -e "const target=require('./package.json').lifeReleaseTarget||'desktop'; if(!['web','desktop','all'].includes(target)) throw new Error('Unknown release target'); require('fs').appendFileSync(process.env.GITHUB_OUTPUT,'value='+target+'\n')"
+      - name: Record release source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-        if: steps.target.outputs.value != 'web'
-      - run: npm run build:web
-        if: steps.target.outputs.value != 'desktop'
-      - run: npm run pack:web
-        if: steps.target.outputs.value != 'desktop'
       - run: npx playwright install chromium --with-deps
-      - run: npm run test:web-release
-        if: steps.target.outputs.value != 'desktop'
-      - uses: actions/upload-artifact@v4
-        if: steps.target.outputs.value != 'desktop'
-        with:
-          name: life-web-release
-          path: release/web/*
-          if-no-files-found: error
       - run: npm run test:recovery
-        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-queue-smoke.cjs
-        if: steps.target.outputs.value != 'web'
       - run: node tests/thread-presentation-smoke.cjs
-        if: steps.target.outputs.value != 'web'
       - run: node tests/studio-lifecycle-smoke.cjs
-        if: steps.target.outputs.value != 'web'
       - run: node tests/app-live-controls-smoke.cjs
-        if: steps.target.outputs.value != 'web'
-      - run: node tests/app-live-controls-smoke.cjs --preview
-        if: steps.target.outputs.value != 'web'
+      - run: node tests/app-live-controls-smoke.cjs --presentation
       - run: node tests/run-selectors-smoke.cjs
-        if: steps.target.outputs.value != 'web'
       - run: node tests/research-method-ui-smoke.cjs
-        if: steps.target.outputs.value != 'web'
       - run: xvfb-run -a npm run test:desktop
-        if: steps.target.outputs.value != 'web'
 
   build:
     needs: verify
-    if: needs.verify.outputs.target != 'web'
     strategy:
       fail-fast: false
       matrix:
@@ -97,7 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.LIFE_RELEASE_REF }}
+          ref: ${{ needs.verify.outputs.source_sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -148,14 +129,14 @@ jobs:
             release/latest*.yml
 
   publish:
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.LIFE_RELEASE_TAG }}
+          ref: ${{ needs.verify.outputs.source_sha }}
           path: checkout
       - uses: actions/download-artifact@v4
         with:
@@ -166,6 +147,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ env.LIFE_RELEASE_TAG }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -173,37 +155,10 @@ jobs:
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           notes="../checkout/docs/release-notes-${RELEASE_TAG}.md"
           cp "$notes" release-notes.md
+          printf '\nBuild source: [%s](https://github.com/%s/commit/%s).\n' "$SOURCE_COMMIT" "$GH_REPO" "$SOURCE_COMMIT" >> release-notes.md
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG" --notes-file release-notes.md
           fi
           assets=(Life-* latest*.yml SHA256SUMS.txt)
-          if [ -f SHA256SUMS-web.txt ]; then assets+=(SHA256SUMS-web.txt); fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest
-
-  publish-web:
-    needs: verify
-    if: needs.verify.outputs.target == 'web'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.LIFE_RELEASE_REF }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: life-web-release
-          path: release/web
-      - name: Publish web application bundles
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ env.LIFE_RELEASE_TAG }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG — Web application" --notes-file "docs/release-notes-${RELEASE_TAG}.md"
-          fi
-          gh release upload "$RELEASE_TAG" release/web/Life-*-web.tar.gz release/web/Life-*-web.zip release/web/SHA256SUMS-web.txt --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          gh release edit "$RELEASE_TAG" --draft=false --latest --title "Life $RELEASE_TAG" --notes-file release-notes.md

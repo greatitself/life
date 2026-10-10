@@ -89,7 +89,6 @@ async function run() {
       format: 'esm',
       outfile: join(directory, 'bootstrap.js'),
       // Match the desktop loader instead of bundling the browser-only preview and its fonts.
-      define: { 'import.meta.env.VITE_LIFE_WEB_PREVIEW': '"false"' },
       logLevel: 'silent',
       plugins: [
         {

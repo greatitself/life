@@ -37,10 +37,7 @@ export function ExtensionHost({
   const [error, setError] = useState('')
   const source = JSON.stringify(extension)
   const token = useMemo(() => crypto.randomUUID(), [source])
-  const url =
-    import.meta.env?.VITE_LIFE_WEB_APP === 'true'
-      ? `${import.meta.env.BASE_URL}api/extension/${encodeURIComponent(extension.id)}?theme=${theme}&token=${token}`
-      : `life-extension://runtime/view/${encodeURIComponent(extension.id)}?theme=${theme}&token=${token}`
+  const url = `life-extension://runtime/view/${encodeURIComponent(extension.id)}?theme=${theme}&token=${token}`
   // Theme changes update the running frame instead of throwing away its UI state.
   const stableURL = useMemo(() => url, [token])
 

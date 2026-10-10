@@ -1,8 +1,4 @@
-.life-browser-preview .native-window-controls {
-  display: none;
-}
-
-:root.life-browser-preview .breadcrumbs > .research-header-goal {
+:root .breadcrumbs > .research-header-goal {
   display: inline-flex;
   align-items: center;
   min-width: 0;
@@ -14,30 +10,24 @@
   -webkit-app-region: no-drag;
 }
 
-:root.life-browser-preview .research-header-goal > span {
+:root .research-header-goal > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-:root.life-browser-preview .research-header-goal > svg {
+:root .research-header-goal > svg {
   flex-shrink: 0;
 }
 
-:root.life-browser-preview
-  .app-shell[data-view='investigation']
-  .research-agent-sidebar
-  .composer-container {
+:root .app-shell[data-view='investigation'] .research-agent-sidebar .composer-container {
   padding: 0 !important;
   margin: 0 !important;
 }
 
-:root.life-browser-preview .app-shell[data-view='investigation'] .research-agent-sidebar .composer,
-:root.life-browser-preview
-  .app-shell[data-view='investigation']
-  .research-agent-sidebar
-  .composer:focus-within {
+:root .app-shell[data-view='investigation'] .research-agent-sidebar .composer,
+:root .app-shell[data-view='investigation'] .research-agent-sidebar .composer:focus-within {
   margin: 0 !important;
   border: 0 !important;
   border-top: 1px solid var(--border) !important;
@@ -45,7 +35,7 @@
   box-shadow: none !important;
 }
 
-:root.life-browser-preview
+:root
   .app-shell[data-view='investigation']
   .research-agent-sidebar
   .life-reference-composer
@@ -53,7 +43,7 @@
   flex-wrap: nowrap !important;
 }
 
-:root.life-browser-preview
+:root
   .app-shell[data-view='investigation']
   .research-agent-sidebar
   .life-reference-composer
@@ -63,7 +53,7 @@
   flex-wrap: nowrap;
 }
 
-:root.life-browser-preview
+:root
   .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
   .main-workspace
   .life-reference-composer
@@ -74,7 +64,7 @@
   color: #f4c44e;
 }
 
-:root.life-browser-preview
+:root
   .app-shell.life-polished-layout.life-unified-layout.life-refined-layout
   .main-workspace
   .life-reference-composer

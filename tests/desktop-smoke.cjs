@@ -346,7 +346,16 @@ export function activityLabel(activity: ThreadActivity): string {
       .click()
   }
   const selectPermission = async (value) => {
-    const labels = { review: 'Supervised', edit: 'Auto-accept edits', plan: 'Plan only' }
+    const labels = {
+      review: 'Manual',
+      edit: 'Accept edits',
+      'ask-for-approval': 'Ask for approval',
+      'read-only': 'Read-only',
+      'auto-review': 'Approve for me',
+      'full-access': 'Full access',
+      auto: 'Auto',
+      dontAsk: "Don't ask",
+    }
     await page.getByRole('combobox', { name: /^Agent permission mode:/ }).click()
     await page
       .locator('.reference-permission-menu')

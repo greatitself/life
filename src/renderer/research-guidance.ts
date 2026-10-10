@@ -1,5 +1,4 @@
-import { researchOperationCatalog, type ResearchOperation } from '../shared/research-method'
-import { promptResearchMethodGuide, researchMethodGuide } from '../shared/research-method-protocol'
+import { promptResearchMethodGuide } from '../shared/research-method-protocol'
 import {
   legacyResearchConversationInstructions,
   legacyResearchInstructions,
@@ -9,21 +8,21 @@ import {
   researchInstructions,
 } from './research-storage'
 
-export function researchWorkspaceGuidance(web: boolean) {
+export function researchWorkspaceGuidance() {
   return {
-    instructions: web ? promptResearchInstructions : researchInstructions,
+    instructions: promptResearchInstructions,
     previousInstructions: [
       legacyResearchInstructions,
       researchInstructions,
       promptResearchInstructions,
     ],
-    methodGuide: web ? promptResearchMethodGuide : researchMethodGuide,
+    methodGuide: promptResearchMethodGuide,
   }
 }
 
-export function researchInvocationGuidance(web: boolean, operation?: ResearchOperation) {
+export function researchInvocationGuidance() {
   return {
-    instructions: web ? promptResearchConversationInstructions : researchConversationInstructions,
+    instructions: promptResearchConversationInstructions,
     previousInstructions: [
       legacyResearchConversationInstructions,
       legacyResearchInstructions,
@@ -32,12 +31,5 @@ export function researchInvocationGuidance(web: boolean, operation?: ResearchOpe
       promptResearchInstructions,
       promptResearchConversationInstructions,
     ],
-    ...(!web
-      ? {
-          operation:
-            researchOperationCatalog.find((row) => row.id === operation) ||
-            researchOperationCatalog[0],
-        }
-      : {}),
   }
 }

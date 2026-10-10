@@ -163,7 +163,7 @@ function readContext(directory: string) {
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
 
 describe('file-backed research method instructions on a real filesystem', () => {
-  it('removes legacy approach guidance from web conversations and keeps the user prompt unchanged', () => {
+  it('removes legacy approach guidance from Research conversations and keeps the user prompt unchanged', () => {
     const { root, directory, value, original } = setup()
     const researchRoot = join(root, '.life/research')
     const legacyInvocation = randomUUID()
@@ -175,7 +175,7 @@ describe('file-backed research method instructions on a real filesystem', () => 
       'utf8',
     )
 
-    const workspace = researchWorkspaceGuidance(true)
+    const workspace = researchWorkspaceGuidance()
     expect(call(root, { ...initialization(), ...workspace }).error).toBeUndefined()
     expect(workspace.methodGuide).toContain("The user's message determines the research approach.")
     expect(workspace.methodGuide).not.toContain(
@@ -189,8 +189,8 @@ describe('file-backed research method instructions on a real filesystem', () => 
     const literal = '  Challenge the premise, then follow the evidence.\n  '
     for (const problemId of [undefined, value.problems[0].id]) {
       const invocationId = randomUUID()
-      // A restored selection or queue item must not add guidance to a web request.
-      const guidance = researchInvocationGuidance(true, 'verify')
+      // A restored selection or queue item must not add guidance to a Research request.
+      const guidance = researchInvocationGuidance()
       expect(guidance).not.toHaveProperty('operation')
       const result = call(root, {
         op: 'context',
@@ -228,7 +228,7 @@ describe('file-backed research method instructions on a real filesystem', () => 
     ).toBe(legacySnapshot)
   })
 
-  it('preserves custom instruction files when upgrading web research guidance', () => {
+  it('preserves custom instruction files when upgrading Research guidance', () => {
     const { root, directory, value } = setup()
     const researchRoot = join(root, '.life/research')
     const custom = '# My research instructions\nUse the procedure I describe in my message.\n'
@@ -237,13 +237,13 @@ describe('file-backed research method instructions on a real filesystem', () => 
       writeFileSync(join(directory, name), custom)
     }
     expect(
-      call(root, { ...initialization(), ...researchWorkspaceGuidance(true) }).error,
+      call(root, { ...initialization(), ...researchWorkspaceGuidance() }).error,
     ).toBeUndefined()
     expect(
       call(root, {
         op: 'context',
         directory: value.directory,
-        ...researchInvocationGuidance(true),
+        ...researchInvocationGuidance(),
         invocationId: randomUUID(),
       }).error,
     ).toBeUndefined()

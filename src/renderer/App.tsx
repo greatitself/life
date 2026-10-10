@@ -48,8 +48,7 @@ import type {
   StartInput,
 } from '../shared/types'
 import { api, desktop, errorText, streamlinedWorkspace } from './api'
-import { webInterface } from './web-interface'
-import { webPermissionMode } from '../shared/permissions'
+import { providerPermissionMode } from '../shared/permissions'
 import './workspace-presentation.css'
 import {
   applyEvent,
@@ -140,13 +139,13 @@ import {
   ResearchSidebar,
   ResearchGoalMenu,
   ResearchProblemContext,
-  ResearchProblemStart,
   ResearchDialogs,
 } from './components/ResearchWorkbench'
 import './components/life-workbench.css'
 import { ResearchLayout } from './components/ResearchLayout'
 import { useConversationDrafts } from './conversation-drafts'
 import './components/research-machine.css'
+import './components/research-interface.css'
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
 const shortcutModifier = /Mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
@@ -440,16 +439,13 @@ export function App() {
     settingsRequest.current += 1
     cancelThreadContext()
     setThreadMenu(false)
-    setSettingsNote('')
     setStickToBottom(true)
   }, [view, activeId, workbench.scopeKey])
   const currentProvider = active?.provider || provider
   const currentModel = active?.model ?? model
   const currentReasoningEffort = active ? (active.reasoningEffort ?? '') : reasoningEffort
   const currentServiceTier = active ? (active.serviceTier ?? '') : serviceTier
-  const currentMode = webInterface
-    ? webPermissionMode(currentProvider, active?.mode || mode)
-    : active?.mode || mode
+  const currentMode = providerPermissionMode(currentProvider, active?.mode || mode)
   const connected = connection.status === 'connected'
   const projectReady = connected && Boolean(connection.workspace)
   const draftUploads = useDraftUploads(
@@ -463,7 +459,6 @@ export function App() {
       : undefined,
   )
   const busy = active?.busy || false
-  const [settingsNote, setSettingsNote] = useState('')
   const settingsRequest = useRef(0)
   const queue = useThreadQueue({
     threads,
@@ -992,14 +987,7 @@ export function App() {
         await steerDraft()
         return
       }
-      const queuedId = await queue.enqueue(
-        active,
-        prompt,
-        selectedAttachments,
-        !webInterface && researchTarget
-          ? researchTarget.goal.method?.activeOperation || 'explore'
-          : undefined,
-      )
+      const queuedId = await queue.enqueue(active, prompt, selectedAttachments)
       if (queuedId) {
         setDraft((current) => (current === draft ? '' : current))
         const savedIds = new Set(selectedAttachments.map((item) => item.id))
@@ -1098,7 +1086,7 @@ export function App() {
     const turn = thread.turn + 1
     const next: Thread = {
       ...thread,
-      mode: webInterface ? webPermissionMode(thread.provider, thread.mode) : thread.mode,
+      mode: providerPermissionMode(thread.provider, thread.mode),
       profileId: connection.profile!.id,
       workspace:
         researchTarget && researchScope
@@ -1152,14 +1140,7 @@ export function App() {
         )
       if (researchTarget) {
         await workbench.flushForThread(id)
-        const preparedWorkspace = await workbench.prepareForThread(
-          id,
-          webInterface
-            ? undefined
-            : queuedMessage?.researchOperation ||
-                researchTarget.goal.method?.activeOperation ||
-                'explore',
-        )
+        const preparedWorkspace = await workbench.prepareForThread(id)
         if (preparedWorkspace !== next.workspace)
           throw new Error(
             'This Research conversation changed before its context could be prepared. Your message is kept.',
@@ -1447,24 +1428,11 @@ export function App() {
         previous.map((thread) => (thread.id === active.id ? { ...thread, ...next } : thread)),
       )
       if (api) {
-        if (!webInterface) setSettingsNote('Applying settings…')
-        void api.agent
-          .configure({ sessionId: active.id, ...next })
-          .then((result) => {
-            if (!isCurrent() || webInterface) return
-            setSettingsNote(
-              result.note ||
-                (result.applied === 'live'
-                  ? 'Settings apply to the next model step in this turn.'
-                  : 'Settings saved for the next request.'),
-            )
-          })
-          .catch((error) => {
-            if (!isCurrent()) return
-            if (webInterface) setToast(errorText(error))
-            else setSettingsNote(errorText(error))
-          })
-      } else if (!webInterface) setSettingsNote('Settings saved for the next request.')
+        void api.agent.configure({ sessionId: active.id, ...next }).catch((error) => {
+          if (!isCurrent()) return
+          setToast(errorText(error))
+        })
+      }
     } else {
       if (next.model !== undefined) setModel(next.model)
       if (next.mode) setMode(next.mode)
@@ -2123,7 +2091,7 @@ export function App() {
                       ) : (
                         <Folder size={15} />
                       )}
-                      {webInterface && view === 'investigation' && workbench.goals.length ? (
+                      {view === 'investigation' && workbench.goals.length ? (
                         <ResearchGoalMenu
                           workbench={workbench}
                           trigger={
@@ -2315,9 +2283,7 @@ export function App() {
                     <ResearchProblemContext workbench={workbench} />
                   ) : null}
                   <div className="chat-area">
-                    {active &&
-                    builtin.enabled('message-navigation') &&
-                    !(webInterface && view === 'investigation') ? (
+                    {active && builtin.enabled('message-navigation') && view !== 'investigation' ? (
                       <ThreadMessageNavigator
                         key={active.id}
                         messages={navigableMessages}
@@ -2333,22 +2299,7 @@ export function App() {
                         setStickToBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100)
                       }}
                     >
-                      {!active && view === 'investigation' ? (
-                        !webInterface ? (
-                          <ResearchProblemStart
-                            problem={workbench.problem}
-                            goal={workbench.goal}
-                            onNewGoal={workbench.newGoal}
-                            provider={provider}
-                            onProvider={(next) => {
-                              setProvider(next)
-                              setModel('')
-                              setReasoningEffort('')
-                              setServiceTier('')
-                            }}
-                          />
-                        ) : null
-                      ) : !active ? (
+                      {!active && view === 'investigation' ? null : !active ? (
                         <ActiveProject
                           connection={connection}
                           savedProfile={titleProfile}
@@ -2482,11 +2433,7 @@ export function App() {
                           ))}
                         </div>
                       ) : null}
-                      {!webInterface && settingsNote ? (
-                        <div className="run-settings-note" role="status">
-                          {settingsNote}
-                        </div>
-                      ) : null}
+
                       <div
                         className={`composer ${busy ? 'busy' : ''}`}
                         onDragOver={(event) => {
@@ -2611,11 +2558,7 @@ export function App() {
                                 type="button"
                                 className="composer-steer"
                                 aria-label="Steer current response"
-                                title={
-                                  !webInterface && active?.purpose === 'research'
-                                    ? 'Steer the current Research operation. The toolbar approach applies to a new turn.'
-                                    : 'Send your message to the current turn without interrupting it'
-                                }
+                                title="Send your message to the current turn without interrupting it"
                                 disabled={
                                   !queueControlsReady || (!draft.trim() && !attachments.length)
                                 }
@@ -2625,7 +2568,7 @@ export function App() {
                               </button>
                             ) : null}
 
-                            {!(webInterface && view === 'investigation') ? (
+                            {view !== 'investigation' ? (
                               <AttachmentPicker
                                 disabled={queue.preparing || Boolean(attachmentProgress)}
                                 onFiles={attachFiles}
@@ -2697,21 +2640,11 @@ export function App() {
                           </div>
                         </div>
                       </div>
-                      {!(webInterface && view === 'investigation') ? (
+                      {view !== 'investigation' ? (
                         <div className="composer-caption composer-worktree-strip">
                           <span>
                             <span className={`status-dot ${connected ? 'online' : ''}`} />
-                            {view === 'investigation' ? (
-                              <button
-                                className="composer-project-control"
-                                aria-label="Edit research goal"
-                                title={workbench.goal?.goal || 'New research goal'}
-                                onClick={workbench.goal ? workbench.editGoal : workbench.newGoal}
-                              >
-                                <Target size={13} />
-                                <span>{workbench.goal?.title || 'New goal'}</span>
-                              </button>
-                            ) : (
+                            {
                               <button
                                 className="composer-project-control"
                                 aria-label="Choose workspace project"
@@ -2737,7 +2670,7 @@ export function App() {
                                 </span>
                                 <ChevronDown size={11} />
                               </button>
-                            )}
+                            }
                           </span>
                           <span
                             className="composer-machine-status"

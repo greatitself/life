@@ -13,7 +13,7 @@ export const permissionModes = [
   'dontAsk',
 ] as const
 
-export function webPermissionMode(provider: Provider, mode: PermissionMode): PermissionMode {
+export function providerPermissionMode(provider: Provider, mode: PermissionMode): PermissionMode {
   if (provider === 'codex') {
     if (mode === 'plan') return 'read-only'
     return ['ask-for-approval', 'read-only', 'full-access', 'auto-review'].includes(mode)

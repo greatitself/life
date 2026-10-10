@@ -54,7 +54,7 @@ Useful explicit operations are:
 | Constructive interference | Examine constructive, compatible, conflicting, redundant, and unknown interactions, and propose a combination |
 | Verification              | Record procedures, expected and observed outcomes, and evidence tied to requirements and candidates           |
 
-In the web app, describe the desired approach in the prompt. There is no next-message operation selector, and stored selections do not guide new or queued requests. Life sends the researcher's text unchanged to the provider; it does not append a research preamble or an invented continuation. Stable goal/problem IDs and file paths are available through native `AGENTS.md`/`CLAUDE.md` instructions and context files. The legacy desktop operation selector still records its selection as context metadata.
+In Life, describe the desired approach in the prompt. There is no next-message operation selector, and stored selections do not guide new or queued requests. Life sends the researcher's text unchanged to the provider; it does not append a research preamble or an invented continuation. Stable goal/problem IDs and file paths are available through native `AGENTS.md`/`CLAUDE.md` instructions and context files.
 
 Each request uses the goal/problem context selected when it was submitted. Later navigation must not redirect running or queued research. Selected record IDs belong to that invocation rather than a mutable global instruction file shared by concurrent investigations.
 
@@ -81,7 +81,7 @@ Research remains independent of Agents projects. Its machine-backed root is `<ma
 
 Overview and problem conversations use isolated native context files. A problem conversation works in its own stable directory while its instructions identify the shared goal file and the exact selected problem. Concurrent problems must not overwrite a shared selected-problem instruction file.
 
-The Research root's `.life-method.md` guide and `.life-method-schema.json` describe the native file protocol. Each conversation's `.life-context.json` points to those files and the exact goal/problem metadata. A submitted operation also receives an immutable `.life-invocations/<invocation-id>.json` snapshot in that conversation directory. Its operator and execution identity stay associated with that request when the next selected operation changes. Native `AGENTS.md` and `CLAUDE.md` load this context; the user's message is sent unchanged.
+The Research root's `.life-method.md` guide and `.life-method-schema.json` describe the native file protocol. Each conversation's `.life-context.json` points to those files and the exact goal/problem metadata. A submitted request also receives an immutable `.life-invocations/<invocation-id>.json` snapshot in that conversation directory. Its goal/problem context and execution identity stay associated with that request. The user's prompt determines the approach; historical operation selections do not override it. Native `AGENTS.md` and `CLAUDE.md` load this context; the user's message is sent unchanged.
 
 Changes use existing atomic writes and conflict detection. An offline edit remains cached and pending; reconnecting does not overwrite a competing machine edit silently. User-authored maps, instructions, artifacts, provider history, and unknown metadata remain preserved. Exporting the saved research should preserve records and links, not only the rendered graph.
 

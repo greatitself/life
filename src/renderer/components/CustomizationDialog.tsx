@@ -102,7 +102,7 @@ export function CustomizationDialog({
       ) : null}
       <div className="customization-file">
         <span>Live configuration</span>
-        <code>{state.path || 'Browser preview storage'}</code>
+        <code>{state.path || 'Life data directory'}</code>
       </div>
       {feedback ? (
         <div className={failed ? 'form-error' : 'form-success'} role={failed ? 'alert' : 'status'}>

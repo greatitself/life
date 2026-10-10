@@ -3,7 +3,6 @@ import type { ConnectionState } from '../shared/types'
 import { researchOperations, type ResearchOperation } from '../shared/research-method'
 import type { Thread } from './state'
 import { errorText } from './api'
-import { webInterface } from './web-interface'
 import {
   attachmentMetadata,
   deleteAttachmentFiles,
@@ -21,7 +20,7 @@ export interface QueuedMessage {
   attachments: ThreadAttachment[]
   paused?: boolean
   error?: string
-  /** Legacy desktop selection; web messages use only the user's prompt. */
+  /** Preserved legacy selection; new Research requests use the user's prompt. */
   researchOperation?: ResearchOperation
 }
 export interface QueuedSubmission {
@@ -50,8 +49,7 @@ export function normalizeQueuedMessages(value: unknown): QueuedMessage[] {
       attachments,
       // Restoring history must not replay pending work against a new connection.
       paused: true,
-      ...(!webInterface &&
-      typeof item.researchOperation === 'string' &&
+      ...(typeof item.researchOperation === 'string' &&
       researchOperations.includes(item.researchOperation)
         ? { researchOperation: item.researchOperation }
         : {}),
@@ -221,11 +219,7 @@ export function useThreadQueue(options: QueueOptions) {
       if (saving.current) return undefined
       const current = context.current.threads.find((item) => item.id === thread.id)
       if (!current) return undefined
-      if (
-        !webInterface &&
-        researchOperation !== undefined &&
-        !researchOperations.includes(researchOperation)
-      ) {
+      if (researchOperation !== undefined && !researchOperations.includes(researchOperation)) {
         context.current.onError(
           'Choose a supported research operation before queueing this message.',
         )
@@ -254,7 +248,7 @@ export function useThreadQueue(options: QueueOptions) {
           createdAt: Date.now(),
           attachments: files.map(attachmentMetadata),
           paused: !queueConnectionMatches(current, context.current.connection),
-          ...(!webInterface && researchOperation ? { researchOperation } : {}),
+          ...(researchOperation ? { researchOperation } : {}),
         }
         context.current.onThreads((previous) =>
           previous.map((item) =>

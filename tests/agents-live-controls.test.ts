@@ -193,7 +193,7 @@ function codexComplete(channel: Channel, turnId = 'turn-1') {
   })
 }
 
-describe('native web access controls', () => {
+describe('native provider access controls', () => {
   it.each([
     {
       mode: 'ask-for-approval',

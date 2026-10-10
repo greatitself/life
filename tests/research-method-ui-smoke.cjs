@@ -121,7 +121,6 @@ async function main() {
       loader: { '.woff2': 'dataurl', '.woff': 'dataurl' },
       define: {
         'process.env.NODE_ENV': '"development"',
-        'import.meta.env': '{"VITE_LIFE_WEB_PREVIEW":"false"}',
       },
       logLevel: 'silent',
     })
@@ -264,34 +263,11 @@ async function main() {
       assert(dimensions.body <= dimensions.client + 1, JSON.stringify(dimensions))
     }
 
-    assert.equal(
-      await page
-        .getByRole('heading', { name: 'A quieter research workspace', exact: true })
-        .isVisible(),
-      true,
-    )
-    assert.equal(
-      await page.getByLabel('Research operation', { exact: true }).inputValue(),
-      'explore',
-    )
+    assert.equal(await page.locator('.research-method-goal').count(), 0)
+    assert.equal(await page.getByLabel('Research operation', { exact: true }).count(), 0)
+    assert.equal((await savedGoal()).goal, longGoalBrief)
     checks.push(
-      'The actual file-backed goal opens in the method workbench without creating an Agents project',
-    )
-    const goalBrief = page.locator('.research-method-goal p')
-    assert.equal(await goalBrief.textContent(), longGoalBrief)
-    const briefDimensions = await goalBrief.evaluate((element) => ({
-      height: element.getBoundingClientRect().height,
-      client: element.clientHeight,
-      scroll: element.scrollHeight,
-      tabIndex: element.tabIndex,
-    }))
-    assert(briefDimensions.height <= 90, JSON.stringify(briefDimensions))
-    assert(briefDimensions.scroll > briefDimensions.client)
-    assert.equal(briefDimensions.tabIndex, 0)
-    await goalBrief.focus()
-    assert.equal(await goalBrief.evaluate((element) => document.activeElement === element), true)
-    checks.push(
-      'A sixty-line goal remains fully available in a keyboard-accessible brief without pushing the research tools out of reach',
+      'The file-backed goal keeps its complete brief without duplicate banners or an approach selector',
     )
 
     const parentStatement = 'Reduce interrupted research experiments'
@@ -708,15 +684,11 @@ async function main() {
       'causal-intervention',
       'verify',
     ]
-    assert.deepEqual(
-      await page
-        .getByLabel('Research operation', { exact: true })
-        .locator('option')
-        .evaluateAll((nodes) => nodes.map((node) => node.value)),
-      expectedOperations,
-    )
     for (const operation of ['anti-abstraction', 'abstraction', 'counterfactual']) {
-      await page.getByLabel('Research operation', { exact: true }).selectOption(operation)
+      await page.evaluate(
+        (operation) => window.methodWorkbench.methodAction({ type: 'operation', operation }),
+        operation,
+      )
       persisted = await savedGoal()
       assert.equal(persisted.method.activeOperation, operation)
     }
@@ -729,7 +701,7 @@ async function main() {
     )
     assert.equal(context.goalId, 'method-goal')
     assert.equal(context.problemId, 'problem-one')
-    assert.equal(context.operation.id, 'counterfactual')
+    assert.equal(context.operation, undefined)
     assert.equal(typeof context.methodGuideFile, 'string')
     assert.equal(typeof context.methodSchemaFile, 'string')
     const guide = await readFile(resolve(conversationDirectory, context.methodGuideFile), 'utf8')
@@ -738,11 +710,15 @@ async function main() {
     )
     assert.match(guide, /anti-abstraction/i)
     assert.match(guide, /abstraction/i)
-    assert.equal(typeof schema, 'object')
+    assert.deepEqual(schema.properties.activeOperation.enum, expectedOperations)
+    assert.match(guide, /The user's message determines the research approach/)
     assert.equal(context.executionId, context.invocationId)
     const immutableFile = resolve(conversationDirectory, context.invocationFile)
     const immutableBefore = await readFile(immutableFile, 'utf8')
-    await page.getByLabel('Research operation', { exact: true }).selectOption('abstraction')
+    await page.evaluate(
+      (operation) => window.methodWorkbench.methodAction({ type: 'operation', operation }),
+      'abstraction',
+    )
     await savedGoal()
     assert.equal(await readFile(immutableFile, 'utf8'), immutableBefore)
     assert.equal(
@@ -756,13 +732,16 @@ async function main() {
     const nextContext = JSON.parse(
       await readFile(join(conversationDirectory, '.life-context.json'), 'utf8'),
     )
-    assert.equal(nextContext.operation.id, 'abstraction')
+    assert.equal(nextContext.operation, undefined)
     assert.notEqual(nextContext.invocationId, context.invocationId)
     assert.equal(await readFile(immutableFile, 'utf8'), immutableBefore)
-    await page.getByLabel('Research operation', { exact: true }).selectOption('counterfactual')
+    await page.evaluate(
+      (operation) => window.methodWorkbench.methodAction({ type: 'operation', operation }),
+      'counterfactual',
+    )
     persisted = await savedGoal()
     checks.push(
-      'Operator changes preserve the earlier immutable invocation snapshot and create a distinct context only for the next explicit invocation',
+      'Historical operation changes preserve immutable context and do not select an approach for new messages',
     )
     const exactRequest =
       '  Inspect the same experiment.\n\n/life is literal text in this research message.\n  '
@@ -772,7 +751,7 @@ async function main() {
     )
     assert.deepEqual(await page.evaluate(() => window.methodAgentStarts), [])
     checks.push(
-      'Selecting an operator saves invocation context and method guidance in native files, sends no agent message, and preserves user text byte for byte',
+      'Prompt-driven method guidance stays in native files and preserves user text byte for byte',
     )
 
     const beforeReload = structuredClone(persisted.method)

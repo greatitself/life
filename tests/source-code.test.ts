@@ -17,10 +17,7 @@ import { greeting } from '../shared/greeting'
 ;(globalThis as any).__life_source_test_control = React.createElement('button', { id: 'base-control' }, greeting)
 `
 
-async function createStore(
-  extraFiles: Record<string, string> = {},
-  rendererDefines?: Record<string, string>,
-) {
+async function createStore(extraFiles: Record<string, string> = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'life-source-test-'))
   directories.push(directory)
   const sourceDir = join(directory, 'app-source')
@@ -57,7 +54,6 @@ async function createStore(
     onUpdate,
     compilerTimeoutMs: 10_000,
     installTimeoutMs: 20_000,
-    rendererDefines,
   }
   const store = new SourceCodeStore(options)
   stores.push(store)
@@ -129,31 +125,6 @@ afterEach(async () => {
 })
 
 describe('installed Life source customization', () => {
-  it('preserves the web host environment in compiled source customizations', async () => {
-    const { store } = await createStore(
-      {},
-      {
-        'import.meta.env.VITE_LIFE_WEB_APP': JSON.stringify('true'),
-        'import.meta.env.BASE_URL': JSON.stringify('/life/'),
-      },
-    )
-    const context = await store.getContext({ paths: ['src/renderer/main.tsx'] })
-    await store.apply({
-      summary: 'Compile a control that uses the web host routes',
-      baseRevision: context.revision,
-      files: [
-        {
-          path: 'src/renderer/main.tsx',
-          content: `import React from 'react'\n;(globalThis as any).__life_source_test_control = React.createElement('a', { id: 'web-control' }, import.meta.env.VITE_LIFE_WEB_APP === 'true' ? import.meta.env.BASE_URL + 'api/extension/example' : 'life-extension://example')\n`,
-        },
-      ],
-    })
-    expect(await executeControl(store)).toMatchObject({
-      type: 'a',
-      props: { children: '/life/api/extension/example' },
-    })
-  })
-
   it('provides the actual editable renderer and shared source with a revision for edits', async () => {
     const { store } = await createStore()
     const context = await store.getContext({

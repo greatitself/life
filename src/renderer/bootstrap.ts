@@ -1,16 +1,5 @@
 /** This loader stays bundled so editable React code cannot remove Life's recovery route. */
 async function boot() {
-  if (import.meta.env?.VITE_LIFE_WEB_APP === 'true') {
-    const { createWebApplicationAPI } = await import('./web-app-adapter')
-    window.relay = await createWebApplicationAPI()
-    document.documentElement.classList.add('life-browser-preview')
-    await import('./web-preview.css')
-  }
-  if (import.meta.env?.VITE_LIFE_WEB_PREVIEW === 'true') {
-    const { bootWebPreview } = await import('./web-preview')
-    await bootWebPreview()
-    return
-  }
   const { api } = await import('./api')
   const state = await api?.sourceCode?.get()
   if (!state?.enabled || !state.active) {
@@ -94,11 +83,5 @@ async function boot() {
 void boot().catch(async (error) => {
   // A broken state lookup must also leave the built-in workspace available.
   console.error('Life could not load its customized interface:', error)
-  if (import.meta.env?.VITE_LIFE_WEB_APP === 'true' && !window.relay) {
-    const root = document.getElementById('root')!
-    root.textContent =
-      'Life could not connect to its web server. Start npm run dev:web, then refresh this page.'
-    return
-  }
   await import('./main')
 })

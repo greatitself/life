@@ -11,5 +11,3 @@ Life 0.8 brings the streamlined preview interface to the installed desktop app.
 - **Bring to Life:** Host chat history can continue existing Codex and Claude Code sessions with their original provider session IDs and project directories. Research, Studio, and internal metadata sessions keep their separate routes.
 
 Update from Life 0.7.0 through **Updates → Check for updates**, then download and restart. Windows and Linux AppImage support in-app updates. macOS and Debian installations use the latest installer. The release includes installers, updater metadata, blockmaps, and SHA-256 checksums. Saved connections, chats, Research, and customization history remain in Life's existing data directory.
-
-The browser preview shares the updated interface. SSH, provider execution, native updates, and source compilation require the desktop app.

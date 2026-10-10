@@ -108,10 +108,65 @@ async function runResearchChecks(context) {
     .getByRole('button', { name: `Open goal conversation: ${title}`, exact: true })
     .waitFor()
   await page.getByRole('button', { name: `Open goal conversation: ${title}`, exact: true }).click()
-  await page
-    .locator('[aria-label="Research provider"]')
-    .getByRole('button', { name: 'Codex', exact: true })
-    .click()
+  await page.getByRole('button', { name: 'Research goal: ' + title, exact: true }).waitFor()
+  const researchChat = page.getByRole('complementary', { name: 'Research conversation' })
+  for (const selector of [
+    '.research-sidebar .research-goals-heading',
+    '.research-sidebar .research-goal-picker',
+    '.research-sidebar .research-overview-button',
+    '.research-method-goal',
+    '.research-method-operation',
+    '.research-problem-start',
+    '.composer-caption',
+    '.thread-message-navigator',
+  ]) {
+    assert.equal(
+      await page.locator(selector).count(),
+      0,
+      selector + ' is absent from the updated Research panel',
+    )
+  }
+  assert.equal(
+    await researchChat.getByRole('button', { name: 'Attach images or files', exact: true }).count(),
+    0,
+  )
+  for (const width of [1440, 1100]) {
+    await page.setViewportSize({ width, height: 1000 })
+    const layout = await researchChat.locator('.composer').evaluate((element) => {
+      const style = getComputedStyle(element)
+      const box = element.getBoundingClientRect()
+      const sidebar = element.closest('.research-agent-sidebar').getBoundingClientRect()
+      const actions = element.querySelector('.composer-send-actions').getBoundingClientRect()
+      const controls = element.querySelector('.reference-run-controls').getBoundingClientRect()
+      return {
+        radius: style.borderRadius,
+        borders: [style.borderLeftWidth, style.borderRightWidth, style.borderBottomWidth],
+        gaps: [box.left - sidebar.left, sidebar.right - box.right, sidebar.bottom - box.bottom],
+        actionsCenter: (actions.top + actions.bottom) / 2,
+        controlsCenter: (controls.top + controls.bottom) / 2,
+      }
+    })
+    assert.equal(layout.radius, '0px')
+    assert.deepEqual(layout.borders, ['0px', '0px', '0px'])
+    assert.ok(
+      layout.gaps.every((gap) => Math.abs(gap) <= 1),
+      JSON.stringify(layout),
+    )
+    assert.ok(Math.abs(layout.actionsCenter - layout.controlsCenter) <= 2, JSON.stringify(layout))
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await context.selectModel('codex', '')
+  await researchChat.getByRole('combobox', { name: /^Agent permission mode:/ }).click()
+  assert.deepEqual(await page.locator('.reference-permission-title').allTextContents(), [
+    'Ask for approval',
+    'Read-only',
+    'Approve for me',
+    'Full access',
+  ])
+  await page.getByRole('option', { name: 'Ask for approval', exact: true }).click()
+  context.checks.push(
+    'Desktop Research includes the latest shared layout, one goal menu, a border-aligned composer, and native provider permissions',
+  )
   const codexRequest = '  Compare these exact research hypotheses.\nKeep my whitespace and words.  '
   const codex = await sendAndSettle(context, codexRequest, 'codex')
   const goalThread = (await savedThreads(page)).find(
@@ -161,10 +216,7 @@ async function runResearchChecks(context) {
   await editor.getByLabel('Problem', { exact: true }).fill(problemBrief)
   await editor.getByRole('button', { name: 'Add problem', exact: true }).click()
   await editor.waitFor({ state: 'hidden' })
-  await page
-    .locator('[aria-label="Research provider"]')
-    .getByRole('button', { name: 'Claude Code', exact: true })
-    .click()
+  await context.selectModel('claude', '')
   const claudeRequest = '\nCheck the problem against the evidence.\nDo not rewrite this request.  '
   const claude = await sendAndSettle(context, claudeRequest, 'claude')
   const problemThread = (await savedThreads(page)).find(

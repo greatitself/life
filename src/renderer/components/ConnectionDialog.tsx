@@ -181,7 +181,7 @@ export function ConnectionDialog({
       {!desktop ? (
         <div className="preview-notice">
           <Terminal size={16} />
-          <span>Browser preview · SSH connections run in the desktop app.</span>
+          <span>The desktop connection service is unavailable. Restart Life to reconnect.</span>
         </div>
       ) : null}
       {profiles.length ? (

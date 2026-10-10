@@ -282,7 +282,7 @@ function HtmlMap({ source, workbench }: { source: string; workbench: ResearchWor
       ref={frame}
       className="research-html-map"
       title={'Custom Research map: ' + (workbench.goal?.title || 'Research')}
-      sandbox={import.meta.env?.VITE_LIFE_WEB_PREVIEW === 'true' ? undefined : 'allow-scripts'}
+      sandbox="allow-scripts"
       src={documentURL.url}
     />
   )

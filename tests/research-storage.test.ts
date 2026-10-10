@@ -35,11 +35,11 @@ import type { Thread } from '../src/renderer/state'
 
 const roots: string[] = []
 
-describe('web Research uses the connected machine', () => {
+describe('Research scope selection', () => {
   const connection: ConnectionState = {
     status: 'connected',
     profile: {
-      id: 'life-web-local',
+      id: 'research-local',
       name: 'This machine',
       host: 'localhost',
       port: 22,
@@ -51,14 +51,14 @@ describe('web Research uses the connected machine', () => {
     home: '/workspace',
     workspace: '/workspace/project',
   }
-  const preview = makeResearchScope({
+  const previous = makeResearchScope({
     ...connection,
-    home: '/browser',
-    profile: { ...connection.profile!, id: 'life-browser-preview', host: 'browser.local' },
+    home: '/previous-machine',
+    profile: { ...connection.profile!, id: 'previous-machine', host: 'previous.example' },
   })!
 
-  it('replaces a restored browser-preview scope before messages are prepared', () => {
-    expect(shouldUseResearchConnection(preview, connection, true)).toBe(true)
+  it('replaces a previous machine scope before messages are prepared', () => {
+    expect(shouldUseResearchConnection(previous, connection, true)).toBe(true)
   })
 
   it('follows a newly connected SSH machine and a changed machine root', () => {
@@ -93,8 +93,8 @@ describe('web Research uses the connected machine', () => {
   })
 
   it('preserves disconnected work and desktop host selections', () => {
-    expect(shouldUseResearchConnection(preview, { status: 'disconnected' }, true)).toBe(false)
-    expect(shouldUseResearchConnection(preview, connection)).toBe(false)
+    expect(shouldUseResearchConnection(previous, { status: 'disconnected' }, true)).toBe(false)
+    expect(shouldUseResearchConnection(previous, connection)).toBe(false)
     expect(shouldUseResearchConnection(undefined, connection)).toBe(true)
   })
 })

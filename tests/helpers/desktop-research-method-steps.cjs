@@ -276,17 +276,12 @@ async function runResearchMethodChecks(context) {
   let goal = await readGoal()
   const problemId = goal.problems.find((row) => row.title === problemTitle).id
   const conversationDirectory = join(goalDirectory, 'problems', problemId)
-  await page
-    .locator('[aria-label="Research provider"]')
-    .getByRole('button', { name: 'Codex', exact: true })
-    .click()
-  const operation = page.getByRole('combobox', { name: 'Research operation', exact: true })
-  const baseline = (await context.fixture.log()).length
-  await operation.selectOption('anti-abstraction')
-  await waitMethod(
-    (value) => value.activeOperation === 'anti-abstraction',
-    'Anti-abstraction is selected and persisted',
+  await context.selectModel('codex', '')
+  assert.equal(
+    await page.getByRole('combobox', { name: 'Research operation', exact: true }).count(),
+    0,
   )
+  const baseline = (await context.fixture.log()).length
   const firstRequest = 'native-research-operator-delay'
   await context.send(firstRequest)
   await context.waitUntil(
@@ -302,7 +297,7 @@ async function runResearchMethodChecks(context) {
   )
   assert.equal(first.goalId, goal.id)
   assert.equal(first.problemId, problemId)
-  assert.equal(first.operation.id, 'anti-abstraction')
+  assert.equal(first.operation, undefined)
   assert.equal(first.executionId, first.invocationId)
   assert.match(first.executionId, /^[a-f0-9-]{36}$/)
   assert.equal(first.goalFile, '../../goal.json')
@@ -311,7 +306,7 @@ async function runResearchMethodChecks(context) {
   const firstImmutableBytes = await readFile(firstInvocationPath, 'utf8')
   const firstImmutable = JSON.parse(firstImmutableBytes)
   assert.equal(firstImmutable.executionId, first.executionId)
-  assert.equal(firstImmutable.operation.id, 'anti-abstraction')
+  assert.equal(firstImmutable.operation, undefined)
   assert.equal(firstImmutable.goalId, goal.id)
   assert.equal(firstImmutable.problemId, problemId)
   const agentInstructions = await readFile(join(conversationDirectory, 'AGENTS.md'), 'utf8')
@@ -323,19 +318,11 @@ async function runResearchMethodChecks(context) {
     await readFile(resolve(conversationDirectory, first.methodSchemaFile), 'utf8'),
   )
   assert.match(methodGuide, /anti-abstraction breaks a whole into basic constituents/)
-  assert.match(methodGuide, /immutable operator selected for this submitted request/)
+  assert.match(methodGuide, /The user's message determines the research approach/)
   assert.equal(methodSchema.title, 'Life research method')
-  const availableOperations = await operation
-    .locator('option')
-    .evaluateAll((options) => options.map((option) => option.value))
-  assert.deepEqual(
-    availableOperations,
-    methodSchema.properties.activeOperation.enum,
-    'Every visible operation has a matching provider-neutral file schema.',
-  )
+  const availableOperations = methodSchema.properties.activeOperation.enum
   assert.equal(availableOperations.length, 12)
 
-  await operation.selectOption('ground')
   const queuedRequest =
     '  Compare the recorded evidence exactly as stated.\nKeep this request unchanged.  '
   await context.composer().fill(queuedRequest)
@@ -344,24 +331,19 @@ async function runResearchMethodChecks(context) {
     async () =>
       (await threads(page)).some((thread) =>
         thread.queue?.some(
-          (item) => item.text === queuedRequest && item.researchOperation === 'ground',
+          (item) => item.text === queuedRequest && item.researchOperation === undefined,
         ),
       ),
-    'The queued request snapshots the Grounding operator at submission',
-  )
-  await operation.selectOption('abstraction')
-  await waitMethod(
-    (value) => value.activeOperation === 'abstraction',
-    'Later UI operation changes persist independently of queued input',
+    'The queued request keeps its literal prompt without a hidden approach',
   )
   const stillActive = JSON.parse(
     await readFile(join(conversationDirectory, '.life-context.json'), 'utf8'),
   )
   assert.equal(stillActive.executionId, first.executionId)
   assert.equal(
-    stillActive.operation.id,
-    'anti-abstraction',
-    'UI changes never rewrite the running request context.',
+    stillActive.operation,
+    undefined,
+    'Queueing never rewrites the running request context.',
   )
   assert.equal(await readFile(firstInvocationPath, 'utf8'), firstImmutableBytes)
   await context.waitUntil(
@@ -389,15 +371,15 @@ async function runResearchMethodChecks(context) {
   assert.equal(second.goalId, first.goalId)
   assert.equal(second.problemId, first.problemId)
   assert.equal(
-    second.operation.id,
-    'ground',
-    'Queued work uses its captured operation, not the current UI selection.',
+    second.operation,
+    undefined,
+    'Queued work uses the user prompt to determine its approach.',
   )
   assert.notEqual(second.executionId, first.executionId)
   assert.equal(second.executionId, second.invocationId)
   const secondInvocationPath = resolve(conversationDirectory, second.invocationFile)
   const secondImmutable = JSON.parse(await readFile(secondInvocationPath, 'utf8'))
-  assert.equal(secondImmutable.operation.id, 'ground')
+  assert.equal(secondImmutable.operation, undefined)
   assert.equal(
     await readFile(firstInvocationPath, 'utf8'),
     firstImmutableBytes,
@@ -435,7 +417,7 @@ async function runResearchMethodChecks(context) {
   assert.equal(linked.purpose, 'research')
   assert.equal(linked.workspace, conversationDirectory)
   goal = await readGoal()
-  assert.equal(goal.method.activeOperation, 'abstraction')
+  assert.equal(goal.method.activeOperation, 'explore')
   assert.equal(goal.problems.find((row) => row.id === problemId).threadId, linked.id)
   assert.ok(goal.method.requirements.some((row) => row.id === requirementId))
   assert.ok(goal.method.evidence.some((row) => row.id === evidenceId))
@@ -467,7 +449,7 @@ async function runResearchMethodChecks(context) {
           'Provider input byte preservation',
           'Selected goal/problem instruction metadata',
           'Immutable execution identity',
-          'Queue operator snapshots',
+          'Prompt-driven queued Research',
         ],
       },
       null,
@@ -475,7 +457,7 @@ async function runResearchMethodChecks(context) {
     ),
   )
   context.checks.push(
-    'Research method records and immutable operator contexts persist through real SSH; queued work preserves its selected operation and exact input',
+    'Research method records and immutable contexts persist through real SSH; queued work preserves exact input and uses prompt-driven approaches',
   )
   if (context.screenshot) await context.screenshot('life-research.png')
   await context.workspace()

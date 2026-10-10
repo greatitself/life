@@ -34,8 +34,9 @@ function parseDiagnosticMarker(buffer) {
   assert.notEqual(buffer.readUInt16LE(0), 0xfeff, 'Diagnostic marker must not have a BOM')
   const fields = {}
   for (const line of buffer.toString('utf16le').split(/\r?\n/u).filter(Boolean)) {
-    const match = /^([a-z0-9-]+)=(.+)$/u.exec(line)
+    const match = /^([a-z0-9-]+)=(.*)$/u.exec(line)
     assert(match && !Object.hasOwn(fields, match[1]), 'Malformed or duplicate diagnostic field')
+    assert(match[2] || match[1] === 'close-results', 'Empty diagnostic field')
     fields[match[1]] = match[2]
   }
   assert.deepEqual(
@@ -50,13 +51,61 @@ function parseDiagnosticMarker(buffer) {
       'io-information',
       'decoder-exit',
       'result',
+      'accounting-first-active',
+      'accounting-last-active',
+      'accounting-samples',
+      'accounting-elapsed-ms',
+      'accounting-termination-requested',
+      'close-count',
+      'close-overflow',
+      'close-results',
     ].sort(),
     'Unexpected diagnostic field inventory',
   )
-  for (const name of ['component', 'win32-error', 'io-information', 'decoder-exit'])
+  for (const name of [
+    'component',
+    'win32-error',
+    'io-information',
+    'decoder-exit',
+    'accounting-first-active',
+    'accounting-last-active',
+    'accounting-samples',
+    'accounting-elapsed-ms',
+    'accounting-termination-requested',
+    'close-count',
+    'close-overflow',
+  ])
     assert(/^\d+$/u.test(fields[name]), `Invalid diagnostic ${name}`)
   for (const name of ['native-status', 'io-status'])
     assert(/^0x[0-9a-f]{8}$/iu.test(fields[name]), `Invalid diagnostic ${name}`)
+  const closeCount = BigInt(fields['close-count'])
+  const closes = fields['close-results'] ? fields['close-results'].split(';') : []
+  assert.equal(
+    closes.length,
+    Number(closeCount < 64n ? closeCount : 64n),
+    'Diagnostic close count mismatch',
+  )
+  assert.equal(
+    fields['close-overflow'],
+    closeCount > 64n ? '1' : '0',
+    'Diagnostic close overflow mismatch',
+  )
+  const closeKinds = new Set([
+    'close-guard',
+    'close-guard-probe',
+    'close-thread',
+    'close-process',
+    'close-job',
+    'close-nul',
+    'close-output',
+    'close-archive',
+    'close-exe',
+    'close-ancestor',
+  ])
+  for (const close of closes) {
+    const match = /^([a-z-]+):(\d+):([01]):(\d+)$/u.exec(close)
+    assert(match && closeKinds.has(match[1]), 'Malformed diagnostic close result')
+  }
   return fields
 }
 

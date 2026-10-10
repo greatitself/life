@@ -40,6 +40,15 @@ struct Diagnostics {
   ULONG_PTR io_information = 0;
   DWORD decoder_exit = STILL_ACTIVE;
   bool failed = false;
+  DWORD accounting_first_active = MAXDWORD;
+  DWORD accounting_last_active = MAXDWORD;
+  DWORD accounting_samples = 0;
+  ULONGLONG accounting_started = 0;
+  ULONGLONG accounting_elapsed = 0;
+  bool termination_requested = false;
+  struct CloseSample { const wchar_t* kind; DWORD index; bool success; DWORD error; };
+  CloseSample closes[64]{};
+  DWORD close_count = 0;
 
   bool boolean(BOOL value, const wchar_t* step) noexcept {
     const DWORD immediate = value ? ERROR_SUCCESS : GetLastError();
@@ -56,18 +65,34 @@ struct Diagnostics {
     io_status = io.Status; io_information = io.Information;
     failed = status != 0 || io.Status != 0;
   }
+  void accounting(DWORD active) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    if (!accounting_samples) { accounting_first_active = active; accounting_started = now; }
+    accounting_last_active = active;
+    accounting_elapsed = now - accounting_started;
+    ++accounting_samples;
+  }
+  bool closed(bool success, const wchar_t* kind, DWORD index) noexcept {
+    const DWORD immediate = success ? ERROR_SUCCESS : GetLastError();
+    if (close_count < 64) closes[close_count] = {kind, index, success, immediate};
+    ++close_count;
+    if (!success && !failed) { stage = kind; error = immediate; failed = true; }
+    return success;
+  }
 };
 #define LIFE_BOOL(call, step) (diagnostic ? diagnostic->boolean((call), (step)) : static_cast<bool>(call))
 #define LIFE_PRED(call, step) (diagnostic ? diagnostic->predicate((call), (step)) : (call))
 #define LIFE_NATIVE(status, io, step) do { if (diagnostic) diagnostic->native((status), (io), (step)); } while (false)
 #define LIFE_ROLE(call, name) (diagnostic ? (diagnostic->role = (name), diagnostic->component = 0, (call)) : (call))
 #define LIFE_DIAG_ARGUMENT , diagnostic
+#define LIFE_CLOSE(call, kind, index) (diagnostic ? diagnostic->closed((call), (kind), (index)) : (call))
 #else
 #define LIFE_BOOL(call, step) (call)
 #define LIFE_PRED(call, step) (call)
 #define LIFE_NATIVE(status, io, step) ((void)0)
 #define LIFE_ROLE(call, name) (call)
 #define LIFE_DIAG_ARGUMENT
+#define LIFE_CLOSE(call, kind, index) (call)
 #endif
 
 struct OwnedHandle {
@@ -321,15 +346,15 @@ struct OutputGuard {
   }
 
   bool remove() {
-    if (!created) return file.close() && (!root || ordinary_root());
-    if (!file.close() || !ordinary_root()) return false;
+    if (!created) return LIFE_CLOSE(file.close(), L"close-guard", 0) && (!root || ordinary_root());
+    if (!LIFE_CLOSE(file.close(), L"close-guard", 0) || !ordinary_root()) return false;
     OwnedHandle probe;
     IO_STATUS_BLOCK io{};
     const NTSTATUS status = open(probe.value, io, SYNCHRONIZE | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT);
     const bool removed = status == name_missing && !probe.valid();
-    const bool closed = probe.close();
+    const bool closed = LIFE_CLOSE(probe.close(), L"close-guard-probe", 0);
     if (removed && closed) created = false;
     return removed && closed;
   }
@@ -358,10 +383,16 @@ struct Child {
         &info, sizeof(info), &returned), L"job-accounting") ||
         !LIFE_PRED(returned == sizeof(info), L"job-accounting-length")) return false;
     active = info.ActiveProcesses;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    if (diagnostic) diagnostic->accounting(active);
+#endif
     return true;
   }
 
   void terminate_and_drain() noexcept {
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    if (diagnostic) diagnostic->termination_requested = true;
+#endif
     // Membership uncertainty is handled before ResumeThread: also terminate the
     // owned suspended process directly rather than assuming the job contains it.
     if (!membership && !TerminateProcess(process.value, kTerminalExit)) {
@@ -382,9 +413,9 @@ struct Child {
 
   bool close() {
     // Attempt each owned close even if an earlier one fails.
-    bool good = thread.close();
-    good = process.close() && good;
-    good = job.close() && good;
+    bool good = LIFE_CLOSE(thread.close(), L"close-thread", 0);
+    good = LIFE_CLOSE(process.close(), L"close-process", 0) && good;
+    good = LIFE_CLOSE(job.close(), L"close-job", 0) && good;
     return good;
   }
 };
@@ -407,13 +438,26 @@ bool fixture_diagnostics(const Fixture& fixture, const wchar_t* result) {
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (!marker.valid()) return false;
   const Diagnostics& diagnostic = *fixture.diagnostic;
-  wchar_t text[1024]{};
+  std::wstring close_results;
+  for (DWORD index = 0; index < diagnostic.close_count && index < 64; ++index) {
+    const Diagnostics::CloseSample& sample = diagnostic.closes[index];
+    if (!close_results.empty()) close_results += L';';
+    close_results += sample.kind;
+    close_results += L':' + std::to_wstring(sample.index) + L':' + (sample.success ? L"1" : L"0") + L':' + std::to_wstring(sample.error);
+  }
+  wchar_t text[4096]{};
   const int length = swprintf_s(text,
-      L"stage=%ls\r\nrole=%ls\r\ncomponent=%lu\r\nwin32-error=%lu\r\nnative-status=0x%08lx\r\nio-status=0x%08lx\r\nio-information=%llu\r\ndecoder-exit=%lu\r\nresult=%ls\r\n",
+      L"stage=%ls\r\nrole=%ls\r\ncomponent=%lu\r\nwin32-error=%lu\r\nnative-status=0x%08lx\r\nio-status=0x%08lx\r\nio-information=%llu\r\ndecoder-exit=%lu\r\nresult=%ls\r\n"
+      L"accounting-first-active=%lu\r\naccounting-last-active=%lu\r\naccounting-samples=%lu\r\naccounting-elapsed-ms=%llu\r\naccounting-termination-requested=%u\r\n"
+      L"close-count=%lu\r\nclose-overflow=%u\r\nclose-results=%ls\r\n",
       diagnostic.stage, diagnostic.role, static_cast<unsigned long>(diagnostic.component),
       static_cast<unsigned long>(diagnostic.error), static_cast<unsigned long>(diagnostic.native_status),
       static_cast<unsigned long>(diagnostic.io_status), static_cast<unsigned long long>(diagnostic.io_information),
-      static_cast<unsigned long>(diagnostic.decoder_exit), result);
+      static_cast<unsigned long>(diagnostic.decoder_exit), result,
+      static_cast<unsigned long>(diagnostic.accounting_first_active), static_cast<unsigned long>(diagnostic.accounting_last_active),
+      static_cast<unsigned long>(diagnostic.accounting_samples), static_cast<unsigned long long>(diagnostic.accounting_elapsed),
+      diagnostic.termination_requested ? 1U : 0U, static_cast<unsigned long>(diagnostic.close_count),
+      diagnostic.close_count > 64 ? 1U : 0U, close_results.c_str());
   const DWORD bytes = static_cast<DWORD>(length > 0 ? length * sizeof(wchar_t) : 0);
   DWORD written = 0;
   const bool good = bytes && WriteFile(marker.value, text, bytes, &written, nullptr) && written == bytes &&
@@ -610,11 +654,19 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
   if (output_directory.valid()) guard.root = output_directory.value;
   if (!guard.remove()) terminal_failure(child.job.value);
   bool cleaned = child.close();
-  cleaned = null_io.close() && cleaned;
-  cleaned = output_directory.close() && cleaned;
-  cleaned = archive_file.close() && cleaned;
-  cleaned = exe_file.close() && cleaned;
-  for (auto pin = ancestor_pins.rbegin(); pin != ancestor_pins.rend(); ++pin) cleaned = pin->close() && cleaned;
+  cleaned = LIFE_CLOSE(null_io.close(), L"close-nul", 0) && cleaned;
+  cleaned = LIFE_CLOSE(output_directory.close(), L"close-output", 0) && cleaned;
+  cleaned = LIFE_CLOSE(archive_file.close(), L"close-archive", 0) && cleaned;
+  cleaned = LIFE_CLOSE(exe_file.close(), L"close-exe", 0) && cleaned;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+  DWORD close_index = 0;
+#endif
+  for (auto pin = ancestor_pins.rbegin(); pin != ancestor_pins.rend(); ++pin) {
+    cleaned = LIFE_CLOSE(pin->close(), L"close-ancestor", close_index) && cleaned;
+#ifdef LIFE_LAUNCHER_FIXTURE_ONLY
+    ++close_index;
+#endif
+  }
   return cleaned ? result : L"error";
 }
 

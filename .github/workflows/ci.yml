@@ -31,11 +31,16 @@ jobs:
       - run: node tests/app-live-controls-smoke.cjs --presentation
       - run: node tests/app-live-controls-smoke.cjs --history-hydration
       - run: node tests/app-live-controls-smoke.cjs --provider-utilities
+      - run: node tests/app-live-controls-smoke.cjs --fluidity
+      - run: node tests/transcript-performance.cjs current
       - run: node tests/run-selectors-smoke.cjs
       - run: node tests/research-method-ui-smoke.cjs
       - run: node tests/provider-request-ui-smoke.cjs
       - run: node tests/conversation-scroll-smoke.cjs
       - run: node tests/provider-updates-ui-smoke.cjs
       - run: node tests/usage-smoke.cjs
+      - run: node tests/updates-ui-smoke.cjs
+      - run: node tests/graph-canvas-smoke.cjs
+      - run: node tests/deferred-dialogs-smoke.cjs
       - run: npm run test:desktop
       - run: npm run format:check

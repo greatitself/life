@@ -35,7 +35,7 @@ function Get-ValidatedBaselineVersions([string[]]$Versions, [string]$TargetVersi
     }
     if (-not $Versions -or $Versions.Count -eq 0) {
         # The default matches release CI: test only the latest published predecessor.
-        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0') |
+        $latest = @('0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0') |
             Where-Object { [version]$_ -lt [version]$TargetVersion } |
             Sort-Object { [version]$_ } -Descending |
             Select-Object -First 1
@@ -60,6 +60,24 @@ $BaselineVersions = @(Get-ValidatedBaselineVersions $BaselineVersions $ExpectedV
 # electron-builder UUID v5 for appId dev.life.desktop, namespace
 # 50e065bc-3134-11e6-9bab-38c9862bdaf3. This must stay stable after the first release.
 $script:LifeInstallGuid = 'c341d2d7-15bb-5180-bedb-0a3c99a55fe4'
+$script:PhaseTimings = [Collections.Generic.List[object]]::new()
+
+function Invoke-TimedPhase([string]$Name, [scriptblock]$Action) {
+    $startedAt = [DateTime]::UtcNow.ToString('o')
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $succeeded = $false
+    try {
+        & $Action
+        $succeeded = $true
+    } finally {
+        $watch.Stop()
+        $script:PhaseTimings.Add([pscustomobject]@{
+            name = $Name; kind = 'verification'; ok = $succeeded
+            startedAt = $startedAt; finishedAt = [DateTime]::UtcNow.ToString('o')
+            elapsedMilliseconds = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
+        })
+    }
+}
 
 function Read-RegistryValue($Record, [string]$Name) {
     # An empty registry key makes Get-ItemProperty return no object. Unrelated
@@ -170,9 +188,16 @@ function Stop-InstalledLife([string]$Executable) {
     }
 }
 
-function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description) {
-    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -WorkingDirectory ([IO.Path]::GetTempPath()) -PassThru
+function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description, [string]$Phase) {
+    $startedAt = [DateTime]::UtcNow.ToString('o')
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $process = $null
+    $processId = $null
+    $exitCode = $null
+    $succeeded = $false
     try {
+        $process = Start-Process -FilePath $Path -ArgumentList $Arguments -WorkingDirectory ([IO.Path]::GetTempPath()) -PassThru
+        $processId = $process.Id
         if (-not $process.WaitForExit(300000)) {
             # Terminate only the installer started by this test if a prompt or failure hangs it.
             $process.Kill()
@@ -180,16 +205,29 @@ function Invoke-Nsis([string]$Path, [string]$Arguments, [string]$Description) {
             throw "$Description did not finish within five minutes."
         }
         $process.Refresh()
+        $exitCode = $process.ExitCode
         if ($process.ExitCode -ne 0) { throw "$Description failed with exit code $($process.ExitCode)." }
+        $succeeded = $true
     } finally {
-        $process.Dispose()
+        $watch.Stop()
+        if ($null -ne $process) { $process.Dispose() }
+        $timing = [pscustomobject]@{
+            name = $Phase; kind = 'nsis'; ok = $succeeded
+            startedAt = $startedAt; finishedAt = [DateTime]::UtcNow.ToString('o')
+            elapsedMilliseconds = [Math]::Round($watch.Elapsed.TotalMilliseconds, 3)
+            processId = $processId; exitCode = $exitCode
+            installer = [IO.Path]::GetFileName($Path)
+        }
+        $script:PhaseTimings.Add($timing)
+        Write-Host "$Phase elapsed=$($timing.elapsedMilliseconds)ms success=$succeeded."
     }
+    return $timing
 }
 
-function Install-Life([string]$Path) {
+function Install-Life([string]$Path, [string]$Phase) {
     Write-Host "Installing $([IO.Path]::GetFileName($Path)) with the default per-user NSIS installation."
     # The NSIS stub waits for installation/uninstallation. /S suppresses app startup.
-    Invoke-Nsis $Path '/S' 'NSIS installer'
+    return Invoke-Nsis $Path '/S' 'NSIS installer' $Phase
 }
 
 function Get-LifeAppKeys {
@@ -218,6 +256,17 @@ function Assert-PathEqual([string]$Actual, [string]$Expected, [string]$Descripti
     if (-not [string]::Equals([IO.Path]::GetFullPath($Actual).TrimEnd('\'),
             [IO.Path]::GetFullPath($Expected).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Description changed from '$Expected' to '$Actual'."
+    }
+}
+
+function Measure-LifeInstalledFiles([string]$Location) {
+    Assert-PathEqual $Location $script:DefaultInstallPath 'Measured per-user installation'
+    $files = @(Get-ChildItem -LiteralPath $Location -File -Recurse -Force)
+    if ($files.Count -eq 0) { throw 'The installed Life directory contains no files.' }
+    return [pscustomobject]@{
+        fileCount = $files.Count
+        fileBytes = [long](($files | Measure-Object -Property Length -Sum).Sum)
+        scope = 'Filesystem files in the installation directory only; excludes user data. Bytes sum file lengths, not allocated disk clusters.'
     }
 }
 
@@ -282,7 +331,7 @@ function Clear-TestCreatedLife($Registration, [string]$OwnershipToken, [string]$
     # of the installation, keep app data, and leave _?= last and unquoted.
     $copy = Join-Path $Directory ('reset-' + [Guid]::NewGuid().ToString('N') + '.exe')
     Copy-Item -LiteralPath $uninstaller -Destination $copy
-    Invoke-Nsis $copy "/S /KEEP_APP_DATA /currentuser --updated _?=$($Registration.Location)" 'CI-only NSIS cleanup'
+    $null = Invoke-Nsis $copy "/S /KEEP_APP_DATA /currentuser --updated _?=$($Registration.Location)" 'CI-only NSIS cleanup' 'cleanup-nsis'
     if (@(Get-LifeRegistrations).Count -ne 0 -or @(Get-LifeAppKeys).Count -ne 0 -or
         (Test-Path -LiteralPath $Registration.Location)) {
         throw 'CI-only NSIS cleanup left installation files or registration; refusing another baseline.'
@@ -293,19 +342,7 @@ function Clear-TestCreatedLife($Registration, [string]$OwnershipToken, [string]$
     Write-Host 'Removed only the successful test-created installation and owned data before the next baseline.'
 }
 
-function Test-LifeUpgradePair([string]$BaselineVersion, [string]$Directory, [string]$OwnershipToken) {
-    Assert-CleanLifeRunner
-    $startedAt = [DateTime]::UtcNow.ToString('o')
-    $baselineInstaller = Download-BaselineInstaller $BaselineVersion $Directory
-    Install-Life $baselineInstaller
-    $before = Assert-SingleLifeInstallation $BaselineVersion
-    Assert-PathEqual $before.Location $script:DefaultInstallPath 'Default per-user installation'
-    Assert-PathEqual $before.Executable (Join-Path $script:DefaultInstallPath 'Life.exe') 'Default per-user executable'
-    Write-Host ("Verified baseline registration: " + ($before | ConvertTo-Json -Compress))
-    Stop-InstalledLife $before.Executable
-    $binaryHashBefore = (Get-FileHash -LiteralPath $before.Executable -Algorithm SHA256).Hash
-    $binaryVersionBefore = (Get-Item -LiteralPath $before.Executable).VersionInfo.ProductVersion
-
+function New-TestOwnedLifeData([string]$BaselineVersion, [string]$OwnershipToken) {
     $userData = $script:LifeUserData
     $null = New-Item -ItemType Directory -Path $userData -Force
     Set-Content -LiteralPath $script:OwnershipMarker -Value $OwnershipToken -Encoding utf8NoBOM
@@ -353,14 +390,32 @@ function Test-LifeUpgradePair([string]$BaselineVersion, [string]$Directory, [str
             beforeSHA256 = (Get-FileHash -LiteralPath $dataFiles[$name] -Algorithm SHA256).Hash
         }
     }
-    $markerHash = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash
-    $connectionsHash = (Get-FileHash -LiteralPath $connections -Algorithm SHA256).Hash
+    return $savedData
+}
 
-    Install-Life $Installer
-    $after = Assert-SingleLifeInstallation $ExpectedVersion
+function Test-LifeUpgradePair([string]$BaselineVersion, [string]$Directory, [string]$OwnershipToken) {
+    Assert-CleanLifeRunner
+    $startedAt = [DateTime]::UtcNow.ToString('o')
+    $baselineInstaller = Invoke-TimedPhase "baseline-download:$BaselineVersion" { Download-BaselineInstaller $BaselineVersion $Directory }
+    $baselineInstallerHash = Invoke-TimedPhase "baseline-installer-hash:$BaselineVersion" { (Get-FileHash -LiteralPath $baselineInstaller -Algorithm SHA256).Hash }
+    $baselineFreshInstall = Install-Life $baselineInstaller "baseline-fresh-install:$BaselineVersion"
+    $before = Invoke-TimedPhase "baseline-registration:$BaselineVersion" { Assert-SingleLifeInstallation $BaselineVersion }
+    Assert-PathEqual $before.Location $script:DefaultInstallPath 'Default per-user installation'
+    Assert-PathEqual $before.Executable (Join-Path $script:DefaultInstallPath 'Life.exe') 'Default per-user executable'
+    Write-Host ("Verified baseline registration: " + ($before | ConvertTo-Json -Compress))
+    Stop-InstalledLife $before.Executable
+    $baselineLayout = Invoke-TimedPhase "baseline-installed-file-layout:$BaselineVersion" { Measure-LifeInstalledFiles $before.Location }
+    $binaryHashBefore = (Get-FileHash -LiteralPath $before.Executable -Algorithm SHA256).Hash
+    $binaryVersionBefore = (Get-Item -LiteralPath $before.Executable).VersionInfo.ProductVersion
+    $savedData = Invoke-TimedPhase "test-data-preparation:$BaselineVersion" { New-TestOwnedLifeData $BaselineVersion $OwnershipToken }
+
+    $targetUpgrade = Install-Life $Installer "target-upgrade:${BaselineVersion}->${ExpectedVersion}"
+    $after = Invoke-TimedPhase "target-upgrade-registration:$ExpectedVersion" { Assert-SingleLifeInstallation $ExpectedVersion }
     Write-Host ("Verified upgraded registration: " + ($after | ConvertTo-Json -Compress))
     Stop-InstalledLife $after.Executable
+    $upgradedLayout = Invoke-TimedPhase "target-upgrade-installed-file-layout:$ExpectedVersion" { Measure-LifeInstalledFiles $after.Location }
     $binaryHashAfter = (Get-FileHash -LiteralPath $after.Executable -Algorithm SHA256).Hash
+    $binaryVersionAfter = (Get-Item -LiteralPath $after.Executable).VersionInfo.ProductVersion
     if ($binaryHashAfter -eq $binaryHashBefore) {
         throw 'The upgrade did not replace the installed Life executable.'
     }
@@ -369,8 +424,8 @@ function Test-LifeUpgradePair([string]$BaselineVersion, [string]$Directory, [str
             throw "Upgrade changed $property from '$($before.$property)' to '$($after.$property)'."
         }
     }
-    foreach ($name in $dataFiles.Keys) {
-        $file = $dataFiles[$name]
+    foreach ($name in $savedData.Keys) {
+        $file = $savedData[$name].path
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw "Upgrade removed existing $name data."
         }
@@ -378,18 +433,45 @@ function Test-LifeUpgradePair([string]$BaselineVersion, [string]$Directory, [str
         if ($hash -ne $savedData[$name].beforeSHA256) { throw "Upgrade changed existing $name data." }
         $savedData[$name]['afterSHA256'] = $hash
     }
-    Write-Host "Preserved connections.json SHA256=$connectionsHash and upgrade marker SHA256=$markerHash."
+    Write-Host "Preserved connections.json SHA256=$($savedData.connections.beforeSHA256) and upgrade marker SHA256=$($savedData.marker.beforeSHA256)."
     Write-Host ("Preserved history storage/source extension sentinels: " + ($savedData | ConvertTo-Json -Depth 4 -Compress))
     Write-Host "Verified Life $BaselineVersion -> ${ExpectedVersion}: same installation, one registration, saved user data preserved."
+
+    # Measure the target fresh install only after the upgrade and all preservation
+    # checks succeed. Cleanup remains restricted to this test's owned installation
+    # and data; no Defender exclusions, cache flushes, or global settings change.
+    Invoke-TimedPhase "cleanup-before-target-fresh:$ExpectedVersion" { Clear-TestCreatedLife $after $OwnershipToken $Directory }
+    $targetFreshInstall = Install-Life $Installer "target-fresh-install:$ExpectedVersion"
+    $fresh = Invoke-TimedPhase "target-fresh-registration:$ExpectedVersion" { Assert-SingleLifeInstallation $ExpectedVersion }
+    foreach ($property in @('Key', 'Location', 'Executable')) {
+        if (-not [string]::Equals($after.$property, $fresh.$property, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Fresh target installation changed $property from '$($after.$property)' to '$($fresh.$property)'."
+        }
+    }
+    Stop-InstalledLife $fresh.Executable
+    $freshLayout = Invoke-TimedPhase "target-fresh-installed-file-layout:$ExpectedVersion" { Measure-LifeInstalledFiles $fresh.Location }
+    # Keep a fresh set of owned fixture data with the final installation so that
+    # another explicit baseline can still be cleaned safely, and CI retains evidence.
+    $freshData = Invoke-TimedPhase "target-fresh-data:$ExpectedVersion" { New-TestOwnedLifeData $BaselineVersion $OwnershipToken }
+    Write-Host ("Verified fresh target registration: " + ($fresh | ConvertTo-Json -Compress))
     return [pscustomobject]@{
         ok = $true; baselineVersion = $BaselineVersion; targetVersion = $ExpectedVersion
         startedAt = $startedAt; finishedAt = [DateTime]::UtcNow.ToString('o')
         baseline = $before; upgraded = $after; oneRegistration = $true
         baselineProductVersion = $binaryVersionBefore
-        upgradedProductVersion = (Get-Item -LiteralPath $after.Executable).VersionInfo.ProductVersion
+        upgradedProductVersion = $binaryVersionAfter
         installedBinaryBeforeSHA256 = $binaryHashBefore; installedBinaryAfterSHA256 = $binaryHashAfter
-        baselineInstallerSHA256 = (Get-FileHash -LiteralPath $baselineInstaller -Algorithm SHA256).Hash
+        baselineInstallerSHA256 = $baselineInstallerHash
+        baselineInstallerBytes = (Get-Item -LiteralPath $baselineInstaller).Length
+        targetInstallerBytes = (Get-Item -LiteralPath $Installer).Length
+        installedFiles = @{ baseline = $baselineLayout; upgraded = $upgradedLayout; freshTarget = $freshLayout }
         preservedData = $savedData
+        freshTarget = @{ registration = $fresh; oneRegistration = $true; ownedData = $freshData }
+        timings = @{
+            baselineFreshInstall = $baselineFreshInstall
+            targetUpgrade = $targetUpgrade
+            targetFreshInstall = $targetFreshInstall
+        }
     }
 }
 
@@ -402,6 +484,9 @@ Assert-CleanLifeRunner
 $downloadDirectory = Join-Path ([IO.Path]::GetTempPath()) ('life-upgrade-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $downloadDirectory
 $pairs = [Collections.Generic.List[object]]::new()
+$startedAt = [DateTime]::UtcNow.ToString('o')
+$succeeded = $false
+$failure = $null
 try {
     foreach ($baselineVersion in $BaselineVersions) {
         $token = [Guid]::NewGuid().ToString('N')
@@ -412,17 +497,38 @@ try {
         }
     }
     if ($pairs.Count -ne $BaselineVersions.Count) { throw 'Not every requested baseline produced an upgrade proof.' }
+    $succeeded = $true
+} catch {
+    $failure = $_.Exception.Message
+    throw
+} finally {
     $proof = [pscustomobject]@{
-        ok = $true; targetVersion = $ExpectedVersion; baselineVersions = $BaselineVersions
+        ok = $succeeded; failure = $failure
+        targetVersion = $ExpectedVersion; baselineVersions = $BaselineVersions
         installerSHA256 = (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash
-        completedAt = [DateTime]::UtcNow.ToString('o'); pairs = $pairs.ToArray()
+        startedAt = $startedAt; completedAt = [DateTime]::UtcNow.ToString('o')
+        pairs = $pairs.ToArray(); phases = $script:PhaseTimings.ToArray()
+        measurement = @{
+            clock = 'System.Diagnostics.Stopwatch'
+            scope = 'NSIS process launch through exit; downloads, hashes, registration checks and cleanup are separate phases.'
+            sampleCountPerOperation = 1
+            order = @('baseline fresh install', 'target upgrade', 'owned cleanup', 'target fresh install')
+            cachePolicy = 'Same disposable runner; operating-system and filesystem caches are not flushed.'
+            defenderPolicy = 'Unchanged; no exclusions or security settings modified.'
+        }
+        runner = @{
+            name = $env:RUNNER_NAME; os = $env:RUNNER_OS; architecture = $env:RUNNER_ARCH
+            imageOS = $env:ImageOS; imageVersion = $env:ImageVersion
+            processor = $env:PROCESSOR_IDENTIFIER; logicalProcessors = [Environment]::ProcessorCount
+            windowsVersion = [Environment]::OSVersion.VersionString
+            powerShellVersion = $PSVersionTable.PSVersion.ToString()
+            runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT
+        }
     }
     $outputPath = [IO.Path]::GetFullPath($ProofPath)
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $outputPath) -Force
     $proof | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $outputPath -Encoding utf8NoBOM
-    Write-Host "Saved $($pairs.Count) successful baseline upgrade proofs to $outputPath."
-} finally {
-    # Keep the final pair's installation/data for CI evidence. Between pairs, only
-    # verified test-created data was removed by Clear-TestCreatedLife above.
+    Write-Host "Saved $($pairs.Count) complete upgrade/installation benchmarks to $outputPath (success=$succeeded)."
+    # Keep the final target fresh installation and its owned data for CI evidence.
     Remove-Item -LiteralPath $downloadDirectory -Recurse -Force
 }

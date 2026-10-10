@@ -1,6 +1,6 @@
 const fs = require('node:fs')
 
-const knownVersions = ['0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0']
+const knownVersions = ['0.1.0', '0.5.1', '0.6.0', '0.7.0', '0.8.0', '0.9.0', '0.10.0']
 
 function releaseBaselines(targetVersion) {
   if (typeof targetVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(targetVersion)) {

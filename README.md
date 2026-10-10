@@ -4,13 +4,15 @@ Life is an Electron desktop research workspace for **Codex and Claude Code**, wi
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Desktop installers are included in the [v0.10.0 release](https://github.com/greatitself/life/releases/tag/v0.10.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
+Desktop installers are included in the [v0.11.0 release](https://github.com/greatitself/life/releases/tag/v0.11.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
 
 ## Upgrade your installed Life
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.10.0**. Windows and Linux AppImage support in-app updates. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.9.0** for this release, and checks that the installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.11.0**. Windows and Linux AppImage support in-app updates. From 0.11.0, updates prepare in the background by default; turn off **Download updates automatically** to choose when to download. Restart remains your choice. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.10.0** for this release, and measures installation/upgrade time while checking that installation identity and saved data survive. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+
+Life 0.11 packs dependencies into Electron's archive to reduce installer disk work, prepares Studio's bundled compiler files only when needed, and reduces repeated rendering during streaming, thread navigation, sidebar input, and graph movement. See the [0.11.0 release notes](docs/release-notes-v0.11.0.md) for the changes and measured Windows installation results.
 
 Life 0.8 includes all **37 incorporated customizations**: the 27 earlier workspace changes and 10 additions from the October 9 backup. They are installed features with individual enable, disable, delete, and restore controls. Exact matching old source layers remain exportable archives; unrelated or subsequently edited extensions are preserved. See the [incorporation audit](docs/backup-incorporation-2026-10-09.md) and [release notes](docs/release-notes-v0.8.0.md).
 

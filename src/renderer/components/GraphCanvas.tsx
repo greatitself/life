@@ -1,4 +1,13 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import { Maximize2, Minus, Plus } from 'lucide-react'
 
 export interface CanvasNode {
@@ -23,101 +32,20 @@ interface Camera {
   zoom: number
 }
 const clamp = (value: number) => Math.max(0.25, Math.min(1.75, value))
-export function GraphCanvas({
+// Panning changes the world transform; graph geometry and record controls do
+// not change. Keeping them in a memoized scene avoids traversing a dense SVG
+// and every node wrapper during each camera frame.
+const GraphScene = memo(function GraphScene({
   nodes,
   edges,
-  fitKey,
-  label,
-  children,
+  markerId,
+  onNodeFocus,
 }: {
   nodes: CanvasNode[]
   edges: CanvasEdge[]
-  fitKey: string
-  label: string
-  children?: ReactNode
+  markerId: string
+  onNodeFocus: (node: CanvasNode) => void
 }) {
-  const viewport = useRef<HTMLDivElement>(null)
-  const markerId = 'life-map-arrow-' + useId().replace(/[^a-zA-Z0-9]/g, '')
-  const graph = useRef(nodes)
-  graph.current = nodes
-  const [size, setSize] = useState({ width: 0, height: 0 })
-  const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 })
-  const current = useRef(camera)
-  current.current = camera
-  const drag = useRef<{ id: number; x: number; y: number; camera: Camera } | undefined>(undefined)
-  const [panning, setPanning] = useState(false)
-  function fit() {
-    const el = viewport.current
-    const items = graph.current
-    if (!el || !items.length || !el.clientWidth || !el.clientHeight) return
-    const left = Math.min(...items.map((node) => node.x))
-    const right = Math.max(...items.map((node) => node.x + node.width))
-    const top = Math.min(...items.map((node) => node.y))
-    const bottom = Math.max(...items.map((node) => node.y + node.height))
-    const zoom = Math.max(
-      0.25,
-      Math.min(
-        1,
-        (el.clientWidth - 100) / (right - left),
-        (el.clientHeight - 120) / (bottom - top),
-      ),
-    )
-    setCamera({
-      x: el.clientWidth / 2 - ((left + right) / 2) * zoom,
-      y: el.clientHeight / 2 - ((top + bottom) / 2) * zoom,
-      zoom,
-    })
-  }
-  function zoomAt(factor: number, x?: number, y?: number) {
-    const el = viewport.current
-    if (!el) return
-    const point = { x: x ?? el.clientWidth / 2, y: y ?? el.clientHeight / 2 }
-    setCamera((previous) => {
-      const zoom = clamp(previous.zoom * factor)
-      const ratio = zoom / previous.zoom
-      return {
-        zoom,
-        x: point.x - (point.x - previous.x) * ratio,
-        y: point.y - (point.y - previous.y) * ratio,
-      }
-    })
-  }
-  useLayoutEffect(() => {
-    const el = viewport.current
-    if (!el) return
-    const observer = new ResizeObserver(() =>
-      setSize({ width: el.clientWidth, height: el.clientHeight }),
-    )
-    observer.observe(el)
-    setSize({ width: el.clientWidth, height: el.clientHeight })
-    return () => observer.disconnect()
-  }, [])
-  useLayoutEffect(fit, [fitKey, size.width, size.height])
-  useEffect(() => {
-    const el = viewport.current
-    if (!el) return
-    const wheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement).closest('.life-canvas-tools, .life-canvas-overlay')) return
-      event.preventDefault()
-      if (event.ctrlKey || event.metaKey) {
-        const bounds = el.getBoundingClientRect()
-        zoomAt(
-          Math.exp(-event.deltaY * 0.006),
-          event.clientX - bounds.left,
-          event.clientY - bounds.top,
-        )
-      } else {
-        const multiplier = event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? el.clientHeight : 1
-        setCamera((previous) => ({
-          ...previous,
-          x: previous.x - (event.shiftKey ? event.deltaY : event.deltaX) * multiplier,
-          y: previous.y - (event.shiftKey ? event.deltaX : event.deltaY) * multiplier,
-        }))
-      }
-    }
-    el.addEventListener('wheel', wheel, { passive: false })
-    return () => el.removeEventListener('wheel', wheel)
-  }, [])
   const lookup = new Map(nodes.map((node) => [node.id, node]))
   const paths = edges.flatMap((edge) => {
     const from = lookup.get(edge.from)
@@ -167,6 +95,204 @@ export function GraphCanvas({
         y2
     return [{ ...edge, path, labelX: (x1 + x2) / 2, labelY: (y1 + y2) / 2 - 8 }]
   })
+  return (
+    <>
+      <svg className="life-canvas-edges" width="1" height="1" aria-hidden="true">
+        <defs>
+          <marker
+            id={markerId}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'context-stroke', stroke: 'none' }} />
+          </marker>
+        </defs>
+        {paths.map((edge, index) => (
+          <g key={edge.from + ':' + edge.to + ':' + index}>
+            <path
+              d={edge.path}
+              style={{ stroke: edge.color, strokeDasharray: edge.dashed ? '6 4' : undefined }}
+              markerEnd={edge.arrow ? 'url(#' + markerId + ')' : undefined}
+            />
+            {edge.label ? (
+              <text
+                x={edge.labelX}
+                y={edge.labelY}
+                textAnchor="middle"
+                className="research-map-edge-label"
+              >
+                {edge.label}
+              </text>
+            ) : null}
+          </g>
+        ))}
+      </svg>
+      {nodes.map((node) => (
+        <div
+          key={node.id}
+          className="life-canvas-node"
+          style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+          onFocus={() => onNodeFocus(node)}
+        >
+          {node.content}
+        </div>
+      ))}
+    </>
+  )
+})
+
+export function GraphCanvas({
+  nodes,
+  edges,
+  fitKey,
+  label,
+  children,
+}: {
+  nodes: CanvasNode[]
+  edges: CanvasEdge[]
+  fitKey: string
+  label: string
+  children?: ReactNode
+}) {
+  const viewport = useRef<HTMLDivElement>(null)
+  const markerId = 'life-map-arrow-' + useId().replace(/[^a-zA-Z0-9]/g, '')
+  const graph = useRef(nodes)
+  graph.current = nodes
+  const [size, setSize] = useState({ width: 0, height: 0 })
+  const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 })
+  const current = useRef(camera)
+  const cameraFrame = useRef<number | undefined>(undefined)
+  // Input can arrive several times before a frame. Keep its accumulated camera
+  // immediately available to the next event, and render it once per frame.
+  const updateCamera = useCallback(
+    (next: Camera | ((previous: Camera) => Camera), immediate = false) => {
+      current.current = typeof next === 'function' ? next(current.current) : next
+      if (immediate) {
+        if (cameraFrame.current !== undefined) cancelAnimationFrame(cameraFrame.current)
+        cameraFrame.current = undefined
+        setCamera(current.current)
+      } else if (cameraFrame.current === undefined) {
+        cameraFrame.current = requestAnimationFrame(() => {
+          cameraFrame.current = undefined
+          setCamera(current.current)
+        })
+      }
+    },
+    [],
+  )
+  useEffect(
+    () => () => {
+      if (cameraFrame.current !== undefined) cancelAnimationFrame(cameraFrame.current)
+      cameraFrame.current = undefined
+    },
+    [],
+  )
+  const focusNode = useCallback(
+    (node: CanvasNode) => {
+      const el = viewport.current
+      if (!el) return
+      const view = current.current
+      const left = node.x * view.zoom + view.x
+      const top = node.y * view.zoom + view.y
+      if (
+        left < 16 ||
+        top < 16 ||
+        left + node.width * view.zoom > el.clientWidth - 16 ||
+        top + node.height * view.zoom > el.clientHeight - 16
+      ) {
+        updateCamera(
+          {
+            ...view,
+            x: el.clientWidth / 2 - (node.x + node.width / 2) * view.zoom,
+            y: el.clientHeight / 2 - (node.y + node.height / 2) * view.zoom,
+          },
+          true,
+        )
+      }
+    },
+    [updateCamera],
+  )
+  const drag = useRef<{ id: number; x: number; y: number; camera: Camera } | undefined>(undefined)
+  const [panning, setPanning] = useState(false)
+  function fit() {
+    const el = viewport.current
+    const items = graph.current
+    if (!el || !items.length || !el.clientWidth || !el.clientHeight) return
+    const left = Math.min(...items.map((node) => node.x))
+    const right = Math.max(...items.map((node) => node.x + node.width))
+    const top = Math.min(...items.map((node) => node.y))
+    const bottom = Math.max(...items.map((node) => node.y + node.height))
+    const zoom = Math.max(
+      0.25,
+      Math.min(
+        1,
+        (el.clientWidth - 100) / (right - left),
+        (el.clientHeight - 120) / (bottom - top),
+      ),
+    )
+    updateCamera(
+      {
+        x: el.clientWidth / 2 - ((left + right) / 2) * zoom,
+        y: el.clientHeight / 2 - ((top + bottom) / 2) * zoom,
+        zoom,
+      },
+      true,
+    )
+  }
+  function zoomAt(factor: number, x?: number, y?: number) {
+    const el = viewport.current
+    if (!el) return
+    const point = { x: x ?? el.clientWidth / 2, y: y ?? el.clientHeight / 2 }
+    updateCamera((previous) => {
+      const zoom = clamp(previous.zoom * factor)
+      const ratio = zoom / previous.zoom
+      return {
+        zoom,
+        x: point.x - (point.x - previous.x) * ratio,
+        y: point.y - (point.y - previous.y) * ratio,
+      }
+    })
+  }
+  useLayoutEffect(() => {
+    const el = viewport.current
+    if (!el) return
+    const observer = new ResizeObserver(() =>
+      setSize({ width: el.clientWidth, height: el.clientHeight }),
+    )
+    observer.observe(el)
+    setSize({ width: el.clientWidth, height: el.clientHeight })
+    return () => observer.disconnect()
+  }, [])
+  useLayoutEffect(fit, [fitKey, size.width, size.height])
+  useEffect(() => {
+    const el = viewport.current
+    if (!el) return
+    const wheel = (event: WheelEvent) => {
+      if ((event.target as HTMLElement).closest('.life-canvas-tools, .life-canvas-overlay')) return
+      event.preventDefault()
+      if (event.ctrlKey || event.metaKey) {
+        const bounds = el.getBoundingClientRect()
+        zoomAt(
+          Math.exp(-event.deltaY * 0.006),
+          event.clientX - bounds.left,
+          event.clientY - bounds.top,
+        )
+      } else {
+        const multiplier = event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? el.clientHeight : 1
+        updateCamera((previous) => ({
+          ...previous,
+          x: previous.x - (event.shiftKey ? event.deltaY : event.deltaX) * multiplier,
+          y: previous.y - (event.shiftKey ? event.deltaX : event.deltaY) * multiplier,
+        }))
+      }
+    }
+    el.addEventListener('wheel', wheel, { passive: false })
+    return () => el.removeEventListener('wheel', wheel)
+  }, [])
   function endPan(id: number) {
     if (drag.current?.id !== id) return
     drag.current = undefined
@@ -204,7 +330,7 @@ export function GraphCanvas({
       onPointerMove={(event) => {
         const start = drag.current
         if (!start || start.id !== event.pointerId) return
-        setCamera({
+        updateCamera({
           ...start.camera,
           x: start.camera.x + event.clientX - start.x,
           y: start.camera.y + event.clientY - start.y,
@@ -219,7 +345,7 @@ export function GraphCanvas({
         const delta = event.shiftKey ? 120 : 40
         if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
           event.preventDefault()
-          setCamera((previous) => ({
+          updateCamera((previous) => ({
             ...previous,
             x:
               previous.x +
@@ -246,68 +372,7 @@ export function GraphCanvas({
           transform: 'translate(' + camera.x + 'px, ' + camera.y + 'px) scale(' + camera.zoom + ')',
         }}
       >
-        <svg className="life-canvas-edges" width="1" height="1" aria-hidden="true">
-          <defs>
-            <marker
-              id={markerId}
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 0 L 10 5 L 0 10 z" style={{ fill: 'context-stroke', stroke: 'none' }} />
-            </marker>
-          </defs>
-          {paths.map((edge, index) => (
-            <g key={edge.from + ':' + edge.to + ':' + index}>
-              <path
-                d={edge.path}
-                style={{ stroke: edge.color, strokeDasharray: edge.dashed ? '6 4' : undefined }}
-                markerEnd={edge.arrow ? 'url(#' + markerId + ')' : undefined}
-              />
-              {edge.label ? (
-                <text
-                  x={edge.labelX}
-                  y={edge.labelY}
-                  textAnchor="middle"
-                  className="research-map-edge-label"
-                >
-                  {edge.label}
-                </text>
-              ) : null}
-            </g>
-          ))}
-        </svg>
-        {nodes.map((node) => (
-          <div
-            key={node.id}
-            className="life-canvas-node"
-            style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
-            onFocus={() => {
-              const el = viewport.current
-              if (!el) return
-              const view = current.current
-              const left = node.x * view.zoom + view.x
-              const top = node.y * view.zoom + view.y
-              if (
-                left < 16 ||
-                top < 16 ||
-                left + node.width * view.zoom > el.clientWidth - 16 ||
-                top + node.height * view.zoom > el.clientHeight - 16
-              ) {
-                setCamera({
-                  ...view,
-                  x: el.clientWidth / 2 - (node.x + node.width / 2) * view.zoom,
-                  y: el.clientHeight / 2 - (node.y + node.height / 2) * view.zoom,
-                })
-              }
-            }}
-          >
-            {node.content}
-          </div>
-        ))}
+        <GraphScene nodes={nodes} edges={edges} markerId={markerId} onNodeFocus={focusNode} />
       </div>
       <div className="life-canvas-tools" aria-label="Canvas controls">
         <button

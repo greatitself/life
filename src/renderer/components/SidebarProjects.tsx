@@ -119,9 +119,17 @@ export function SidebarProjects({
     setFilters({ ...initialFilters })
   }
   const firstProject = !profiles.length && !threads.length && !narrowed
-  const activeThreads = visibleThreads.filter((thread) => !thread.settled && !thread.snoozedUntil)
-  const settledThreads = visibleThreads.filter((thread) => thread.settled && !thread.snoozedUntil)
-  const snoozedThreads = visibleThreads.filter((thread) => Boolean(thread.snoozedUntil))
+  const { activeThreads, settledThreads, snoozedThreads } = useMemo(() => {
+    const activeThreads: Thread[] = []
+    const settledThreads: Thread[] = []
+    const snoozedThreads: Thread[] = []
+    for (const thread of visibleThreads) {
+      if (thread.snoozedUntil) snoozedThreads.push(thread)
+      else if (thread.settled) settledThreads.push(thread)
+      else activeThreads.push(thread)
+    }
+    return { activeThreads, settledThreads, snoozedThreads }
+  }, [visibleThreads])
 
   return (
     <>

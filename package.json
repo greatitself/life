@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -74,10 +74,16 @@
     "files": [
       "out/**/*",
       "package.json",
+      "!node_modules/**/*.map",
+      "!node_modules/esbuild/bin/**/*",
       "!node_modules/cpu-features/**/*",
       "!node_modules/ssh2/lib/protocol/crypto/build/**/*"
     ],
     "npmRebuild": false,
+    "afterPack": "scripts/package-dependencies.cjs",
+    "asar": {
+      "smartUnpack": false
+    },
     "extraResources": [
       {
         "from": "build/icon.png",
@@ -133,7 +139,8 @@
       "deleteAppDataOnUninstall": false
     },
     "asarUnpack": [
-      "node_modules/**/*"
+      "node_modules/@esbuild/**/*",
+      "**/*.node"
     ]
   },
   "overrides": {

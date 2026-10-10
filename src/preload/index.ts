@@ -46,6 +46,7 @@ const api: RelayAPI = {
     check: () => ipcRenderer.invoke('updates:check'),
     download: () => ipcRenderer.invoke('updates:download'),
     install: () => ipcRenderer.invoke('updates:install'),
+    setAutoDownload: (enabled) => ipcRenderer.invoke('updates:auto-download', enabled),
     onState: (callback) => subscribe('updates:state', callback),
   },
   providerUpdates: {

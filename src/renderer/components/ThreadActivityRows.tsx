@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import {
   Bot,
   ChevronRight,
@@ -10,7 +10,8 @@ import {
   Wrench,
 } from 'lucide-react'
 import type { Message, Thread } from '../state'
-import { isSubagentActivity, isSubagentLaunch, reportedFileChanges } from '../thread-activity'
+import { isSubagentLaunch, reportedFileChanges } from '../thread-activity'
+import { createActivityRowsProjector } from '../thread-activity-rows'
 import {
   activityAnchor,
   activitySummary,
@@ -19,10 +20,6 @@ import {
   toolOutputSections,
 } from '../thread-presentation'
 import { MessageView, RawOutput, ToolStatus } from './MessageView'
-
-type Row =
-  | { kind: 'message' | 'context'; message: Message }
-  | { kind: 'tools' | 'agents'; messages: Message[] }
 
 function ActivityDisclosure({
   summary,
@@ -47,28 +44,6 @@ function ActivityDisclosure({
       {expanded ? <div className="thread-action-content">{children}</div> : null}
     </details>
   )
-}
-function rowsFor(messages: Message[]): Row[] {
-  const rows: Row[] = []
-  let batch: Extract<Row, { messages: Message[] }> | undefined
-  for (const message of messages) {
-    if (
-      message.role !== 'tool' ||
-      /context.?compact|compaction/i.test(message.title || '') ||
-      message.kind === 'status'
-    ) {
-      batch = undefined
-      rows.push({ kind: message.role === 'tool' ? 'context' : 'message', message })
-      continue
-    }
-    const kind = isSubagentActivity(message) ? 'agents' : 'tools'
-    if (!batch || batch.kind !== kind) {
-      batch = { kind, messages: [] }
-      rows.push(batch)
-    }
-    batch.messages.push(message)
-  }
-  return rows
 }
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
@@ -116,7 +91,7 @@ function describe(messages: Message[], agents: boolean) {
     label: label.charAt(0).toUpperCase() + label.slice(1),
   }
 }
-function SubagentCard({ message }: { message: Message }) {
+const SubagentCard = memo(function SubagentCard({ message }: { message: Message }) {
   const agent = useMemo(() => subagentPresentation(message), [message])
   const sections = useMemo(() => toolOutputSections(message), [message])
   const parentId = agent.parentItemId
@@ -188,8 +163,8 @@ function SubagentCard({ message }: { message: Message }) {
       )}
     </article>
   )
-}
-function ToolBatch({
+})
+const ToolBatch = memo(function ToolBatch({
   messages,
   agents,
   provider,
@@ -258,7 +233,7 @@ function ToolBatch({
       </div>
     </section>
   )
-}
+})
 export function ThreadActivityRows({
   messages,
   provider,
@@ -268,7 +243,8 @@ export function ThreadActivityRows({
   provider: Thread['provider']
   compact?: boolean
 }) {
-  const rows = useMemo(() => rowsFor(messages), [messages])
+  const projectRows = useMemo(createActivityRowsProjector, [])
+  const rows = useMemo(() => projectRows(messages), [projectRows, messages])
   return (
     <div className="thread-activity-sequence">
       {rows.map((row) => {

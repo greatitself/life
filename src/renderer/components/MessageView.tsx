@@ -36,6 +36,7 @@ import {
   toolOutputSections,
 } from '../thread-presentation'
 import { LifeSourceCard } from './LifeSourceCard'
+import { MarkdownRenderCache } from '../markdown-render-cache'
 import {
   approvalRequestPresentation,
   prepareQuestionAnswers,
@@ -73,7 +74,7 @@ function downloadText(text: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-export function RawOutput({ text, label }: { text: string; label: string }) {
+export const RawOutput = memo(function RawOutput({ text, label }: { text: string; label: string }) {
   const [expanded, setExpanded] = useState(false)
   const preview = useMemo(() => outputPreview(text), [text])
   const { copied, copy } = useCopy(text)
@@ -117,7 +118,7 @@ export function RawOutput({ text, label }: { text: string; label: string }) {
       ) : null}
     </section>
   )
-}
+})
 export function ToolStatus({ status }: { status?: string }) {
   const running = ['running', 'in_progress', 'spawning', 'initializing'].includes(status || '')
   const failed = ['failed', 'errored', 'error'].includes(status || '')
@@ -193,15 +194,36 @@ const markdownComponents = {
     <MarkdownCodeBlock>{children}</MarkdownCodeBlock>
   ),
 }
+const markdownPlugins = [remarkGfm]
+const settledMarkdown = new MarkdownRenderCache<ReactNode>()
+const MarkdownBody = memo(function MarkdownBody({
+  text,
+  settled,
+}: {
+  text: string
+  settled: boolean
+}) {
+  // react-markdown's synchronous renderer returns immutable element descriptions.
+  // Mounted code-copy controls still receive independent React state in each message.
+  const render = () =>
+    ReactMarkdown({
+      children: text,
+      remarkPlugins: markdownPlugins,
+      components: markdownComponents,
+    })
+  return settled ? settledMarkdown.render(text, render) : render()
+})
 
 export const MessageView = memo(function MessageView({
   message,
   provider,
   minimal = false,
+  settled = false,
 }: {
   message: Message
   provider: Provider
   minimal?: boolean
+  settled?: boolean
 }) {
   const [rawOpen, setRawOpen] = useState(false)
   const { copied, copy } = useCopy(message.text)
@@ -324,9 +346,11 @@ export const MessageView = memo(function MessageView({
               malformed={part.malformed}
             />
           ) : (
-            <ReactMarkdown key={index} remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {part.text}
-            </ReactMarkdown>
+            <MarkdownBody
+              key={index}
+              text={part.text}
+              settled={settled || Boolean(message.finishedAt && message.finishStatus !== 'unknown')}
+            />
           ),
         )}
         {message.role === 'assistant' && message.sourceChange ? (

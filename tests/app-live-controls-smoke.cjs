@@ -10,6 +10,8 @@ const { chromium } = require('playwright')
 const presentation = process.argv.includes('--presentation')
 const historyHydration = process.argv.includes('--history-hydration')
 const providerUtilities = process.argv.includes('--provider-utilities')
+const fluidity = process.argv.includes('--fluidity') || process.argv.includes('--fluidity-baseline')
+const fluidityBaseline = process.argv.includes('--fluidity-baseline')
 
 async function presentationChecks(page, checks) {
   const artifacts = resolve(__dirname, '../output/playwright/v0.8.0')
@@ -525,6 +527,328 @@ async function providerUtilitiesChecks(page, checks, settle) {
   await writeFile(join(artifacts, 'checks.json'), JSON.stringify({ checks }, null, 2))
 }
 
+async function fluidityChecks(page, checks, settle) {
+  const directory = resolve(__dirname, '../output/playwright/app-fluidity')
+  await mkdir(directory, { recursive: true })
+  await page.waitForFunction(() => document.querySelectorAll('.thread-row').length >= 400)
+  await page.waitForTimeout(700)
+  await settle()
+  assert.ok(
+    await page.evaluate(() => window.controlsTest.metrics.sidebarRowRenders >= 408),
+    'The actual SidebarThread render probe must observe the initial saved rows',
+  )
+  const summarize = async (label, started) => {
+    const metrics = await page.evaluate(() => window.controlsTest.metrics)
+    const durations = metrics.commits.map((commit) => commit.actualDuration).sort((a, b) => a - b)
+    return {
+      label,
+      elapsedMs: Math.round(performance.now() - started),
+      sidebarRowRenders: metrics.sidebarRowRenders,
+      historyTextReads: metrics.historyTextReads,
+      commits: durations.length,
+      totalRenderMs: Math.round(durations.reduce((sum, value) => sum + value, 0)),
+      worstRenderMs: Math.round(durations.at(-1) || 0),
+    }
+  }
+  const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
+  await composer.focus()
+  await page.evaluate(() => window.controlsTest.resetMetrics())
+  let started = performance.now()
+  await composer.pressSequentially('Fluid input', { delay: 20 })
+  await settle()
+  const typing = await summarize('Typing with 400 retained conversations', started)
+  assert.equal(await composer.inputValue(), 'Fluid input')
+  assert.equal(await page.locator('.thread-row').count(), 408)
+  if (!fluidityBaseline) {
+    assert.equal(
+      typing.historyTextReads,
+      0,
+      'A closed Find a thread dialog must not scan any saved message text while typing',
+    )
+    assert.equal(
+      typing.sidebarRowRenders,
+      0,
+      'Unchanged sidebar rows must not rerender for composer edits',
+    )
+  }
+  checks.push(
+    'Typing a literal draft preserves all 408 sidebar threads without scanning closed search history or rerendering unchanged rows',
+  )
+
+  await page.evaluate(() => window.controlsTest.resetMetrics())
+  started = performance.now()
+  await page.evaluate(() => {
+    const test = window.controlsTest
+    test.emit('fluidity-thread-123')
+    for (let index = 0; index < 80; index++)
+      test.emit('fluidity-thread-123', 'text', {
+        itemId: 'background-stream',
+        text: 'Background delta ' + index + '. ',
+      })
+  })
+  await page.waitForTimeout(45)
+  await settle()
+  const streaming = await summarize('80 background provider deltas', started)
+  assert.equal(await composer.inputValue(), 'Fluid input')
+  assert.match(
+    await page.locator('.thread-row.active').getAttribute('aria-label'),
+    /^Thread Alpha,/,
+  )
+  if (!fluidityBaseline) {
+    assert.equal(streaming.historyTextReads, 0)
+    assert.ok(
+      streaming.sidebarRowRenders <= 8,
+      'Only the changed background row may rerender for a token batch',
+    )
+  }
+  checks.push(
+    'A burst of 80 provider deltas to a background thread preserves the current conversation and draft, and updates only the affected row',
+  )
+
+  await page.evaluate(() => window.controlsTest.resetMetrics())
+  started = performance.now()
+  await page.getByRole('button', { name: 'Research', exact: true }).click()
+  await page.waitForFunction(
+    () => document.querySelector('.app-shell').dataset.view === 'investigation',
+  )
+  await page.getByRole('button', { name: 'Agents', exact: true }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.thread-row').length >= 400)
+  await composer.waitFor()
+  await settle()
+  const switching = await summarize('Research and Agents view switches', started)
+  assert.equal(await composer.inputValue(), 'Fluid input')
+  assert.match(
+    await page.locator('.thread-row.active').getAttribute('aria-label'),
+    /^Thread Alpha,/,
+  )
+  checks.push(
+    'Switching Research and Agents retains the active conversation and exact draft with hundreds of saved threads',
+  )
+
+  const arranged = page
+    .locator('.thread-card-shell')
+    .filter({ has: page.getByRole('button', { name: /^Saved thread 42,/ }) })
+  await arranged.getByRole('button', { name: /^Saved thread 42,/ }).click()
+  await settle()
+  await page.getByRole('button', { name: /^Reasoning:.*speed:/ }).click()
+  await page.getByRole('menuitemradio', { name: 'High', exact: true }).click()
+  await page.waitForFunction(() => window.controlsTest.records.configure.length === 1)
+  assert.equal(
+    await page.evaluate(() => window.controlsTest.records.configure[0].sessionId),
+    'fluidity-thread-42',
+  )
+  await page.getByRole('combobox', { name: 'Model: Test model', exact: true }).click()
+  await page.getByRole('option', { name: 'Updated model', exact: true }).click()
+  await page.waitForFunction(() => window.controlsTest.records.configure.length === 2)
+  assert.equal(
+    await page.evaluate(() => window.controlsTest.records.configure[1].model),
+    'updated-test-model',
+  )
+  await page.getByRole('button', { name: /^Thread Alpha,/ }).click()
+  assert.equal(await composer.inputValue(), 'Fluid input')
+  await arranged.getByRole('button', { name: 'Settle', exact: true }).click()
+  await page.getByText('Settled (1)', { exact: true }).click()
+  await arranged.getByRole('button', { name: /^Saved thread 42,/ }).click()
+  await settle()
+  assert.match(
+    await page.getByRole('button', { name: /^Reasoning:.*speed:/ }).getAttribute('aria-label'),
+    /Reasoning: High/,
+    'The memoized row selects its newest thread and restores its saved reasoning setting',
+  )
+  assert.equal(
+    await page.getByRole('combobox', { name: 'Model: Updated model', exact: true }).count(),
+    1,
+  )
+  await composer.focus()
+  await arranged.getByRole('button', { name: /^Saved thread 42,/ }).focus()
+  const hover = page.locator('.life-thread-hover')
+  await hover.getByText('updated-test-model', { exact: true }).waitFor()
+  assert.match(await hover.textContent(), /Reasoning: high/)
+  await arranged.getByRole('button', { name: 'Restore', exact: true }).click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.project-list .thread-row').length === 408,
+  )
+  await page.getByRole('button', { name: /^Thread Alpha,/ }).click()
+  assert.equal(await composer.inputValue(), 'Fluid input')
+  checks.push(
+    'Memoized sidebar selection, hover details and Settle/Restore use current model and reasoning settings after live configuration, and preserve a different thread’s draft',
+  )
+
+  await page.keyboard.press('Control+k')
+  const search = page.getByRole('dialog', { name: 'Find a thread', exact: true })
+  await search
+    .getByRole('textbox', { name: 'Search saved threads', exact: true })
+    .fill('NEEDLE-TARGET')
+  const match = search.locator('.search-results > button')
+  await page.waitForFunction(
+    () => document.querySelectorAll('.search-modal .search-results > button').length === 1,
+  )
+  assert.match(await match.textContent(), /Saved thread 250/)
+  assert.ok(
+    await page.evaluate(() => window.controlsTest.metrics.historyTextReads >= 32000),
+    'The real full-text probe must observe retained messages when Find a thread is open',
+  )
+  await page.evaluate(() =>
+    window.controlsTest.emit('fluidity-thread-250', 'title', { title: 'Native renamed thread' }),
+  )
+  await page.waitForFunction(() =>
+    document
+      .querySelector('.search-results > button')
+      ?.textContent.includes('Native renamed thread'),
+  )
+  await search
+    .getByRole('textbox', { name: 'Search saved threads', exact: true })
+    .fill('Saved thread 250')
+  await search.getByText('No matching threads. Try another search.', { exact: true }).waitFor()
+  await search
+    .getByRole('textbox', { name: 'Search saved threads', exact: true })
+    .fill('NEEDLE-TARGET')
+  await match.waitFor()
+  await match.click()
+  await search.waitFor({ state: 'hidden' })
+  assert.match(
+    await page.locator('.thread-row.active').getAttribute('aria-label'),
+    /^Native renamed thread,/,
+  )
+  assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
+  checks.push(
+    'Open global search finds exact saved message content case-insensitively, immediately reflects a native rename, and selects the latest thread without starting an agent',
+  )
+
+  await page.getByRole('button', { name: 'Thread actions', exact: true }).click()
+  await page.keyboard.press('Control+k')
+  await search
+    .getByRole('textbox', { name: 'Search saved threads', exact: true })
+    .fill('NEEDLE-TARGET')
+  await match.waitFor()
+  // Invoke the actual deletion handler while its open search retains a filtered result.
+  await page.evaluate(() => {
+    const action = [...document.querySelectorAll('.thread-menu button')].find(
+      (button) => button.textContent.trim() === 'Delete thread',
+    )
+    if (!action || action.disabled) throw new Error('The native idle thread must be deletable')
+    action.click()
+  })
+  await search.getByText('No matching threads. Try another search.', { exact: true }).waitFor()
+  assert.equal(await match.count(), 0)
+  assert.equal(await page.getByRole('button', { name: /^Native renamed thread,/ }).count(), 0)
+  await search.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  checks.push(
+    'Deleting a saved thread through the App action invalidates a still-open full-text search result immediately',
+  )
+
+  await page.keyboard.press('Control+,')
+  const connections = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+  await connections.locator('.saved-profile > button').filter({ hasText: 'Test machine' }).click()
+  await connections
+    .getByRole('textbox', { name: 'Machine name optional', exact: true })
+    .fill('Edited machine')
+  await connections
+    .getByRole('textbox', { name: 'Hostname or IP', exact: true })
+    .fill('fresh.example')
+  await connections.getByRole('button', { name: 'Save profile', exact: true }).click()
+  await connections.getByText('Connection profile saved.', { exact: true }).waitFor()
+  await connections.getByRole('button', { name: 'New machine', exact: true }).click()
+  await connections
+    .getByRole('textbox', { name: 'Machine name optional', exact: true })
+    .fill('Added machine')
+  await connections
+    .getByRole('textbox', { name: 'Hostname or IP', exact: true })
+    .fill('added.example')
+  await connections.getByRole('textbox', { name: 'Username', exact: true }).fill('newuser')
+  await connections
+    .getByRole('combobox', { name: 'Authentication', exact: true })
+    .selectOption('agent')
+  await connections.getByRole('button', { name: 'Save profile', exact: true }).click()
+  await connections.getByText('Connection profile saved.', { exact: true }).waitFor()
+  await connections.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  const alpha = page.getByRole('button', { name: /^Thread Alpha,/ })
+  assert.equal(
+    await alpha.locator('.thread-cloud-icon').getAttribute('aria-label'),
+    'fresh.example',
+  )
+  await page.locator('.project-heading').filter({ hasText: 'Added machine' }).click()
+  await connections.waitFor()
+  assert.equal(
+    await connections.getByRole('textbox', { name: 'Hostname or IP', exact: true }).inputValue(),
+    'added.example',
+  )
+  assert.equal(
+    await connections.getByRole('textbox', { name: 'Username', exact: true }).inputValue(),
+    'newuser',
+  )
+  await connections.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  checks.push(
+    'Saving an edited profile refreshes existing row host details, and a newly saved machine opens its exact latest connection profile from the sidebar',
+  )
+
+  if (!fluidityBaseline) {
+    const alphaAge = alpha.locator('time')
+    assert.equal(await alphaAge.textContent(), 'Now')
+    const currentTime = await page.evaluate(() => Date.now())
+    await settle()
+    await page.evaluate(() => window.controlsTest.resetMetrics())
+    await page.clock.setFixedTime(currentTime + 120000)
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await page.waitForFunction(() => {
+      const row = [...document.querySelectorAll('.thread-row')].find((button) =>
+        button.getAttribute('aria-label')?.startsWith('Thread Alpha,'),
+      )
+      return row?.querySelector('time')?.textContent === '2m'
+    })
+    assert.equal(
+      await page.evaluate(() => window.controlsTest.metrics.sidebarRowRenders),
+      0,
+      'A minute refresh updates age text without rerendering complete sidebar rows',
+    )
+    await page.getByRole('button', { name: /^Filters, sorting and arrangement/ }).click()
+    const filters = page.getByRole('dialog', {
+      name: 'Filters, sorting and arrangement',
+      exact: true,
+    })
+    await filters.getByRole('combobox', { name: 'Arrange by', exact: true }).selectOption('date')
+    await filters.getByRole('button', { name: 'Done', exact: true }).click()
+    await page
+      .locator('.sidebar-project-thread-heading h3')
+      .filter({ hasText: /^Today$/ })
+      .waitFor()
+    const tomorrow = new Date(currentTime)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setHours(0, 1, 0, 0)
+    await page.clock.setFixedTime(tomorrow)
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await page
+      .locator('.sidebar-project-thread-heading h3')
+      .filter({ hasText: /^Yesterday$/ })
+      .waitFor()
+    assert.equal(
+      await page
+        .locator('.sidebar-project-thread-heading h3')
+        .filter({ hasText: /^Today$/ })
+        .count(),
+      0,
+    )
+    checks.push(
+      'Shared sidebar time updates idle age labels and Today/Yesterday groups after resumed local time without any thread or provider event',
+    )
+  }
+
+  const proof = {
+    baseline: fluidityBaseline,
+    savedThreads: 408,
+    retainedMessages: 32000,
+    typing,
+    streaming,
+    switching,
+    checks,
+  }
+  await writeFile(
+    join(directory, fluidityBaseline ? 'before.json' : 'after.json'),
+    JSON.stringify(proof, null, 2),
+  )
+  console.log(JSON.stringify(proof, null, 2))
+}
+
 async function run() {
   const directory = await mkdtemp(join(tmpdir(), 'life-app-live-controls-'))
   const checks = []
@@ -539,13 +863,13 @@ async function run() {
         sourcefile: 'app-live-controls-fixture.tsx',
         loader: 'tsx',
         contents: `
-          import React from 'react'
+          import React, { Profiler } from 'react'
           import {createRoot} from 'react-dom/client'
           import {App} from './src/renderer/App'
           import {defaultLifeConfig} from './src/shared/customization'
           import './src/renderer/styles.css'
           window.testConfig = {...defaultLifeConfig, workspacePanel:false}
-          createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>)
+          createRoot(document.getElementById('root')).render(<React.StrictMode>${fluidity ? '<Profiler id="Life App" onRender={(id, phase, actualDuration, baseDuration) => window.controlsTest.metrics.commits.push({phase,actualDuration,baseDuration})}><App/></Profiler>' : '<App/>'}</React.StrictMode>)
         `,
       },
       bundle: true,
@@ -556,6 +880,38 @@ async function run() {
       },
       logLevel: 'silent',
       loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file' },
+      plugins: fluidity
+        ? [
+            {
+              name: 'actual-app-fluidity-probes',
+              setup(builder) {
+                builder.onLoad({ filter: /(?:App|SidebarThread)\.tsx$/ }, async ({ path }) => {
+                  let contents = await readFile(path, 'utf8')
+                  if (path.endsWith('/SidebarThread.tsx')) {
+                    assert.ok(
+                      contents.includes('  const [hovered, setHovered]'),
+                      'SidebarThread source must match the actual render probe',
+                    )
+                    contents = contents.replace(
+                      '  const [hovered, setHovered]',
+                      '  window.controlsTest.metrics.sidebarRowRenders++;\n  const [hovered, setHovered]',
+                    )
+                  } else {
+                    assert.ok(
+                      contents.includes('.messages.map((m) => m.text)'),
+                      'App source must match the actual full-text search probe',
+                    )
+                    contents = contents.replaceAll(
+                      '.messages.map((m) => m.text)',
+                      '.messages.map((m) => { window.controlsTest.metrics.historyTextReads++; return m.text })',
+                    )
+                  }
+                  return { contents, loader: 'tsx' }
+                })
+              },
+            },
+          ]
+        : [],
     })
     server = createServer(async (request, response) => {
       const file =
@@ -583,7 +939,7 @@ async function run() {
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
     page.on('pageerror', (error) => errors.push(error.message))
     await page.addInitScript(
-      ({ historyHydration, providerUtilities }) => {
+      ({ historyHydration, providerUtilities, fluidity }) => {
         const profile = {
           id: 'machine-test',
           name: 'Test machine',
@@ -697,6 +1053,26 @@ async function run() {
           ),
           { ...thread('verified-studio', 'Saved Studio conversation'), purpose: 'customization' },
         ]
+        if (fluidity) {
+          for (let index = 0; index < 400; index++) {
+            const id = 'fluidity-thread-' + index
+            savedThreads.push({
+              ...thread(id, 'Saved thread ' + index),
+              updatedAt: Date.now() - 1000 - index,
+              messages: Array.from({ length: 80 }, (_, message) => ({
+                id: id + ':message:' + message,
+                role: message % 2 ? 'assistant' : 'user',
+                text:
+                  (index === 250 && message === 40 ? 'needle-target ' : '') +
+                  'Retained provider output and coding discussion. '.repeat(6),
+                turn: Math.floor(message / 2),
+                finishStatus: 'completed',
+                createdAt: 1000 + message,
+                finishedAt: 2000 + message,
+              })),
+            })
+          }
+        }
         const otherProfile = {
           ...profile,
           id: 'machine-other',
@@ -704,6 +1080,7 @@ async function run() {
           host: 'second.example',
           workspace: '/srv/second',
         }
+        let savedProfiles = providerUtilities ? [profile, otherProfile] : [profile]
         if (providerUtilities) {
           const usageMessage = (id, details, turn) => ({
             id,
@@ -777,7 +1154,10 @@ async function run() {
             ],
           })
         }
-        localStorage.setItem('relay.threads.v1', JSON.stringify(savedThreads))
+        localStorage.setItem(
+          'relay.threads.v1',
+          JSON.stringify(fluidity ? savedThreads.slice(0, 9) : savedThreads),
+        )
         const historyPages = reservedCases.map((item) => ({
           session: {
             id: 'codex:remote-' + item.id,
@@ -901,7 +1281,16 @@ async function run() {
             return () => connectionListeners.delete(callback)
           },
           onHostKey: off,
-          profiles: { list: async () => (providerUtilities ? [profile, otherProfile] : [profile]) },
+          profiles: {
+            list: async () => structuredClone(savedProfiles),
+            save: async (input) => {
+              savedProfiles = [
+                ...savedProfiles.filter((item) => item.id !== input.id),
+                structuredClone(input),
+              ]
+            },
+          },
+          sshConfig: { list: async () => ({ path: '/home/tester/.ssh/config', hosts: [] }) },
           connection: {
             state: async () => {
               records.stateReads++
@@ -935,6 +1324,20 @@ async function run() {
                   { id: 'fast', name: 'Fast' },
                 ],
               },
+              ...(fluidity
+                ? [
+                    {
+                      id: 'updated-test-model',
+                      name: 'Updated model',
+                      defaultReasoningEffort: 'medium',
+                      supportedReasoningEfforts: [
+                        { reasoningEffort: 'medium', description: 'Medium' },
+                        { reasoningEffort: 'high', description: 'High' },
+                      ],
+                      serviceTiers: [{ id: 'default', name: 'Default' }],
+                    },
+                  ]
+                : []),
             ],
             steer: async (input) => {
               records.steering.push(structuredClone(input))
@@ -1003,6 +1406,10 @@ async function run() {
         }
         window.controlsTest = {
           records,
+          metrics: { sidebarRowRenders: 0, historyTextReads: 0, commits: [] },
+          resetMetrics: () => {
+            window.controlsTest.metrics = { sidebarRowRenders: 0, historyTextReads: 0, commits: [] }
+          },
           emit: (id, type = 'status', extra = {}) =>
             listeners.forEach((fn) => fn({ sessionId: id, type, status: 'running', ...extra })),
           holdState: (value) => {
@@ -1143,8 +1550,18 @@ async function run() {
             rejectHistory(historyFailure)
           }
         }
+        if (fluidity)
+          window.relay.conversations = {
+            load: async () => ({
+              version: 1,
+              savedAt: Date.now(),
+              threads: structuredClone(savedThreads),
+            }),
+            save: async (threads, savedAt) =>
+              records.historySaves.push({ threadCount: threads.length, savedAt }),
+          }
       },
-      { historyHydration, providerUtilities },
+      { historyHydration, providerUtilities, fluidity },
     )
     await page.goto(`http://127.0.0.1:${server.address().port}`)
     const settle = async () =>
@@ -1252,6 +1669,18 @@ async function run() {
       console.log(
         JSON.stringify(
           { ok: true, providerUtilities: true, checks, browserErrors: errors },
+          null,
+          2,
+        ),
+      )
+      return
+    }
+    if (fluidity) {
+      await fluidityChecks(page, checks, settle)
+      assert.deepEqual(errors, [])
+      console.log(
+        JSON.stringify(
+          { ok: true, fluidity: true, baseline: fluidityBaseline, checks, browserErrors: errors },
           null,
           2,
         ),

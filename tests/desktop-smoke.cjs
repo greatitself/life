@@ -638,6 +638,23 @@ export function activityLabel(activity: ThreadActivity): string {
 
   try {
     await launch()
+    phase = 'native update preference and preload acknowledgement'
+    const initialUpdates = await page.evaluate(() => window.relay.updates.get())
+    assert.equal(initialUpdates.currentVersion, metadata.version)
+    assert.equal(initialUpdates.autoDownload, true)
+    assert.equal(
+      (await page.evaluate(() => window.relay.updates.setAutoDownload(false))).autoDownload,
+      false,
+    )
+    const updatePreferencesPath = join(
+      await application.evaluate(({ app }) => app.getPath('userData')),
+      'updates.json',
+    )
+    assert.deepEqual(JSON.parse(await readFile(updatePreferencesPath, 'utf8')), {
+      version: 1,
+      autoDownload: false,
+    })
+    checks.push('Native update download preference acknowledges only after its disk save')
     phase = 'new thread environment and platform window controls'
     assert.match(await page.title(), /^Life/)
     assert.equal(await page.evaluate(() => window.relay.platform), process.platform)
@@ -1514,6 +1531,16 @@ export function activityLabel(activity: ThreadActivity): string {
     const { runStudioChecks } = require('./helpers/desktop-studio-steps.cjs')
     phase = 'dedicated Studio settings, extensions, compile, repair and sharing'
     await runStudioChecks(context)
+    assert.equal(
+      (await page.evaluate(() => window.relay.updates.get())).autoDownload,
+      false,
+      'The native update opt-out survives Studio changes and a real cold restart',
+    )
+    assert.equal(
+      (await page.evaluate(() => window.relay.updates.setAutoDownload(true))).autoDownload,
+      true,
+    )
+    checks.push('Native update opt-out survives source customization and a cold restart')
 
     const { runRecoveryChecks } = require('./helpers/desktop-recovery-steps.cjs')
     phase = 'native Retry, actual renderer death and emergency recovery'

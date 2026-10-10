@@ -18,6 +18,8 @@ export interface UpdateProgress {
 export interface UpdateState {
   status: UpdateStatus
   currentVersion: string
+  /** Optional for saved renderer customizations written before this setting existed. */
+  autoDownload?: boolean
   version?: string
   progress?: UpdateProgress
   checkedAt?: string
@@ -30,6 +32,7 @@ export interface LifeUpdatesAPI {
   check(): Promise<UpdateState>
   download(): Promise<UpdateState>
   install(): Promise<void>
+  setAutoDownload(enabled: boolean): Promise<UpdateState>
   onState(callback: (state: UpdateState) => void): () => void
 }
 

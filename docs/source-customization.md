@@ -21,6 +21,8 @@ Studio stores separate conversations, supports renaming and removal, and can exp
 
 A plain answer, clarification question, or already-satisfied request stays a normal response. An empty settings proposal is a no-op rather than an invalid customization. Life reports a change as applied only after validation and, for source changes, a successful build.
 
+From 0.11.0, Life keeps bundled dependencies in its application archive so installation does not create thousands of compiler files. Source inspection and ordinary settings changes use that archive directly. The first source build prepares a verified local compiler cache; later builds and releases with unchanged dependency bytes reuse it. An interrupted or damaged cache is repaired before compilation. npm and esbuild remain bundled, so a separate Node.js installation is still unnecessary. Adding new packages still requires network access.
+
 ## Exact messages and separate instruction files
 
 Life sends the text you submitted unchanged. It does not turn your request into a larger prompt containing source code, schemas, repair instructions, or a hidden preamble.

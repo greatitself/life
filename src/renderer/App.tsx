@@ -66,8 +66,17 @@ import { fallbackModelCatalog, withProviderDefault } from './model-catalog'
 import { ProviderIcon } from './components/Icons'
 import { ThreadBadge } from './components/ThreadBadge'
 import { Modal } from './components/Modal'
-import { ConnectionDialog } from './components/ConnectionDialog'
-import { ProjectDialog } from './components/ProjectDialog'
+import {
+  ConnectionDialog,
+  ProjectDialog,
+  HostHistoryDialog,
+  CustomizationDialog,
+  UpdateDialog,
+  UsageDialog,
+  ExtensionDialog,
+  SourceCodeDialog,
+  PortForwardDialog,
+} from './components/DeferredDialogs'
 import { ApprovalCard } from './components/MessageView'
 import { ThreadTimeline } from './components/ThreadTimeline'
 import { previewNavigableMessages, threadHasRunningChildren } from './thread-presentation'
@@ -77,7 +86,6 @@ import { ThreadMessageNavigator } from './components/ThreadMessageNavigator'
 import { LifeBrand, TitleBar, TitleBarContent } from './components/TitleBar'
 import { ActiveProject } from './components/ActiveProject'
 import { CustomizationStudio } from './components/CustomizationStudio'
-import { HostHistoryDialog } from './components/HostHistoryDialog'
 import { hostHistoryThread, appendHostHistory } from './host-history'
 import type { HostHistoryPage } from '../shared/agent-history'
 import type { ConversationHistorySnapshot } from '../shared/conversations'
@@ -85,24 +93,18 @@ import { useBuiltinFeatures } from './builtin-extensions'
 import { SidebarThread } from './components/SidebarThread'
 import './workspace-integration.css'
 import { LifeMap as ResearchView } from './components/LifeMap'
-import { CustomizationDialog } from './components/CustomizationDialog'
 import { CustomPanels } from './components/CustomPanels'
 import { useLifeConfig } from './useLifeConfig'
-import { UpdateDialog } from './components/UpdateDialog'
-import { UsageDialog } from './components/UsageDialog'
 import { ProviderUpdatesButton, ProviderUpdatesDialog } from './components/ProviderUpdatesDialog'
 import { emptyProviderUpdatesState, type ProviderUpdatesState } from '../shared/provider-updates'
 import type { ProviderUsageSnapshot } from '../shared/usage'
 import type { UpdateState } from '../shared/updates'
-import { ExtensionDialog } from './components/ExtensionDialog'
 import { ExtensionHost } from './components/ExtensionHost'
 import { useExtensions } from './useExtensions'
 import { useSourceCode } from './useSourceCode'
-import { SourceCodeDialog } from './components/SourceCodeDialog'
 import { SidebarProjects } from './components/SidebarProjects'
 import { readProjects } from './research'
 import { LIFE_VERSION } from '../shared/version'
-import { PortForwardDialog } from './components/PortForwardDialog'
 import './enhancements.css'
 import {
   attachmentMetadata,
@@ -392,8 +394,10 @@ export function App() {
   }, [terminalOpen])
   const [refreshKey, setRefreshKey] = useState(0)
   const lifeMap = useLifeMap(setToast, builtin.enabled('project-map'))
-  const agentThreads = threads.filter(
-    (thread) => !thread.purpose && !workbench.linkedThreadIds.has(thread.id),
+  const researchLinkedThreadsKey = JSON.stringify([...workbench.linkedThreadIds].sort())
+  const agentThreads = useMemo(
+    () => threads.filter((thread) => !thread.purpose && !workbench.linkedThreadIds.has(thread.id)),
+    [threads, researchLinkedThreadsKey],
   )
   useEffect(() => {
     if (!historyReady) return
@@ -413,16 +417,39 @@ export function App() {
   }, [workbench.scopeKey, workbench.goals, historyReady])
   const legacyResearchDirectories = useMemo(
     () => researchLegacyDirectories(threads, workbench.linkedThreadIds),
-    [threads, workbench.scopeKey, workbench.goals],
+    [threads, researchLinkedThreadsKey],
   )
-  const sidebarProfiles = profiles.filter(
-    (profile) =>
-      !legacyResearchDirectories.has(profile.workspace.replace(/\/+$/, '') || '/') ||
-      agentThreads.some((thread) => thread.profileId === profile.id),
-  )
+  const sidebarProfiles = useMemo(() => {
+    const occupied = new Set(agentThreads.map((thread) => thread.profileId))
+    return profiles.filter(
+      (profile) =>
+        !legacyResearchDirectories.has(profile.workspace.replace(/\/+$/, '') || '/') ||
+        occupied.has(profile.id),
+    )
+  }, [profiles, legacyResearchDirectories, agentThreads])
   const projectCatalog = useMemo(
     () => workspaceCatalog(profiles, agentThreads, connection, legacyResearchDirectories),
-    [profiles, threads, connection, workbench.scopeKey, workbench.goals],
+    [profiles, agentThreads, connection, legacyResearchDirectories],
+  )
+  const projectColorKeys = useMemo(
+    () => [
+      ...projectCatalog.map((project) => project.key),
+      ...lifeMap.projects.map((project) => project.key),
+    ],
+    [projectCatalog, lifeMap.projects],
+  )
+  const searchResults = useMemo(
+    () =>
+      !searchOpen
+        ? []
+        : !query
+          ? agentThreads
+          : agentThreads.filter((thread) =>
+              `${thread.title} ${thread.messages.map((m) => m.text).join(' ')}`
+                .toLowerCase()
+                .includes(query.toLowerCase()),
+            ),
+    [searchOpen, query, agentThreads],
   )
   useThreadMetadata(
     connection,
@@ -1796,10 +1823,7 @@ export function App() {
       threads={agentThreads}
       profiles={profiles}
       connection={connection}
-      projectKeys={[
-        ...projectCatalog.map((project) => project.key),
-        ...lifeMap.projects.map((project) => project.key),
-      ]}
+      projectKeys={projectColorKeys}
     >
       <div
         className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout ${builtin.enabled('collapsed-branding') ? 'life-bottom-brand-layout' : ''} life-header-actions-layout ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
@@ -2029,7 +2053,7 @@ export function App() {
                         thread.workspace?.split('/').filter(Boolean).pop() || 'Conversation'
                       }
                       active={thread.id === activeId}
-                      onSelect={() => selectThread(thread)}
+                      onSelect={selectThread}
                     />
                   ))}
                 </div>
@@ -3027,6 +3051,9 @@ export function App() {
           onDownload={async () => {
             if (api) setUpdateState(await api.updates.download())
           }}
+          onAutoDownload={async (enabled) => {
+            if (api) setUpdateState(await api.updates.setAutoDownload(enabled))
+          }}
           onInstall={async () => {
             await api?.updates.install()
           }}
@@ -3160,34 +3187,24 @@ export function App() {
             />
           </div>
           <div className="search-results">
-            {agentThreads
-              .filter((t) =>
-                `${t.title} ${t.messages.map((m) => m.text).join(' ')}`
-                  .toLowerCase()
-                  .includes(query.toLowerCase()),
-              )
-              .map((t) => (
-                <button key={t.id} onClick={() => selectThread(t)}>
-                  <ProviderIcon provider={t.provider} size={19} />
-                  <span>
-                    <strong>{t.title}</strong>
-                    <small>
-                      {providerName(t.provider)} ·{' '}
-                      {profiles.find((p) => p.id === t.profileId)?.name || 'Previous workspace'}
-                    </small>
-                  </span>
-                  <ArrowUpRight size={15} />
-                </button>
-              ))}
+            {searchResults.map((t) => (
+              <button key={t.id} onClick={() => selectThread(t)}>
+                <ProviderIcon provider={t.provider} size={19} />
+                <span>
+                  <strong>{t.title}</strong>
+                  <small>
+                    {providerName(t.provider)} ·{' '}
+                    {profiles.find((p) => p.id === t.profileId)?.name || 'Previous workspace'}
+                  </small>
+                </span>
+                <ArrowUpRight size={15} />
+              </button>
+            ))}
             {!agentThreads.length ? (
               <div className="small-empty">
                 Your threads will appear here after you send your first message.
               </div>
-            ) : !agentThreads.some((t) =>
-                `${t.title} ${t.messages.map((m) => m.text).join(' ')}`
-                  .toLowerCase()
-                  .includes(query.toLowerCase()),
-              ) ? (
+            ) : !searchResults.length ? (
               <div className="small-empty">No matching threads. Try another search.</div>
             ) : null}
           </div>

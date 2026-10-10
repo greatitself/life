@@ -172,20 +172,24 @@ export function ProjectColorsProvider({
       return new Map<string, string>()
     }
   })
-  const signature = JSON.stringify(
-    [
-      ...new Set([
-        ...projectKeys,
-        ...threads.map(threadProjectKey),
-        ...profiles.flatMap((profile) => [
-          JSON.stringify([profile.id, null]),
-          ...(profile.workspace ? [JSON.stringify([profile.id, profile.workspace])] : []),
-        ]),
-        ...(connection.profile && connection.workspace
-          ? [JSON.stringify([connection.profile.id, connection.workspace])]
-          : []),
-      ]),
-    ].sort(),
+  const signature = useMemo(
+    () =>
+      JSON.stringify(
+        [
+          ...new Set([
+            ...projectKeys,
+            ...threads.map(threadProjectKey),
+            ...profiles.flatMap((profile) => [
+              JSON.stringify([profile.id, null]),
+              ...(profile.workspace ? [JSON.stringify([profile.id, profile.workspace])] : []),
+            ]),
+            ...(connection.profile && connection.workspace
+              ? [JSON.stringify([connection.profile.id, connection.workspace])]
+              : []),
+          ]),
+        ].sort(),
+      ),
+    [projectKeys, threads, profiles, connection.profile?.id, connection.workspace],
   )
   const keys = useMemo(() => JSON.parse(signature) as string[], [signature])
   const colors = useMemo(

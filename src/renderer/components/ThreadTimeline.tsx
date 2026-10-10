@@ -79,7 +79,7 @@ function WorkActivity({
           .map((message) => (
             <MessageView key={message.id} message={message} provider={provider} />
           ))}
-        <MessageView message={response} provider={provider} minimal />
+        <MessageView message={response} provider={provider} minimal settled />
         <p className="thread-work-summary">{elapsed ? `Worked for ${elapsed}` : 'Worked'}</p>
       </div>
     )
@@ -222,14 +222,18 @@ const TimelineTurn = memo(function TimelineTurn({
   turnStatus?: string
 }) {
   return (
-    <section className="thread-timeline-turn" aria-label={`Turn ${group.turn || 1}`}>
+    <section
+      className="thread-timeline-turn"
+      aria-label={`Turn ${group.turn || 1}`}
+      data-settled={!busy && group.user?.finishStatus === 'completed' ? true : undefined}
+    >
       {group.user ? <MessageView message={group.user} provider={provider} /> : null}
       <WorkActivity group={group} busy={busy} provider={provider} turnStatus={turnStatus} />
     </section>
   )
 })
 
-export function ThreadTimeline({ thread }: { thread: Thread }) {
+export const ThreadTimeline = memo(function ThreadTimeline({ thread }: { thread: Thread }) {
   const projectTurns = useMemo(createTurnGroupProjector, [])
   const groups = useMemo(() => projectTurns(thread.messages), [projectTurns, thread.messages])
   return (
@@ -245,4 +249,4 @@ export function ThreadTimeline({ thread }: { thread: Thread }) {
       ))}
     </div>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import { Folder } from 'lucide-react'
 import type { ConnectionProfile } from '../../shared/types'
 import type { Thread } from '../state'
@@ -11,6 +11,7 @@ import {
   type SidebarThreadGroup,
 } from '../sidebar-ordering'
 import { SidebarThread } from './SidebarThread'
+import { useSidebarDay } from '../sidebar-clock'
 import './sidebar-project-threads.css'
 export type { SidebarThreadSort, SidebarThreadGroup } from '../sidebar-ordering'
 
@@ -39,8 +40,22 @@ export function SidebarProjectThreads({
   onSelect: (thread: Thread) => void
   onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
 }) {
+  const callbacks = useRef({ onSelect, onArrange })
+  useLayoutEffect(() => {
+    callbacks.current = { onSelect, onArrange }
+  }, [onSelect, onArrange])
+  const select = useCallback((thread: Thread) => callbacks.current.onSelect(thread), [])
+  const arrange = useCallback(
+    (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) =>
+      callbacks.current.onArrange?.(thread, patch),
+    [],
+  )
+  const profilesById = useMemo(
+    () => new Map(profiles.map((profile) => [profile.id, profile])),
+    [profiles],
+  )
+  const day = useSidebarDay(group === 'date')
   const groups = useMemo(() => {
-    const profilesById = new Map(profiles.map((profile) => [profile.id, profile]))
     const result = new Map<string, ThreadGroup>()
     const sorted = [...threads].sort((a, b) => compareSidebarThreads(a, b, sort))
     const today = new Date()
@@ -97,7 +112,7 @@ export function SidebarProjectThreads({
         (a, b) => a.name.localeCompare(b.name) || a.description.localeCompare(b.description),
       )
     return sections
-  }, [threads, profiles, sort, group])
+  }, [threads, profilesById, sort, group, day])
 
   return (
     <>
@@ -134,10 +149,10 @@ export function SidebarProjectThreads({
                 key={thread.id}
                 thread={thread}
                 projectName={threadProjectName(thread)}
-                host={profiles.find((profile) => profile.id === thread.profileId)?.host}
+                host={profilesById.get(thread.profileId)?.host}
                 active={activeId === thread.id}
-                onSelect={() => onSelect(thread)}
-                onArrange={onArrange}
+                onSelect={select}
+                onArrange={onArrange ? arrange : undefined}
               />
             ))}
           </div>

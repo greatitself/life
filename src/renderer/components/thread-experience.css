@@ -41,6 +41,10 @@
 .thread-timeline-turn {
   min-width: 0;
 }
+.thread-timeline-turn[data-settled] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
 .thread-work-activity,
 .thread-subagent-activity {
   margin: 0 0 18px;

@@ -181,6 +181,7 @@ function sourcePart(
 }
 
 export function splitSourceMessage(text: string): SourceMessagePart[] {
+  if (!text.includes(opening)) return text ? [{ kind: 'text', text }] : []
   const parts: SourceMessagePart[] = []
   let cursor = 0
   let plainStart = 0

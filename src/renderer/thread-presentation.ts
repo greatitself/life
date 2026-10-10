@@ -29,20 +29,50 @@ export function groupThreadTurns(messages: Message[]): TurnGroup[] {
 
 /** Reuse settled turn props while another turn streams, without hiding late child updates. */
 export function createTurnGroupProjector(): (messages: Message[]) => TurnGroup[] {
-  let previous = new Map<number, TurnGroup>()
+  let previousMessages: Message[] = []
+  let previousGroups: TurnGroup[] = []
+  const rebuild = (messages: Message[]) => {
+    previousMessages = messages
+    previousGroups = groupThreadTurns(messages)
+    return previousGroups
+  }
   return (messages) => {
-    const groups = groupThreadTurns(messages).map((group) => {
-      const retained = previous.get(group.turn)
-      return retained &&
-        retained.key === group.key &&
-        retained.user === group.user &&
-        retained.messages.length === group.messages.length &&
-        retained.messages.every((message, index) => message === group.messages[index])
-        ? retained
-        : group
+    if (messages === previousMessages) return previousGroups
+    if (!previousMessages.length || messages.length < previousMessages.length)
+      return rebuild(messages)
+    const changedTurns = new Set<number>()
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index]
+      const previous = previousMessages[index]
+      if (message === previous) continue
+      // Reordering, removing, or replacing IDs can change turn order and its first request.
+      if (previous && (previous.id !== message.id || previous.turn !== message.turn))
+        return rebuild(messages)
+      changedTurns.add(message.turn)
+    }
+    previousMessages = messages
+    if (!changedTurns.size) return previousGroups
+    const changedGroups = new Map<number, TurnGroup>()
+    for (const message of messages) {
+      if (!changedTurns.has(message.turn)) continue
+      let group = changedGroups.get(message.turn)
+      if (!group) {
+        group = { key: `turn:${message.turn}:${message.id}`, turn: message.turn, messages: [] }
+        changedGroups.set(message.turn, group)
+        if (message.role === 'user') {
+          group.user = message
+          continue
+        }
+      }
+      group.messages.push(message)
+    }
+    previousGroups = previousGroups.map((group) => {
+      const replacement = changedGroups.get(group.turn)
+      changedGroups.delete(group.turn)
+      return replacement || group
     })
-    previous = new Map(groups.map((group) => [group.turn, group]))
-    return groups
+    previousGroups.push(...changedGroups.values())
+    return previousGroups
   }
 }
 
@@ -125,15 +155,34 @@ export function isProgressUpdate(message: Message): boolean {
 }
 
 /** Summaries use reported action text instead of exposing reasoning labels or provider metadata. */
+const cachedActivitySummaries = new WeakMap<Message, string>()
 export function activitySummary(message: Message): string {
-  if (message.kind === 'plan') return 'Updated the plan'
+  const cached = cachedActivitySummaries.get(message)
+  if (cached !== undefined) return cached
+  let summary: string
   const title = message.title?.trim()
-  if (title && !/^reasoning(?: summary)?$/i.test(title)) return title
-  const line = message.text
-    .split('\n')
-    .map((line) => line.replace(/^\s*(?:#{1,6}\s+|[-*]\s+)|[*`]/g, '').trim())
-    .find(Boolean)
-  return line ? `${line.slice(0, 120)}${line.length > 120 ? '…' : ''}` : 'Agent activity'
+  if (message.kind === 'plan') summary = 'Updated the plan'
+  else if (title && !/^reasoning(?: summary)?$/i.test(title)) summary = title
+  else {
+    summary = 'Agent activity'
+    let start = 0
+    while (start < message.text.length) {
+      const newline = message.text.indexOf('\n', start)
+      const end = newline < 0 ? message.text.length : newline
+      const line = message.text
+        .slice(start, end)
+        .replace(/^\s*(?:#{1,6}\s+|[-*]\s+)|[*`]/g, '')
+        .trim()
+      if (line) {
+        summary = `${line.slice(0, 120)}${line.length > 120 ? '…' : ''}`
+        break
+      }
+      if (newline < 0) break
+      start = newline + 1
+    }
+  }
+  cachedActivitySummaries.set(message, summary)
+  return summary
 }
 
 /** The finder only links to messages that are mounted in the preview timeline. */

@@ -44,8 +44,10 @@ import {
 export interface SourceCodeStoreOptions {
   /** Package-root shape: src/renderer, src/shared, and read-only src/main, src/preload. */
   sourceDir: string
-  /** Real filesystem directory, outside app.asar, for esbuild and the bundled dependencies. */
+  /** Bundled dependencies; without prepareNodeModules this must be a real filesystem directory. */
   nodeModulesDir: string
+  /** Packaged installations lazily materialize the compiler payload only for source changes. */
+  prepareNodeModules?: (signal: AbortSignal) => Promise<string>
   directory: string
   onUpdate?: (state: LifeSourceSnapshot) => void
   compilerTimeoutMs?: number
@@ -273,12 +275,20 @@ export class SourceCodeStore {
       fingerprint
         .update('package.json')
         .update(await readFile(join(this.options.sourceDir, 'package.json')))
-    for (const path of baseline.filter(
+    const editableBaseline = baseline.filter(
       (path) => path.startsWith('src/renderer/') || path.startsWith('src/shared/'),
-    )) {
-      const content = await readFile(join(this.options.sourceDir, path))
-      fingerprint.update(path).update(content)
-      this.baselineHashes[path] = this.hash(content)
+    )
+    // Read a small batch in parallel, then hash in the existing sorted order.
+    // Saved customizations depend on the exact installed-source fingerprint.
+    for (let offset = 0; offset < editableBaseline.length; offset += 4) {
+      const paths = editableBaseline.slice(offset, offset + 4)
+      const contents = await Promise.all(
+        paths.map((path) => readFile(join(this.options.sourceDir, path))),
+      )
+      paths.forEach((path, index) => {
+        fingerprint.update(path).update(contents[index])
+        this.baselineHashes[path] = this.hash(contents[index])
+      })
     }
     this.baselineFingerprint = fingerprint.digest('hex')
     try {
@@ -1337,7 +1347,10 @@ export class SourceCodeStore {
       }),
       'utf8',
     )
-    const npm = join(this.options.nodeModulesDir, 'npm', 'bin', 'npm-cli.js')
+    const nodeModulesDir = this.options.prepareNodeModules
+      ? await this.options.prepareNodeModules(signal)
+      : this.options.nodeModulesDir
+    const npm = join(nodeModulesDir, 'npm', 'bin', 'npm-cli.js')
     if (!existsSync(npm))
       throw new Error(
         'Life’s bundled npm installer is missing. Install the latest Life release before adding packages.',
@@ -1420,13 +1433,14 @@ export class SourceCodeStore {
     dependencies: Record<string, string>,
     signal: AbortSignal,
   ) {
+    const nodeModulesDir = this.options.prepareNodeModules
+      ? await this.options.prepareNodeModules(signal)
+      : this.options.nodeModulesDir
     // Loading the JS library from the real unpacked path also gives esbuild a real native
     // executable path. A binary outside Electron cannot resolve packages inside app.asar.
-    const requireCompiler = createRequire(
-      join(this.options.nodeModulesDir, 'esbuild', 'package.json'),
-    )
+    const requireCompiler = createRequire(join(nodeModulesDir, 'esbuild', 'package.json'))
     const compiler = requireCompiler(
-      join(this.options.nodeModulesDir, 'esbuild', 'lib', 'main.js'),
+      join(nodeModulesDir, 'esbuild', 'lib', 'main.js'),
     ) as typeof import('esbuild')
     const tailwindInstalled = Boolean(
       packageModules &&
@@ -1456,7 +1470,7 @@ export class SourceCodeStore {
       jsx: 'automatic',
       minify: true,
       legalComments: 'none',
-      nodePaths: [...(packageModules ? [packageModules] : []), this.options.nodeModulesDir],
+      nodePaths: [...(packageModules ? [packageModules] : []), nodeModulesDir],
       define: {
         'process.env.NODE_ENV': '"production"',
         __LIFE_SOURCE_BUILD__: 'true',

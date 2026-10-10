@@ -72,6 +72,10 @@ jobs:
           if node -e "process.exit(require('node:fs').readFileSync('tests/app-live-controls-smoke.cjs', 'utf8').includes('--provider-utilities') ? 0 : 1)"; then
             node tests/app-live-controls-smoke.cjs --provider-utilities
           fi
+      - run: node tests/app-live-controls-smoke.cjs --fluidity
+        if: hashFiles('tests/transcript-performance.cjs') != ''
+      - run: node tests/transcript-performance.cjs current
+        if: hashFiles('tests/transcript-performance.cjs') != ''
       - run: node tests/run-selectors-smoke.cjs
       - run: node tests/research-method-ui-smoke.cjs
       - run: node tests/provider-request-ui-smoke.cjs
@@ -82,6 +86,12 @@ jobs:
         if: hashFiles('tests/provider-updates-ui-smoke.cjs') != ''
       - run: node tests/usage-smoke.cjs
         if: hashFiles('tests/usage-smoke.cjs') != ''
+      - run: node tests/updates-ui-smoke.cjs
+        if: hashFiles('tests/updates-ui-smoke.cjs') != ''
+      - run: node tests/graph-canvas-smoke.cjs
+        if: hashFiles('tests/graph-canvas-smoke.cjs') != ''
+      - run: node tests/deferred-dialogs-smoke.cjs
+        if: hashFiles('tests/deferred-dialogs-smoke.cjs') != ''
       - run: xvfb-run -a npm run test:desktop
 
   build:
@@ -160,19 +170,31 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-verification
-          sparse-checkout: tests/windows-upgrade.ps1
+          sparse-checkout: |
+            tests/windows-upgrade.ps1
+            scripts/windows-installation-report.cjs
           sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Verify Windows upgrade from Life ${{ matrix.baseline }}
         shell: pwsh
         env:
           BASELINE_VERSION: ${{ matrix.baseline }}
         run: ./.release-verification/tests/windows-upgrade.ps1 -Installer (Get-ChildItem release/*.exe | Select-Object -First 1).FullName -ExpectedVersion (Get-Content -Raw package.json | ConvertFrom-Json).version -BaselineVersions @($env:BASELINE_VERSION)
-      - name: Save Windows upgrade proof
+      - name: Report Windows installation benchmark
+        if: always() && hashFiles('output/windows-upgrade-proof.json') != ''
+        shell: pwsh
+        run: node .release-verification/scripts/windows-installation-report.cjs output/windows-upgrade-proof.json output/windows-installation-benchmark.md
+      - name: Save Windows upgrade and installation benchmark proof
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: life-windows-upgrade-proof-${{ matrix.baseline }}
-          path: output/windows-upgrade-proof.json
-          if-no-files-found: error
+          path: |
+            output/windows-upgrade-proof.json
+            output/windows-installation-benchmark.md
+          if-no-files-found: ${{ failure() && 'warn' || 'error' }}
 
   publish:
     needs: [verify, build, windows-upgrade]
@@ -220,6 +242,12 @@ jobs:
           sha256sum Life-* latest*.yml > SHA256SUMS.txt
           notes="../checkout/docs/release-notes-${RELEASE_TAG}.md"
           cp "$notes" release-notes.md
+          for benchmark in ../artifacts/life-windows-upgrade-proof-*/windows-installation-benchmark.md; do
+            if [[ -f "$benchmark" ]]; then
+              printf '\n' >> release-notes.md
+              cat "$benchmark" >> release-notes.md
+            fi
+          done
           printf '\nBuild source: [%s](https://github.com/%s/commit/%s).\n' "$SOURCE_COMMIT" "$GH_REPO" "$SOURCE_COMMIT" >> release-notes.md
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Life $RELEASE_TAG" --notes-file release-notes.md

@@ -6,6 +6,7 @@ export interface UpdateTransport {
   allowDowngrade: boolean
   allowPrerelease: boolean
   disableWebInstaller: boolean
+  disableDifferentialDownload: boolean
   on(event: string, listener: (...args: any[]) => void): unknown
   removeListener(event: string, listener: (...args: any[]) => void): unknown
   checkForUpdates(): Promise<unknown>
@@ -13,11 +14,12 @@ export interface UpdateTransport {
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void
 }
 
-/** Coordinates the updater without downloading or restarting before the user asks. */
+/** Stages verified updates ahead of time; installation always requires an explicit restart. */
 export class UpdateController {
   private state: UpdateState
   private checking?: Promise<UpdateState>
   private downloading?: Promise<UpdateState>
+  private preparing?: Promise<UpdateState>
   private hasUpdate = false
   private disposed = false
   private readonly listeners: [string, (...args: any[]) => void][] = []
@@ -29,14 +31,15 @@ export class UpdateController {
     unsupportedReason = 'This installation uses manual updates.',
   ) {
     this.state = transport
-      ? { status: 'idle', currentVersion }
-      : { status: 'unsupported', currentVersion, message: unsupportedReason }
+      ? { status: 'idle', currentVersion, autoDownload: true }
+      : { status: 'unsupported', currentVersion, autoDownload: true, message: unsupportedReason }
     if (!transport) return
     transport.autoDownload = false
     transport.autoInstallOnAppQuit = false
     transport.allowDowngrade = false
     transport.allowPrerelease = false
     transport.disableWebInstaller = true
+    transport.disableDifferentialDownload = false
     this.listen('checking-for-update', () =>
       this.set({ status: 'checking', error: undefined, message: undefined, progress: undefined }),
     )
@@ -89,6 +92,30 @@ export class UpdateController {
     return { ...this.state, progress: this.state.progress ? { ...this.state.progress } : undefined }
   }
 
+  setAutoDownload(enabled: boolean): UpdateState {
+    if (this.disposed) throw new Error('The updater has closed.')
+    this.set({ autoDownload: enabled })
+    return this.getState()
+  }
+
+  /** Coalesces startup, periodic, and manual preparation, including a cached installer. */
+  prepare(): Promise<UpdateState> {
+    if (this.disposed) return Promise.reject(new Error('The updater has closed.'))
+    if (this.preparing) return this.preparing
+    this.preparing = this.check()
+      .then((state) => {
+        if (this.disposed) throw new Error('The updater has closed.')
+        // Re-read consent after the check: the user can disable downloads while it runs.
+        return state.status === 'available' && this.state.autoDownload !== false
+          ? this.download()
+          : this.getState()
+      })
+      .finally(() => {
+        this.preparing = undefined
+      })
+    return this.preparing
+  }
+
   check(): Promise<UpdateState> {
     if (this.disposed) return Promise.reject(new Error('The updater has closed.'))
     if (!this.transport || this.downloading || this.state.status === 'downloaded') {
@@ -104,7 +131,10 @@ export class UpdateController {
       progress: undefined,
     })
     this.checking = Promise.resolve()
-      .then(() => this.transport!.checkForUpdates())
+      .then(() => {
+        if (this.disposed) throw new Error('The updater has closed.')
+        return this.transport!.checkForUpdates()
+      })
       .then(() => {
         if (this.state.status === 'checking') {
           this.set({ status: 'idle', message: 'Update check did not return a release. Try again.' })
@@ -131,7 +161,10 @@ export class UpdateController {
     }
     this.set({ status: 'downloading', error: undefined, message: undefined, progress: undefined })
     this.downloading = Promise.resolve()
-      .then(() => this.transport!.downloadUpdate())
+      .then(() => {
+        if (this.disposed) throw new Error('The updater has closed.')
+        return this.transport!.downloadUpdate()
+      })
       .then(() => this.getState())
       .catch((error) => {
         this.fail(error)
@@ -148,8 +181,8 @@ export class UpdateController {
     if (!this.transport || this.state.status !== 'downloaded') {
       throw new Error('Download an update before installing it.')
     }
-    // Show the NSIS installer and relaunch Life after replacing the existing app.
-    this.transport.quitAndInstall(false, true)
+    // The user already chose Restart; Windows can replace Life without another installer UI.
+    this.transport.quitAndInstall(true, true)
   }
 
   dispose(): void {

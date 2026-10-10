@@ -10,6 +10,12 @@ function bytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function downloadTime(seconds: number): string {
+  return seconds < 60
+    ? `${Math.max(1, Math.ceil(seconds))}s remaining`
+    : `${Math.ceil(seconds / 60)} min remaining`
+}
+
 const headings: Record<UpdateState['status'], string> = {
   idle: 'Keep Life up to date',
   checking: 'Checking for updates',
@@ -28,6 +34,7 @@ export function UpdateDialog({
   onCheck,
   onDownload,
   onInstall,
+  onAutoDownload,
   busy = false,
 }: {
   open: boolean
@@ -36,9 +43,11 @@ export function UpdateDialog({
   onCheck: () => Promise<unknown>
   onDownload: () => Promise<unknown>
   onInstall: () => Promise<unknown>
+  onAutoDownload?: (enabled: boolean) => Promise<unknown>
   busy?: boolean
 }) {
   const [pending, setPending] = useState(false)
+  const [preferencePending, setPreferencePending] = useState(false)
   const [actionError, setActionError] = useState('')
   useEffect(() => setActionError(''), [state.status])
   async function run(action: () => Promise<unknown>) {
@@ -50,6 +59,18 @@ export function UpdateDialog({
       setActionError(errorText(error))
     } finally {
       setPending(false)
+    }
+  }
+  async function changeAutoDownload(enabled: boolean) {
+    if (!onAutoDownload) return
+    setPreferencePending(true)
+    setActionError('')
+    try {
+      await onAutoDownload(enabled)
+    } catch (error) {
+      setActionError(errorText(error))
+    } finally {
+      setPreferencePending(false)
     }
   }
   const working = pending || state.status === 'checking' || state.status === 'downloading'
@@ -84,9 +105,9 @@ export function UpdateDialog({
           <p>Download now, then restart Life whenever you’re ready.</p>
         ) : null}
         {state.status === 'downloaded' ? (
-          <p>
-            The download is complete. Restarting closes your SSH connection and running agent turns.
-          </p>
+          <p>The update is verified and ready. Restart Life whenever you’re ready.</p>
+        ) : state.status === 'downloading' ? (
+          <p>You can keep working while Life prepares the update.</p>
         ) : null}
         {state.message ? <p>{state.message}</p> : null}
         {state.status === 'downloading' ? (
@@ -98,7 +119,11 @@ export function UpdateDialog({
             />
             <div>
               <span>
-                {state.progress ? `${Math.round(state.progress.percent)}%` : 'Starting download…'}
+                {state.progress && state.progress.percent >= 100
+                  ? 'Verifying update…'
+                  : state.progress
+                    ? `${Math.round(state.progress.percent)}%`
+                    : 'Preparing download…'}
               </span>
               {state.progress ? (
                 <span>
@@ -106,6 +131,17 @@ export function UpdateDialog({
                 </span>
               ) : null}
             </div>
+            {state.progress && state.progress.percent < 100 && state.progress.bytesPerSecond > 0 ? (
+              <div>
+                <span>{bytes(state.progress.bytesPerSecond)}/s</span>
+                <span>
+                  {downloadTime(
+                    Math.max(0, state.progress.total - state.progress.transferred) /
+                      state.progress.bytesPerSecond,
+                  )}
+                </span>
+              </div>
+            ) : null}
           </div>
         ) : null}
         {state.error || actionError ? (
@@ -114,6 +150,30 @@ export function UpdateDialog({
           </div>
         ) : null}
       </div>
+      {onAutoDownload && state.status !== 'unsupported' ? (
+        <label className="updates-preference">
+          <input
+            type="checkbox"
+            checked={state.autoDownload !== false}
+            onChange={(event) => {
+              const enabled = event.currentTarget.checked
+              void changeAutoDownload(enabled)
+            }}
+            disabled={preferencePending}
+          />
+          <span>
+            <strong>Download updates automatically</strong>
+            <span>
+              {state.autoDownload === false
+                ? 'You choose when to download and restart.'
+                : 'Updates prepare in the background. You choose when to restart.'}
+              {state.status === 'downloading' && state.autoDownload === false
+                ? ' The current download will finish.'
+                : ''}
+            </span>
+          </span>
+        </label>
+      ) : null}
       {state.status === 'downloaded' && busy ? (
         <div className="updates-running" role="status">
           An agent turn is running. Finish or stop it before restarting Life.

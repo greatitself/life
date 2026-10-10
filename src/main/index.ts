@@ -27,6 +27,7 @@ import {
 import { extensionCoreArguments } from '../shared/extension-core'
 import { buildExtensionDocument, extensionDocumentCSP } from '../shared/extension-document'
 import { SourceCodeStore } from './source-code'
+import { PackagedDependencies } from './packaged-dependencies'
 import { executeConnectionCommand } from './connection-execution'
 import { AgentHistory } from './agent-history'
 import { builtinExtensionCatalog } from '../shared/builtin-extensions'
@@ -193,6 +194,7 @@ async function init() {
   })
   await customization.init()
   updates = new UpdatesService((state) => send('updates:state', state))
+  await updates.init()
   ssh = new SSHConnection(store)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
   const agents = new Agents(ssh, (event) => send('agent:event', event))
@@ -295,12 +297,20 @@ async function init() {
     (_id, method, args) => invokeCore(method, args),
     (id, event, data) => send('extensions:event', { id, type: 'event', event, data }),
   )
+  const packagedDependencies = app.isPackaged
+    ? new PackagedDependencies({
+        sourceDirectory: join(app.getAppPath(), 'node_modules'),
+        manifestPath: join(process.resourcesPath, 'life-dependencies.json'),
+        cacheDirectory: join(app.getPath('userData'), 'source-code', 'compiler-cache'),
+      })
+    : undefined
   sourceCode = new SourceCodeStore({
     builtinExtensions: builtinExtensionCatalog,
     sourceDir: app.isPackaged ? join(process.resourcesPath, 'life-source') : app.getAppPath(),
-    nodeModulesDir: app.isPackaged
-      ? join(process.resourcesPath, 'app.asar.unpacked/node_modules')
-      : join(app.getAppPath(), 'node_modules'),
+    nodeModulesDir: join(app.getAppPath(), 'node_modules'),
+    prepareNodeModules: packagedDependencies
+      ? (signal) => packagedDependencies.ensure(signal)
+      : undefined,
     directory: join(app.getPath('userData'), 'source-code'),
     onUpdate: (state) => send('source-code:state', state),
   })
@@ -468,6 +478,7 @@ async function init() {
   handle('updates:get', () => updates.getState())
   handle('updates:check', () => updates.check())
   handle('updates:download', () => updates.download())
+  handle('updates:auto-download', (enabled) => updates.setAutoDownload(z.boolean().parse(enabled)))
   handle('updates:install', () => {
     if (agents.hasRunningSessions())
       throw new Error('Finish or stop active agents before restarting Life to install the update.')

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import * as HoverCard from '@radix-ui/react-hover-card'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Check, Clock, Cloud, GitBranch, GitPullRequest, Undo2 } from 'lucide-react'
@@ -6,6 +6,7 @@ import type { Thread } from '../state'
 import { ProviderIcon } from './Icons'
 import { ThreadBadge } from './ThreadBadge'
 import { ThreadRunStatus } from './ThreadRunStatus'
+import { useSidebarMinute } from '../sidebar-clock'
 import './thread-controls.css'
 
 function threadAge(updatedAt: number): string {
@@ -16,13 +17,17 @@ function threadAge(updatedAt: number): string {
   const hours = Math.floor(minutes / 60)
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
 }
+function ThreadAge({ updatedAt }: { updatedAt: number }) {
+  useSidebarMinute()
+  return threadAge(updatedAt)
+}
 function tomorrow() {
   const date = new Date()
   date.setDate(date.getDate() + 1)
   date.setHours(9, 0, 0, 0)
   return date.getTime()
 }
-export function SidebarThread({
+export const SidebarThread = memo(function SidebarThread({
   thread,
   projectName,
   active,
@@ -33,7 +38,7 @@ export function SidebarThread({
   thread: Thread
   projectName: string
   active: boolean
-  onSelect: () => void
+  onSelect: (thread: Thread) => void
   host?: string
   onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
 }) {
@@ -71,7 +76,7 @@ export function SidebarThread({
             className={`thread-row thread-card ${active ? 'active' : ''}`}
             aria-current={active ? 'page' : undefined}
             aria-label={`${thread.title}, ${thread.provider === 'codex' ? 'OpenAI · Codex' : 'Claude Code'}, ${branch}, ${state}`}
-            onClick={onSelect}
+            onClick={() => onSelect(thread)}
             onFocus={() => setHovered(true)}
             onBlur={() => setHovered(false)}
           >
@@ -84,7 +89,7 @@ export function SidebarThread({
                 <time
                   title={thread.updatedAt ? new Date(thread.updatedAt).toLocaleString() : undefined}
                 >
-                  {threadAge(thread.updatedAt)}
+                  <ThreadAge updatedAt={thread.updatedAt} />
                 </time>
               )}
             </span>
@@ -233,4 +238,4 @@ export function SidebarThread({
       ) : null}
     </div>
   )
-}
+})

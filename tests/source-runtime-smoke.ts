@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { SourceCodeStore } from '../src/main/source-code'
+import { PackagedDependencies } from '../src/main/packaged-dependencies'
 
 let currentStage = 'starting verification'
 let failedStage: string | undefined
@@ -28,7 +29,7 @@ async function run() {
   assert(process.argv[2], 'Pass the packaged resources directory')
   assert(process.versions.electron, 'Run this proof with the packaged Electron executable')
   const sourceDir = join(resources, 'life-source')
-  const nodeModulesDir = join(resources, 'app.asar.unpacked', 'node_modules')
+  const nodeModulesDir = join(resources, 'app.asar', 'node_modules')
   assert(
     existsSync(join(sourceDir, 'src', 'renderer', 'App.tsx')),
     'Packaged renderer source is missing',
@@ -41,10 +42,17 @@ async function run() {
   // Spaces also exercise Windows npm/esbuild argument handling and junction paths.
   stage('create isolated source extension store')
   const directory = await mkdtemp(join(tmpdir(), 'life packaged source proof '))
+  const compilerCache = join(directory, 'compiler-cache')
+  const packagedDependencies = new PackagedDependencies({
+    sourceDirectory: nodeModulesDir,
+    manifestPath: join(resources, 'life-dependencies.json'),
+    cacheDirectory: compilerCache,
+  })
   const options = {
     sourceDir,
     nodeModulesDir,
     directory,
+    prepareNodeModules: (signal: AbortSignal) => packagedDependencies.ensure(signal),
     compilerTimeoutMs: 90_000,
     installTimeoutMs: 180_000,
   }
@@ -55,6 +63,12 @@ async function run() {
     stage('initialize source extension store')
     const initial = await store.init()
     assert.equal(initial.enabled, false)
+    assert.equal(
+      existsSync(compilerCache),
+      false,
+      'Startup eagerly extracted compiler dependencies',
+    )
+    checks.push('Source initialization keeps compiler dependencies archived until the first change')
     stage('read packaged renderer source')
     const context = await store.getContext({ paths: ['src/renderer/main.tsx'] })
     const main = context.files[0].content
@@ -103,6 +117,11 @@ export function RuntimeProof() {
       ],
     })
     stage('export compiled source extension')
+    assert.equal(
+      existsSync(compilerCache),
+      true,
+      'Studio did not prepare its native compiler cache',
+    )
     assert.equal(active.enabled, true)
     assert.equal(active.extensions.length, 1, 'The source change was not installed as an extension')
     const portable = await store.exportExtension(active.extensions[0].id)

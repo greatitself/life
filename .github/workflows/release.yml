@@ -125,6 +125,14 @@ jobs:
           cache: npm
       - id: dependency_install
         run: npm ci
+      - name: Prepare modern Windows installer tools
+        if: matrix.platform == 'windows-x64' && hashFiles('scripts/package-windows-decoder.cjs') != '' && hashFiles('scripts/build-modern-extractor.cjs') != ''
+        shell: pwsh
+        run: |
+          node scripts/package-windows-decoder.cjs --root . --output output/installer-tools/windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-modern-extractor.cjs --output-directory output/installer-tools/nsis-plugins/x86-unicode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify native installer process and policy guards
         if: matrix.platform == 'windows-x64' && hashFiles('tests/windows-installer-process.ps1') != ''
         shell: pwsh

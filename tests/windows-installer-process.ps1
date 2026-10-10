@@ -13,15 +13,19 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true') {
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $modulePath = Join-Path $repository 'build/installer-process.nsh'
 $moduleSource = (Get-Content -Raw -LiteralPath $modulePath).Replace("`r`n", "`n")
+$installerTracePath = Join-Path $repository 'build/installer.nsh'
+$installerTraceSource = (Get-Content -Raw -LiteralPath $installerTracePath).Replace("`r`n", "`n")
 $proofPath = [IO.Path]::GetFullPath($OutputPath)
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('life-process-fixture-' + [Guid]::NewGuid().ToString('N'))
 $results = [Collections.Generic.List[object]]::new()
 $ownedProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $parentModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+$parentInstallerTracePath = [Environment]::GetEnvironmentVariable('LIFE_NSIS_TRACE_FILE', 'Process')
 $proof = [ordered]@{
     ok = $false
     platform = 'win32'
     moduleSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $modulePath).Hash.ToLowerInvariant()
+    installerTraceSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerTracePath).Hash.ToLowerInvariant()
     cases = @()
 }
 
@@ -188,6 +192,7 @@ OutFile "__OUTPUT__"
 !addincludedir "__MODULE_DIRECTORY__"
 __OVERRIDE__
 !include "installer-process.nsh"
+__INSTALLER_TRACE__
 Var FallbackAvailability
 Var FallbackRunning
 Var ActualProof
@@ -390,7 +395,7 @@ Section
   SetErrorLevel 0
 SectionEnd
 '@
-    $source = $source.Replace('__OUTPUT__', $executable.Replace('$', '$$')).Replace('__MODULE_DIRECTORY__', (Split-Path $modulePath -Parent).Replace('$', '$$')).Replace('__OVERRIDE__', $override)
+    $source = $source.Replace('__OUTPUT__', $executable.Replace('$', '$$')).Replace('__MODULE_DIRECTORY__', (Split-Path $modulePath -Parent).Replace('$', '$$')).Replace('__OVERRIDE__', $override).Replace('__INSTALLER_TRACE__', $installerTraceDefinition)
     Write-Utf8 $sourcePath $source
     $compile = Invoke-Native $compiler.path @('/WX', '/INPUTCHARSET', 'UTF8', '/V2', $sourcePath) $compiler.environment 120000
     Assert-Fixture ($compile.exitCode -eq 0 -and (Test-Path -LiteralPath $executable)) "NSIS process fixture compilation failed: $($compile.stdout) $($compile.stderr)"
@@ -398,7 +403,15 @@ SectionEnd
     return $executable
 }
 
-function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bool]$ExpectedProof, [hashtable]$Environment = @{}, [bool]$PriorError = $false) {
+function Get-InstallerTraceDefinition([string]$Source) {
+    $normalized = $Source.Replace("`r`n", "`n")
+    $macro = [regex]::Matches($normalized, '(?ms)^!macro LifeInstallerTrace PHASE[ \t]*\n.*?^!macroend[ \t]*$')
+    $function = [regex]::Matches($normalized, '(?ms)^[ \t]*Function LifeInstallerTrace[ \t]*\n.*?^[ \t]*FunctionEnd[ \t]*$')
+    Assert-Fixture ($macro.Count -eq 1 -and $function.Count -eq 1) 'Expected exactly one actual installer trace macro and function.'
+    return $macro[0].Value + "`n`n" + $function[0].Value
+}
+
+function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bool]$ExpectedProof, [hashtable]$Environment = @{}, [bool]$PriorError = $false, [string]$InstallerTraceExpectation = '') {
     $output = Join-Path $fixtureRoot ($Name + '.txt')
     $proof.activeCase = [ordered]@{ name = $Name; kind = 'native-nsis'; expectedProof = $ExpectedProof; expectedStockFallback = -not $ExpectedProof; priorError = $PriorError }
     $childEnvironment = @{
@@ -406,6 +419,7 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
         LIFE_FIXTURE_OUTPUT = $output
         LIFE_FIXTURE_ERROR = $(if ($PriorError) { '1' } else { '0' })
         LIFE_NSIS_PROCESS_PROBE_TARGET = $null
+        LIFE_NSIS_TRACE_FILE = $null
     }
     foreach ($entry in $Environment.GetEnumerator()) { $childEnvironment[$entry.Key] = $entry.Value }
     $run = Invoke-Native $Executable @('/S') $childEnvironment 15000
@@ -439,12 +453,44 @@ function Invoke-Harness([string]$Name, [string]$Executable, [string]$Target, [bo
     }
     $expectedError = if ($PriorError) { '1' } else { '0' }
     Assert-Fixture ($values.directError -eq $expectedError -and $values.wrapperError -eq $expectedError) "${Name}: the caller's error flag was changed"
-    $results.Add([pscustomobject]@{ name = $Name; kind = 'native-nsis'; ok = $true; proof = $ExpectedProof; stockFallback = -not $ExpectedProof; priorError = $PriorError; preservation = $values; trace = $trace })
+    $installerTrace = @()
+    if ($InstallerTraceExpectation -ne '') {
+        $installerTracePathForCase = [string]$Environment.LIFE_NSIS_TRACE_FILE
+        $proof.activeCase.installerTraceExpectation = $InstallerTraceExpectation
+        if ($InstallerTraceExpectation -eq 'valid') {
+            Assert-Fixture (Test-Path -LiteralPath $installerTracePathForCase -PathType Leaf) "${Name}: the actual installer trace was not written"
+            $installerTraceRaw = @(Get-Content -LiteralPath $installerTracePathForCase)
+            $proof.activeCase.installerTraceRaw = $installerTraceRaw
+            $previousTick = 0L
+            foreach ($line in $installerTraceRaw) {
+                Assert-Fixture ($line -cmatch '^([a-z0-9-]+)\t(\d+)$') "${Name}: malformed native installer trace: $line"
+                $phase = $Matches[1]
+                $tick = [long]$Matches[2]
+                Assert-Fixture ($tick -gt 0 -and $tick -ge $previousTick) "${Name}: nonmonotonic native installer trace"
+                $installerTrace += [pscustomobject]@{ phase = $phase; uptimeMilliseconds = $tick }
+                $previousTick = $tick
+            }
+            $phases = @($installerTrace | ForEach-Object { $_.phase })
+            $expectedPhases = @('process-probe-start', 'process-probe-exit-73', 'process-probe-start', 'process-probe-exit-73', 'process-probe-accepted')
+            Assert-Fixture ([string]::Equals(($phases -join '|'), ($expectedPhases -join '|'), [StringComparison]::Ordinal)) "${Name}: incorrect direct/wrapper installer trace order"
+        } elseif ($InstallerTraceExpectation -eq 'unwritable') {
+            Assert-Fixture ((Test-Path -LiteralPath $installerTracePathForCase -PathType Container) -and -not (Test-Path -LiteralPath $installerTracePathForCase -PathType Leaf) -and [IO.Directory]::GetFileSystemEntries($installerTracePathForCase).Length -eq 0) "${Name}: an unwritable trace path created a log leaf"
+        } else {
+            throw "Unknown installer trace expectation: $InstallerTraceExpectation"
+        }
+        $proof.activeCase.installerTrace = $installerTrace
+    }
+    $results.Add([pscustomobject]@{ name = $Name; kind = 'native-nsis'; ok = $true; proof = $ExpectedProof; stockFallback = -not $ExpectedProof; priorError = $PriorError; preservation = $values; trace = $trace; installerTraceExpectation = $InstallerTraceExpectation; installerTrace = $installerTrace })
     $proof.Remove('activeCase')
 }
 
 try {
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    $installerTraceDefinition = Get-InstallerTraceDefinition $installerTraceSource
+    $crlfTraceDefinition = Get-InstallerTraceDefinition ($installerTraceSource.Replace("`n", "`r`n"))
+    Assert-Fixture ([string]::Equals($installerTraceDefinition, $crlfTraceDefinition, [StringComparison]::Ordinal)) 'Actual installer trace extraction differs by source line endings.'
+    $proof.installerTraceExtractionLineEndingParity = $true
+    $proof.installerTraceDefinitionSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($installerTraceDefinition))).ToLowerInvariant()
     $compiler = Get-Compiler
     $proof.nsisExecutable = $compiler.path
     $proof.nsisExecutableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $compiler.path).Hash.ToLowerInvariant()
@@ -615,12 +661,81 @@ try {
     $ownedProcesses.Add($insideProcess)
     Invoke-Harness 'native-nested-arbitrary-filename-match' $nativeHarness $specialTarget $false $compatibleEnvironment $true
     Invoke-Harness 'native-mixed-case-path-match' $nativeHarness $specialTarget.ToUpperInvariant() $false $compatibleEnvironment
+    # Compare full and projected CIM snapshots while both arbitrary-name
+    # helpers remain alive. These query times are diagnostic metadata only.
+    $projectionOutput = Join-Path $fixtureRoot 'native-projected-process-parity.clixml'
+    $projectionScript = $bootstrap + @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop' -or [IntPtr]::Size -ne 4) { throw 'Expected native x86 Windows PowerShell 5.' }
+  $target = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_TARGET')
+  if ([string]::IsNullOrEmpty($target)) { throw 'Missing native parity target.' }
+  $helpers = @(
+    @{ Name = 'inside'; Handle = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_INSIDE_PID'); Path = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_INSIDE_PATH'); Match = $true },
+    @{ Name = 'outside'; Handle = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_OUTSIDE_PID'); Path = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_OUTSIDE_PATH'); Match = $false }
+  )
+  $queryClock = [Diagnostics.Stopwatch]::StartNew()
+  $full = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+  $fullElapsed = $queryClock.Elapsed.TotalMilliseconds
+  $queryClock.Restart()
+  $projected = @(Get-CimInstance -ClassName Win32_Process -Property ExecutablePath -ErrorAction Stop)
+  $projectedElapsed = $queryClock.Elapsed.TotalMilliseconds
+  if ($full.Count -eq 0 -or $projected.Count -eq 0) { throw 'Native parity requires two complete nonempty process snapshots.' }
+  $records = @()
+  foreach ($helper in $helpers) {
+    if ([string]::IsNullOrEmpty($helper.Handle) -or [string]::IsNullOrEmpty($helper.Path)) { throw 'Missing held helper identity.' }
+    $fullRecords = @($full | Where-Object { ([string]$_.Handle).Equals($helper.Handle, [StringComparison]::Ordinal) })
+    $projectedRecords = @($projected | Where-Object { ([string]$_.Handle).Equals($helper.Handle, [StringComparison]::Ordinal) })
+    if ($fullRecords.Count -ne 1 -or $projectedRecords.Count -ne 1) { throw ('Expected exactly one full and projected record for ' + $helper.Name) }
+    $fullRecord = $fullRecords[0]
+    $projectedRecord = $projectedRecords[0]
+    $expectedPath = [IO.Path]::GetFullPath($helper.Path)
+    $fullPath = [string]$fullRecord.Path
+    $fullExecutablePath = [string]$fullRecord.ExecutablePath
+    $projectedPath = [string]$projectedRecord.Path
+    $projectedExecutablePath = [string]$projectedRecord.ExecutablePath
+    foreach ($path in @($fullPath, $fullExecutablePath, $projectedPath, $projectedExecutablePath)) {
+      if ([string]::IsNullOrEmpty($path) -or -not [IO.Path]::GetFullPath($path).Equals($expectedPath, [StringComparison]::Ordinal)) { throw ('Native full/projected path differs from the held helper: ' + $helper.Name) }
+    }
+    if (-not $fullPath.Equals($fullExecutablePath, [StringComparison]::Ordinal) -or -not $fullPath.Equals($projectedPath, [StringComparison]::Ordinal) -or -not $fullPath.Equals($projectedExecutablePath, [StringComparison]::Ordinal)) { throw ('Native Path alias differs across full/projected records: ' + $helper.Name) }
+    $fullMatch = [bool]($fullRecord.Path -and $fullRecord.Path.StartsWith($target, 'CurrentCultureIgnoreCase'))
+    $projectedMatch = [bool]($projectedRecord.Path -and $projectedRecord.Path.StartsWith($target, 'CurrentCultureIgnoreCase'))
+    if ($fullMatch -ne $helper.Match -or $projectedMatch -ne $helper.Match) { throw ('Native full/projected scope classification differs: ' + $helper.Name) }
+    $records += [pscustomobject]@{ Name = $helper.Name; Handle = $helper.Handle; ExpectedPath = $expectedPath; FullPath = $fullPath; FullExecutablePath = $fullExecutablePath; ProjectedPath = $projectedPath; ProjectedExecutablePath = $projectedExecutablePath; FullMatch = $fullMatch; ProjectedMatch = $projectedMatch; ExpectedMatch = $helper.Match }
+  }
+  [IO.File]::WriteAllText([Environment]::GetEnvironmentVariable('LIFE_FIXTURE_PARITY_OUTPUT'), [System.Management.Automation.PSSerializer]::Serialize([pscustomobject]@{ Major = $PSVersionTable.PSVersion.Major; Edition = $PSVersionTable.PSEdition; PSHOME = $PSHOME; PointerSize = [IntPtr]::Size; FullCount = $full.Count; ProjectedCount = $projected.Count; FullElapsedMilliseconds = $fullElapsed; ProjectedElapsedMilliseconds = $projectedElapsed; Records = $records }, 6), [Text.UTF8Encoding]::new($false))
+} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 75 }
+'@
+    $projectionEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($projectionScript))
+    $projectionRun = Invoke-Native $x86PowerShell @('-NoProfile', '-NonInteractive', '-EncodedCommand', $projectionEncoded) @{
+        PSModulePath = $compatibleModulePath
+        LIFE_FIXTURE_PARITY_TARGET = $specialTarget
+        LIFE_FIXTURE_PARITY_INSIDE_PID = [string]$insideProcess.Id
+        LIFE_FIXTURE_PARITY_INSIDE_PATH = $insideHelper
+        LIFE_FIXTURE_PARITY_OUTSIDE_PID = [string]$outsideProcess.Id
+        LIFE_FIXTURE_PARITY_OUTSIDE_PATH = $outsideHelper
+        LIFE_FIXTURE_PARITY_OUTPUT = $projectionOutput
+    }
+    $proof.projectedProcessParityExecution = $projectionRun
+    Assert-Fixture ($projectionRun.exitCode -eq 0 -and (Test-Path -LiteralPath $projectionOutput -PathType Leaf)) "Native full/projected process parity failed: $($projectionRun.stderr)"
+    $projection = [System.Management.Automation.PSSerializer]::Deserialize((Get-Content -Raw -LiteralPath $projectionOutput))
+    $proof.projectedProcessParity = $projection
+    $results.Add([pscustomobject]@{ name = 'native-projected-process-parity'; kind = 'native-x86-projection-parity'; ok = $true; parity = $projection })
     foreach ($process in @($insideProcess, $outsideProcess)) {
         if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }
 
     Invoke-Harness 'protocol-valid-clear-error' $protocolHarness $specialTarget $true @{ LIFE_FIXTURE_PROBE_MODE = 'valid' }
     Invoke-Harness 'protocol-valid-set-error' $protocolHarness $specialTarget $true @{ LIFE_FIXTURE_PROBE_MODE = 'valid'; LIFE_NSIS_PROCESS_PROBE_TARGET = 'original value' } $true
+    foreach ($priorError in @($false, $true)) {
+        $errorState = if ($priorError) { 'set' } else { 'clear' }
+        $validInstallerTrace = Join-Path $fixtureRoot ('installer-trace-valid-' + $errorState + '.log')
+        Invoke-Harness ('protocol-installer-trace-valid-' + $errorState + '-error') $protocolHarness $specialTarget $true @{ LIFE_FIXTURE_PROBE_MODE = 'valid'; LIFE_NSIS_TRACE_FILE = $validInstallerTrace } $priorError 'valid'
+        $unwritableInstallerTrace = Join-Path $fixtureRoot ('installer-trace-unwritable-' + $errorState)
+        [void][IO.Directory]::CreateDirectory($unwritableInstallerTrace)
+        Invoke-Harness ('protocol-installer-trace-unwritable-' + $errorState + '-error') $protocolHarness $specialTarget $true @{ LIFE_FIXTURE_PROBE_MODE = 'valid'; LIFE_NSIS_TRACE_FILE = $unwritableInstallerTrace } $priorError 'unwritable'
+    }
     $oversizedProbeLog = Join-Path $fixtureRoot 'oversized-probe-invocation.txt'
     Invoke-Harness 'protocol-oversized-environment-no-spawn' $protocolHarness $specialTarget $false @{ LIFE_FIXTURE_PROBE_MODE = 'valid'; LIFE_NSIS_PROCESS_PROBE_TARGET = ('z' * 16384); LIFE_FIXTURE_PROBE_CALL_LOG = $oversizedProbeLog } $true
     Assert-Fixture (-not (Test-Path -LiteralPath $oversizedProbeLog)) 'An oversized original environment value must fall back before spawning a probe.'
@@ -651,7 +766,8 @@ function Get-ExecutionPolicy {
     'RemoteSigned'
 }
 function Get-CimInstance {
-    [CmdletBinding()] param([string]$ClassName)
+    [CmdletBinding()] param([string]$ClassName, [string[]]$Property)
+    if ($ClassName -cne 'Win32_Process' -or $Property.Count -ne 1 -or $Property[0] -cne 'ExecutablePath') { throw 'The process probe must enumerate Win32_Process with exactly the ExecutablePath projection.' }
     $outside = 'C:\outside\arbitrary-helper.exe'
     switch ($script:mode) {
         'zero-records' { return }
@@ -676,7 +792,9 @@ function Get-CimInstance {
         $results.Add([pscustomobject]@{ name = ('semantic-' + $mode); kind = 'actual-command'; ok = $true; exitCode = $run.exitCode; exactOutput = $run.stdout })
     }
     Assert-Fixture ([string]::Equals($parentModulePath, [Environment]::GetEnvironmentVariable('PSModulePath', 'Process'), [StringComparison]::Ordinal)) 'The outer caller PSModulePath changed.'
+    Assert-Fixture ([string]::Equals($parentInstallerTracePath, [Environment]::GetEnvironmentVariable('LIFE_NSIS_TRACE_FILE', 'Process'), [StringComparison]::Ordinal)) 'The outer caller installer trace environment changed.'
     $proof.parentModulePathPreserved = $true
+    $proof.parentInstallerTraceEnvironmentPreserved = $true
     $proof.ok = $true
 } catch {
     $proof.error = $_.Exception.Message

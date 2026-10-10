@@ -12,6 +12,972 @@ const { getMakeNsisPath, getNsisPluginsPath } = require('app-builder-lib/out/too
 
 const root = path.resolve(__dirname, '..')
 
+const decoderObserverNative = String.raw`// Fixture proposal only. Never opens or duplicates a job handle.
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+
+public sealed class LifeDecoderObserverOptions {
+  public string OwnedRoot, ReadyFile, ParentPidFile, ChildPidFile, ObservedFile, ResultFile, AckFile;
+  public string Mode;
+  public string KillRequestFile, RequestToken, ParentImage, DecoderRoot;
+  public string DecoderSuffix, DecoderSha256, PayloadFile;
+  public long ExpectedSize;
+  public byte[] Prefix, Tail;
+}
+
+public sealed class LifeDecoderObserverResult {
+  public bool Success, ParentKilled, CleanupParentKilled, CleanupDecoderKilled, Preallocated, FinalPreallocated;
+  public long PartialSize, FinalPartialSize;
+  public string FailureKind, Failure, ParentImage, DecoderImage, DecoderSha256;
+  public string ParentCreationTime, DecoderCreationTime;
+  public uint ParentPid, DecoderPid, ParentWait, DecoderWait, ParentExit, DecoderExit;
+  public string[] CleanupFailures;
+}
+
+public static class LifeDecoderObserver {
+  const uint QuerySync = 0x101000, QuerySyncTerminate = 0x101001;
+  const uint Object0 = 0, Timeout = 258, Failed = 0xffffffff;
+  static readonly IntPtr Invalid = new IntPtr(-1);
+  static readonly Encoding Utf8 = new UTF8Encoding(false);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct FileTime { public uint Low, High; public ulong Value { get { return ((ulong)High << 32) | Low; } } }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct Entry {
+    public uint Size, Usage, Pid;
+    public IntPtr Heap;
+    public uint Module, Threads, Parent;
+    public int Priority;
+    public uint Flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+  }
+  sealed class ProofFailure : Exception {
+    public readonly string Kind;
+    public ProofFailure(string kind, string message) : base(message) { Kind = kind; }
+  }
+  [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool GetProcessTimes(IntPtr h, out FileTime c, out FileTime x, out FileTime k, out FileTime u);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool QueryFullProcessImageNameW(IntPtr h, uint flags, StringBuilder text, ref uint size);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  static extern uint GetLongPathNameW(string path, StringBuilder output, uint size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool Process32FirstW(IntPtr h, ref Entry e);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool Process32NextW(IntPtr h, ref Entry e);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool TerminateProcess(IntPtr h, uint exit);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+
+  static Exception Native(string operation) { return new Win32Exception(Marshal.GetLastWin32Error(), operation); }
+  static string LongPath(string input) {
+    string path = Path.GetFullPath(input);
+    if (!File.Exists(path) && !Directory.Exists(path)) {
+      string parent = Path.GetDirectoryName(path);
+      if (String.IsNullOrEmpty(parent)) throw new ProofFailure("invalid-path", input);
+      return Path.Combine(LongPath(parent), Path.GetFileName(path));
+    }
+    StringBuilder output = new StringBuilder(32768);
+    uint n = GetLongPathNameW(path, output, (uint)output.Capacity);
+    if (n == 0 || n >= output.Capacity) throw Native("GetLongPathNameW");
+    return output.ToString().TrimEnd(Path.DirectorySeparatorChar);
+  }
+  static bool SamePath(string a, string b) { return String.Equals(LongPath(a), LongPath(b), StringComparison.OrdinalIgnoreCase); }
+  static bool Under(string path, string root) { return LongPath(path).StartsWith(LongPath(root) + "\\", StringComparison.OrdinalIgnoreCase); }
+  static string Image(IntPtr h) {
+    StringBuilder text = new StringBuilder(32768); uint n = (uint)text.Capacity;
+    if (!QueryFullProcessImageNameW(h, 0, text, ref n)) throw Native("QueryFullProcessImageNameW");
+    return LongPath(text.ToString());
+  }
+  static ulong Created(IntPtr h) {
+    FileTime c, x, k, u;
+    if (!GetProcessTimes(h, out c, out x, out k, out u)) throw Native("GetProcessTimes");
+    return c.Value;
+  }
+  static uint Wait(IntPtr h, uint ms, string name) {
+    uint value = WaitForSingleObject(h, ms);
+    if (value == Failed) throw Native("WaitForSingleObject(" + name + ")");
+    if (value != Object0 && value != Timeout) throw new ProofFailure("unexpected-wait", name + ": " + value);
+    return value;
+  }
+  static void Alive(IntPtr h, string name) {
+    if (Wait(h, 0, name) != Timeout) throw new ProofFailure(name + "-died", name + " exited before parent termination");
+  }
+  static string Hash(string filename) {
+    using (SHA256 hash = SHA256.Create())
+    using (FileStream input = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+      return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
+  }
+  static void Close(ref IntPtr h, string name, List<string> failures) {
+    if (h == IntPtr.Zero || h == Invalid) return;
+    IntPtr value = h; h = IntPtr.Zero;
+    if (!CloseHandle(value)) failures.Add(name + ": " + Native("CloseHandle").ToString());
+  }
+  static List<Entry> Entries() {
+    IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+    if (snapshot == Invalid) throw Native("CreateToolhelp32Snapshot");
+    Exception primary = null; List<Entry> result = new List<Entry>();
+    try {
+      Entry e = new Entry(); e.Size = (uint)Marshal.SizeOf(typeof(Entry));
+      if (!Process32FirstW(snapshot, ref e)) {
+        int error = Marshal.GetLastWin32Error();
+        if (error != 18) throw new Win32Exception(error, "Process32FirstW");
+      } else {
+        while (true) {
+          result.Add(e);
+          if (result.Count > 65536) throw new ProofFailure("snapshot-bound", "Too many processes");
+          if (!Process32NextW(snapshot, ref e)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error != 18) throw new Win32Exception(error, "Process32NextW");
+            break;
+          }
+        }
+      }
+    } catch (Exception ex) { primary = ex; }
+    if (!CloseHandle(snapshot)) {
+      Exception close = Native("CloseHandle(snapshot)");
+      if (primary != null) throw new AggregateException(primary, close);
+      throw close;
+    }
+    if (primary != null) throw primary;
+    return result;
+  }
+  static bool IsChild(uint pid, uint parent) {
+    foreach (Entry e in Entries()) if (e.Pid == pid) return e.Parent == parent;
+    return false;
+  }
+  static string CompleteControl(string filename) {
+    try {
+      using (FileStream input = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+        if (input.Length > 4096) throw new ProofFailure("control-bound", filename);
+        byte[] bytes = new byte[(int)input.Length]; int read = input.Read(bytes, 0, bytes.Length);
+        if (read != bytes.Length) return null;
+        string text = Encoding.ASCII.GetString(bytes);
+        return text.EndsWith("\r\n", StringComparison.Ordinal) ? text : null;
+      }
+    } catch (FileNotFoundException) { return null; }
+      catch (DirectoryNotFoundException) { return null; }
+  }
+  static uint Pid(string text, string name) {
+    uint value;
+    if (!Regex.IsMatch(text ?? "", "^[0-9]+\\r\\n$") || !UInt32.TryParse(text.Trim(), out value) || value == 0)
+      throw new ProofFailure("invalid-" + name, "Expected one complete decimal PID");
+    return value;
+  }
+  static void Atomic(string filename, string text) {
+    string pending = filename + ".pending-" + GetCurrentProcessId();
+    using (FileStream output = new FileStream(pending, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+      byte[] bytes = Utf8.GetBytes(text); output.Write(bytes, 0, bytes.Length); output.Flush(true);
+    }
+    File.Move(pending, filename);
+  }
+  public static void PublishResult(LifeDecoderObserverOptions o, string text) {
+    if (!Under(o.ResultFile, o.OwnedRoot)) throw new ProofFailure("invalid-scope", o.ResultFile);
+    Atomic(o.ResultFile, text + "\r\n");
+  }
+  static string Quote(string text) {
+    StringBuilder b = new StringBuilder("\"");
+    foreach (char c in text) {
+      if (c == '\\' || c == '"') b.Append('\\').Append(c);
+      else if (c < 32) b.Append("\\u").Append(((int)c).ToString("x4"));
+      else b.Append(c);
+    }
+    return b.Append('"').ToString();
+  }
+  static bool Equal(byte[] a, byte[] b) {
+    if (a.Length != b.Length) return false;
+    for (int i = 0; i < a.Length; ++i) if (a[i] != b[i]) return false;
+    return true;
+  }
+  static bool AnyNonzero(byte[] bytes) { foreach (byte b in bytes) if (b != 0) return true; return false; }
+  static byte[] ReadBlock(FileStream input, int size) {
+    byte[] output = new byte[size]; int total = 0;
+    while (total < size) { int n = input.Read(output, total, size - total); if (n == 0) break; total += n; }
+    if (total != size) throw new ProofFailure("partial-evidence-lost", "Expected complete prefix/tail read");
+    return output;
+  }
+  static void Partial(LifeDecoderObserverOptions o, LifeDecoderObserverResult r, bool afterExit) {
+    using (FileStream input = new FileStream(o.PayloadFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+      long length = input.Length;
+      if (length < o.Prefix.Length || length > o.ExpectedSize || !Equal(ReadBlock(input, o.Prefix.Length), o.Prefix))
+        throw new ProofFailure("partial-evidence-lost", "Expected exact written prefix in incomplete payload");
+      bool preallocated = length == o.ExpectedSize;
+      if (preallocated) {
+        input.Position = o.ExpectedSize - o.Tail.Length;
+        if (AnyNonzero(ReadBlock(input, o.Tail.Length)))
+          throw new ProofFailure("partial-evidence-lost", "Preallocated tail was written before native parent termination");
+      }
+      // Writes may finish between the pre-termination read and owner kill.
+      // Both observations independently prove incomplete trusted content; the
+      // controller's no-late-write comparison starts after both handles signal.
+      if (afterExit) { r.FinalPartialSize = length; r.FinalPreallocated = preallocated; }
+      else { r.PartialSize = length; r.Preallocated = preallocated; }
+    }
+  }
+  static uint MarkerPid(string filename) {
+    try {
+      byte[] bytes;
+      using (FileStream input = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+        if (input.Length > 4096) throw new ProofFailure("invalid-child-marker", "Invalid UTF16LE marker size");
+        bytes = new byte[(int)input.Length];
+        if (input.Read(bytes, 0, bytes.Length) != bytes.Length || bytes.Length % 2 != 0) return 0;
+      }
+      string text = new UnicodeEncoding(false, false, true).GetString(bytes);
+      if (!text.EndsWith("\r\n", StringComparison.Ordinal)) return 0;
+      if (!Regex.IsMatch(text, "^created\\t[0-9]+\\r\\n$"))
+        throw new ProofFailure("invalid-child-marker", "Expected exact UTF16LE created-tab-PID record");
+      return Pid(text.Substring(8), "child-pid");
+    } catch (FileNotFoundException) { return 0; }
+      catch (DirectoryNotFoundException) { return 0; }
+  }
+  static void Validate(LifeDecoderObserverOptions o) {
+    if (o.Mode != "PartialKill" && o.Mode != "MarkerKill" && o.Mode != "MarkerExit")
+      throw new ProofFailure("invalid-config", "Expected explicit PartialKill, MarkerKill or MarkerExit mode");
+    if (o.Mode == "PartialKill" && (o.Prefix == null || o.Tail == null || o.Prefix.Length != 4096 || o.Tail.Length != 4096 ||
+        o.ExpectedSize != 67108864 || !AnyNonzero(o.Prefix) || !AnyNonzero(o.Tail)))
+      throw new ProofFailure("invalid-config", "Expected actual 64MiB / 4KiB prefix+tail fixture");
+    if (!Regex.IsMatch(o.DecoderSha256 ?? "", "^[0-9a-f]{64}$") || (o.Mode != "MarkerExit" && String.IsNullOrEmpty(o.RequestToken)))
+      throw new ProofFailure("invalid-config", "Missing trusted decoder hash or kill token");
+    foreach (string path in new string[] { o.ReadyFile, o.ParentPidFile, o.ObservedFile, o.ResultFile, o.ParentImage, o.DecoderRoot })
+      if (!Under(path, o.OwnedRoot)) throw new ProofFailure("invalid-scope", path);
+    if (o.Mode == "PartialKill" && !Under(o.PayloadFile, o.OwnedRoot)) throw new ProofFailure("invalid-scope", o.PayloadFile);
+    if (o.Mode != "PartialKill" && String.IsNullOrEmpty(o.ChildPidFile)) throw new ProofFailure("invalid-config", "Marker modes require native child marker");
+    if (!String.IsNullOrEmpty(o.ChildPidFile) && !Under(o.ChildPidFile, o.OwnedRoot))
+      throw new ProofFailure("invalid-scope", o.ChildPidFile);
+    foreach (string path in new string[] { o.ReadyFile, o.ParentPidFile, o.ObservedFile, o.ResultFile })
+      if (File.Exists(path)) throw new ProofFailure("stale-control", path);
+    if (!String.IsNullOrEmpty(o.ChildPidFile) && File.Exists(o.ChildPidFile))
+      throw new ProofFailure("stale-control", o.ChildPidFile);
+    if (o.Mode == "MarkerExit") {
+      if (!Under(o.AckFile, o.OwnedRoot) || !SamePath(o.AckFile, o.ChildPidFile + ".ack"))
+        throw new ProofFailure("invalid-ack", "Expected owned child marker .ack sibling");
+      if (File.Exists(o.AckFile)) throw new ProofFailure("stale-control", o.AckFile);
+    } else {
+      if (!Under(o.KillRequestFile, o.OwnedRoot)) throw new ProofFailure("invalid-scope", o.KillRequestFile);
+      if (File.Exists(o.KillRequestFile)) throw new ProofFailure("stale-control", o.KillRequestFile);
+    }
+  }
+  static void CleanupParent(IntPtr parent, LifeDecoderObserverResult r, List<string> failures) {
+    try {
+      if (Wait(parent, 0, "cleanup-parent") == Timeout) {
+        if (!TerminateProcess(parent, 137)) throw Native("TerminateProcess(cleanup parent)");
+        r.CleanupParentKilled = true;
+        if (Wait(parent, 10000, "cleanup-parent") != Object0) throw new ProofFailure("cleanup-parent-timeout", "Parent did not exit");
+      }
+    } catch (Exception ex) { failures.Add("parent teardown: " + ex.ToString()); }
+  }
+  static void CleanupDecoder(IntPtr child, LifeDecoderObserverResult r, List<string> failures) {
+    IntPtr terminate = IntPtr.Zero;
+    try {
+      if (Wait(child, 10000, "cleanup-decoder") == Object0) return;
+      terminate = OpenProcess(QuerySyncTerminate, false, r.DecoderPid);
+      if (terminate == IntPtr.Zero) throw Native("OpenProcess(cleanup decoder)");
+      if (Created(terminate).ToString() != r.DecoderCreationTime || !SamePath(Image(terminate), r.DecoderImage))
+        throw new ProofFailure("cleanup-identity", "Decoder identity changed");
+      if (!TerminateProcess(terminate, 137)) throw Native("TerminateProcess(cleanup decoder)");
+      r.CleanupDecoderKilled = true;
+      if (Wait(child, 10000, "cleanup-decoder") != Object0) throw new ProofFailure("cleanup-decoder-timeout", "Decoder did not exit");
+    } catch (Exception ex) { failures.Add("decoder teardown: " + ex.ToString()); }
+    finally { Close(ref terminate, "decoder teardown process handle", failures); }
+  }
+
+  public static LifeDecoderObserverResult Run(LifeDecoderObserverOptions o) {
+    LifeDecoderObserverResult r = new LifeDecoderObserverResult();
+    r.ParentWait = r.DecoderWait = Failed;
+    List<string> cleanup = new List<string>(); IntPtr parent = IntPtr.Zero, child = IntPtr.Zero;
+    bool parentVerified = false, childVerified = false;
+    try {
+      Validate(o);
+      // Force native snapshot and crypto startup before controller launches NSIS.
+      Entries(); using (SHA256 warm = SHA256.Create()) { warm.ComputeHash(new byte[1]); }
+      Atomic(o.ReadyFile, "ready\r\n");
+      Stopwatch deadline = Stopwatch.StartNew(); string text;
+      while ((text = CompleteControl(o.ParentPidFile)) == null) {
+        if (deadline.ElapsedMilliseconds > 30000) throw new ProofFailure("missing-parent", "No complete parent PID record");
+        Thread.SpinWait(64);
+      }
+      r.ParentPid = Pid(text, "parent-pid");
+      parent = OpenProcess(QuerySyncTerminate, false, r.ParentPid);
+      if (parent == IntPtr.Zero) throw Native("OpenProcess(NSIS)");
+      Alive(parent, "parent"); r.ParentImage = Image(parent); r.ParentCreationTime = Created(parent).ToString();
+      if (!SamePath(r.ParentImage, o.ParentImage)) throw new ProofFailure("parent-identity", "Unexpected NSIS executable");
+      parentVerified = true; deadline.Restart();
+      while (child == IntPtr.Zero) {
+        Alive(parent, "parent");
+        uint candidate = 0;
+        if (!String.IsNullOrEmpty(o.ChildPidFile)) {
+          if (o.Mode != "PartialKill") candidate = MarkerPid(o.ChildPidFile);
+          else { string marker = CompleteControl(o.ChildPidFile); if (marker != null) candidate = Pid(marker, "child-pid"); }
+        } else {
+          foreach (Entry e in Entries()) if (e.Parent == r.ParentPid && String.Equals(e.Name, Path.GetFileName(o.DecoderSuffix), StringComparison.OrdinalIgnoreCase)) {
+            if (candidate != 0) throw new ProofFailure("multiple-decoders", "More than one matching direct child");
+            candidate = e.Pid;
+          }
+        }
+        if (candidate != 0) {
+          child = OpenProcess(QuerySync, false, candidate);
+          if (child == IntPtr.Zero) throw new ProofFailure("decoder-open-race", Native("OpenProcess(decoder)").ToString());
+          r.DecoderPid = candidate; Alive(child, "decoder"); r.DecoderImage = Image(child); r.DecoderCreationTime = Created(child).ToString();
+          if (!Under(r.DecoderImage, o.DecoderRoot) || !r.DecoderImage.EndsWith("\\" + o.DecoderSuffix, StringComparison.OrdinalIgnoreCase))
+            throw new ProofFailure("decoder-identity", "Unexpected decoder image location");
+          r.DecoderSha256 = Hash(r.DecoderImage);
+          if (!String.Equals(r.DecoderSha256, o.DecoderSha256, StringComparison.Ordinal)) throw new ProofFailure("decoder-hash", "Decoder image hash mismatch");
+          if (!IsChild(r.DecoderPid, r.ParentPid)) throw new ProofFailure("decoder-parent-race", "Pinned decoder no longer has expected parent");
+          Alive(parent, "parent"); Alive(child, "decoder"); childVerified = true;
+        }
+        if (deadline.ElapsedMilliseconds > 30000) throw new ProofFailure("missing-decoder", "No matching pinned decoder child");
+        if (child == IntPtr.Zero) Thread.SpinWait(64);
+      }
+      Atomic(o.ObservedFile, "{\"parentPid\":" + r.ParentPid + ",\"decoderPid\":" + r.DecoderPid +
+        ",\"parentCreationTime\":" + Quote(r.ParentCreationTime) + ",\"decoderCreationTime\":" + Quote(r.DecoderCreationTime) +
+        ",\"decoderImage\":" + Quote(r.DecoderImage) + ",\"decoderSha256\":" + Quote(r.DecoderSha256) + "}\r\n");
+      if (o.Mode == "MarkerExit") {
+        Alive(child, "decoder"); Alive(parent, "parent");
+        Atomic(o.AckFile, "LIFE_LAUNCHER_OBSERVER_READY_V1\n");
+      } else {
+        deadline.Restart();
+        while ((text = CompleteControl(o.KillRequestFile)) == null) {
+          Alive(parent, "parent"); Alive(child, "decoder");
+          if (deadline.ElapsedMilliseconds > 30000) throw new ProofFailure("missing-kill-request", "No actual partial-content kill request");
+          Thread.SpinWait(64);
+        }
+        if (!String.Equals(text, o.RequestToken + "\r\n", StringComparison.Ordinal)) throw new ProofFailure("invalid-kill-request", "Wrong request token");
+        if (o.Mode == "PartialKill") Partial(o, r, false);
+        Alive(child, "decoder"); Alive(parent, "parent");
+        if (!TerminateProcess(parent, 137)) throw Native("TerminateProcess(NSIS)");
+        r.ParentKilled = true;
+      }
+      r.ParentWait = Wait(parent, 10000, "parent");
+      if (r.ParentWait != Object0) throw new ProofFailure("parent-wait-timeout", "NSIS did not exit within native observer wait");
+      r.DecoderWait = Wait(child, 10000, "decoder");
+      if (r.DecoderWait != Object0) throw new ProofFailure("decoder-wait-timeout", "Decoder survived installer/job owner termination");
+      if (!GetExitCodeProcess(parent, out r.ParentExit)) throw Native("GetExitCodeProcess(parent)");
+      if (!GetExitCodeProcess(child, out r.DecoderExit)) throw Native("GetExitCodeProcess(decoder)");
+      if (o.Mode == "MarkerExit" && r.ParentExit != 77)
+        throw new ProofFailure("parent-exit-code", "Expected exact terminal accounting-failure exit 77, got " + r.ParentExit);
+      if (o.Mode == "PartialKill") Partial(o, r, true);
+      r.Success = true;
+    } catch (Exception ex) {
+      ProofFailure proof = ex as ProofFailure;
+      r.FailureKind = proof == null ? "native-or-io-failure" : proof.Kind; r.Failure = ex.ToString();
+      // Teardown is separate evidence and can never turn an inconclusive/raced
+      // attempt into a passed lifetime proof. Never kill an unverified parent.
+      if (parentVerified) CleanupParent(parent, r, cleanup);
+      if (childVerified) CleanupDecoder(child, r, cleanup);
+    } finally {
+      Close(ref child, "pinned decoder process handle", cleanup);
+      Close(ref parent, "pinned NSIS process handle", cleanup);
+      r.CleanupFailures = cleanup.ToArray();
+      if (cleanup.Count != 0) { r.Success = false; if (r.FailureKind == null) { r.FailureKind = "cleanup-failure"; r.Failure = String.Join("\n", cleanup.ToArray()); } }
+    }
+    return r;
+  }
+}
+`
+
+const decoderObserverScript =
+  [
+    'param([Parameter(Mandatory)][string]$ConfigPath)',
+    "$ErrorActionPreference = 'Stop'",
+    'Set-StrictMode -Version Latest',
+    '$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json',
+    "Add-Type -Path (Join-Path $PSScriptRoot 'life-modern-decoder-observer.cs')",
+    '$options = [LifeDecoderObserverOptions]::new()',
+    "foreach ($name in @('OwnedRoot','ReadyFile','ParentPidFile','ObservedFile','ResultFile','ParentImage','DecoderRoot','DecoderSuffix','DecoderSha256','Mode')) {",
+    '  $options.$name = [string]$config.$name',
+    '}',
+    "if ($config.PSObject.Properties.Name -contains 'ChildPidFile') { $options.ChildPidFile = [string]$config.ChildPidFile }",
+    "if ($options.Mode -ceq 'MarkerExit') { $options.AckFile = [string]$config.AckFile }",
+    'else {',
+    '  $options.KillRequestFile = [string]$config.KillRequestFile',
+    '  $options.RequestToken = [string]$config.RequestToken',
+    '}',
+    "if ($options.Mode -ceq 'PartialKill') {",
+    '  $options.PayloadFile = [string]$config.PayloadFile',
+    '  $options.ExpectedSize = [Int64]$config.ExpectedSize',
+    '  $options.Prefix = [Convert]::FromBase64String([string]$config.PrefixBase64)',
+    '  $options.Tail = [Convert]::FromBase64String([string]$config.TailBase64)',
+    '}',
+    '$result = [LifeDecoderObserver]::Run($options)',
+    '$json = ConvertTo-Json -InputObject $result -Depth 8 -Compress',
+    '[LifeDecoderObserver]::PublishResult($options, $json)',
+    'if (-not $result.Success) { exit 7 }',
+  ].join('\n') + '\n'
+
+const fakeDecoderNative = String.raw`using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+// Scratch-only executable and shared observer source. Never ship this fixture.
+public static class LifeFixtureNative
+{
+    [StructLayout(LayoutKind.Sequential)] public struct FileTime { public uint Low, High; }
+    [StructLayout(LayoutKind.Sequential)] public struct FileInfo {
+        public uint Attributes; public FileTime Created, Accessed, Written;
+        public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern uint GetFullPathNameW(string path, uint size, StringBuilder buffer, IntPtr part);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    internal static extern SafeWaitHandle OpenProcess(uint rights, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    internal static extern bool GetProcessTimes(SafeWaitHandle process, out FileTime created, out FileTime exited, out FileTime kernel, out FileTime user);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    internal static extern bool QueryFullProcessImageNameW(SafeWaitHandle process, uint flags, StringBuilder name, ref uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    internal static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    internal static extern bool GetExitCodeProcess(SafeWaitHandle process, out uint code);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    internal static extern bool TerminateProcess(SafeWaitHandle process, uint code);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInfo info);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern uint GetFileAttributesW(string path);
+
+    public static string Normalize(string path) {
+        if (String.IsNullOrEmpty(path) || path.Length < 3 || !Char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\') throw new InvalidOperationException("Drive-absolute path required.");
+        for (int i=0; i<path.Length; i++) if (path[i] < 32 || path[i] == '*' || path[i] == '?' || path[i] == '"' || (path[i] == ':' && i != 1)) throw new InvalidOperationException("Unsafe fixture path.");
+        StringBuilder buffer=new StringBuilder(32768);
+        uint count=GetFullPathNameW(path, (uint)buffer.Capacity, buffer, IntPtr.Zero);
+        int error=Marshal.GetLastWin32Error();
+        if (count == 0) throw new Win32Exception(error, "GetFullPathNameW");
+        if (count >= buffer.Capacity || count != buffer.Length) throw new InvalidOperationException("Unexpected normalized path length.");
+        return buffer.ToString().TrimEnd('\\');
+    }
+    public static string Owned(string root, string path) {
+        root=Normalize(root); path=Normalize(path);
+        if (root.Length <= 3 || !path.StartsWith(root+"\\", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Fixture path escaped owned root.");
+        return path;
+    }
+    public static void OrdinaryDirectory(string root, string path) {
+        root=Normalize(root); path=Normalize(path);
+        if (!String.Equals(root,path,StringComparison.OrdinalIgnoreCase)) path=Owned(root,path);
+        for (;;) {
+            uint attrs=GetFileAttributesW(path); int error=Marshal.GetLastWin32Error();
+            if (attrs == UInt32.MaxValue) throw new Win32Exception(error,"GetFileAttributesW(directory)");
+            if ((attrs & 0x410) != 0x10) throw new InvalidOperationException("Fixture directory must be ordinary.");
+            if (String.Equals(root,path,StringComparison.OrdinalIgnoreCase)) break;
+            int slash=path.LastIndexOf('\\');
+            if (slash <= 2) throw new InvalidOperationException("Unexpected directory ancestry.");
+            path=path.Substring(0,slash);
+        }
+    }
+    public static string FileIdentity(string path) {
+        using (SafeFileHandle file=CreateFileW(path,0x80,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+            int error=Marshal.GetLastWin32Error();
+            if (file.IsInvalid) throw new Win32Exception(error,"CreateFileW(identity)");
+            FileInfo info;
+            if (!GetFileInformationByHandle(file,out info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"GetFileInformationByHandle");
+            if ((info.Attributes & 0x410) != 0) throw new InvalidOperationException("Fixture identity must be ordinary file.");
+            return info.Volume.ToString("x8")+":"+info.IndexHigh.ToString("x8")+info.IndexLow.ToString("x8");
+        }
+    }
+    public static long Creation(SafeWaitHandle process) {
+        FileTime created,exited,kernel,user;
+        if (!GetProcessTimes(process,out created,out exited,out kernel,out user)) throw new Win32Exception(Marshal.GetLastWin32Error(),"GetProcessTimes");
+        return unchecked((long)(((ulong)created.High << 32) | created.Low));
+    }
+    public static string Image(SafeWaitHandle process) {
+        StringBuilder image=new StringBuilder(32768); uint count=(uint)image.Capacity;
+        if (!QueryFullProcessImageNameW(process,0,image,ref count)) throw new Win32Exception(Marshal.GetLastWin32Error(),"QueryFullProcessImageNameW");
+        if (count == 0 || count >= image.Capacity || count != image.Length) throw new InvalidOperationException("Unexpected image length.");
+        return image.ToString();
+    }
+    public static string Quote(string value) {
+        StringBuilder result=new StringBuilder("\""); int slashes=0;
+        foreach(char c in value) {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') { result.Append('\\',slashes*2+1); result.Append(c); }
+            else { result.Append('\\',slashes); result.Append(c); }
+            slashes=0;
+        }
+        result.Append('\\',slashes*2); result.Append('"'); return result.ToString();
+    }
+    public static string Witness(uint pid, long created, string image) {
+        return "pid="+pid.ToString(CultureInfo.InvariantCulture)+"\ncreation="+created.ToString(CultureInfo.InvariantCulture)+"\nimage="+image+"\n";
+    }
+    public static void AtomicWitness(string filename,string text) {
+        string temporary=filename+".tmp";
+        using (FileStream stream=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.Read)) {
+            byte[] bytes=new UTF8Encoding(false,true).GetBytes(text); stream.Write(bytes,0,bytes.Length); stream.Flush(true);
+        }
+        File.Move(temporary,filename);
+    }
+}
+
+// Keep this instance alive across acknowledgment, raw Launch completion and
+// the nonblocking exit check. Decimal creation strings avoid JS 53-bit loss.
+public sealed class LifeFixturePinnedProcess : IDisposable
+{
+    private SafeWaitHandle handle;
+    public readonly uint Pid;
+    public readonly string Creation;
+    public readonly string Image;
+    public readonly string ImageIdentity;
+    public LifeFixturePinnedProcess(uint pid,string expectedCreation,string expectedImage) {
+        handle=LifeFixtureNative.OpenProcess(0x00101001,false,pid);
+        int error=Marshal.GetLastWin32Error();
+        if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(error,"OpenProcess(pin)"); }
+        try {
+            Pid=pid; Creation=LifeFixtureNative.Creation(handle).ToString(CultureInfo.InvariantCulture);
+            Image=LifeFixtureNative.Image(handle); ImageIdentity=LifeFixtureNative.FileIdentity(Image);
+            if (Creation != expectedCreation || ImageIdentity != LifeFixtureNative.FileIdentity(expectedImage)) throw new InvalidOperationException("Pinned process identity mismatch.");
+        } catch { handle.Dispose(); throw; }
+    }
+    public bool IsAlive() {
+        uint state=LifeFixtureNative.WaitForSingleObject(handle,0);
+        if (state == 258) return true;
+        if (state == 0) return false;
+        if (state == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(),"WaitForSingleObject(pin)");
+        throw new InvalidOperationException("Unexpected process wait state.");
+    }
+    public uint RequireExitedNow() {
+        if (IsAlive()) throw new InvalidOperationException("Pinned process remains alive at return boundary.");
+        uint code;
+        if (!LifeFixtureNative.GetExitCodeProcess(handle,out code)) throw new Win32Exception(Marshal.GetLastWin32Error(),"GetExitCodeProcess");
+        if (code == 259) throw new InvalidOperationException("Fixture process reported STILL_ACTIVE.");
+        return code;
+    }
+    public void TerminateForCleanup() {
+        if (IsAlive() && !LifeFixtureNative.TerminateProcess(handle,97)) throw new Win32Exception(Marshal.GetLastWin32Error(),"TerminateProcess(cleanup)");
+        uint state=LifeFixtureNative.WaitForSingleObject(handle,10000);
+        if (state != 0) throw new InvalidOperationException("Pinned cleanup process did not terminate.");
+    }
+    public void Dispose() { if (handle != null) { handle.Dispose(); handle=null; } }
+}
+
+public static class LifeFakeDecoder
+{
+    private static readonly string[] FixedArgs={"x","-t7z","-y","-aoa","-bd","-bb0","-bso0","-bse0","-bsp0"};
+    public static int Main(string[] args) {
+        try {
+            if (args.Length == 4 && args[0] == "--child") return Child(args[1],args[2],args[3]);
+            if (args.Length != 12) throw new InvalidOperationException("Expected exactly twelve decoder arguments.");
+            for(int i=0;i<FixedArgs.Length;i++) if(args[i] != FixedArgs[i]) throw new InvalidOperationException("Unexpected decoder switch "+i);
+            if (!args[9].StartsWith("-o",StringComparison.Ordinal) || args[10] != "--") throw new InvalidOperationException("Unexpected output/archive arguments.");
+            Dictionary<string,string> config=new Dictionary<string,string>(StringComparer.Ordinal);
+            foreach(string line in File.ReadAllLines(args[11],new UTF8Encoding(false,true))) {
+                if (line.Length == 0) continue; int equals=line.IndexOf('=');
+                if (equals <= 0) throw new InvalidOperationException("Malformed fixture config.");
+                config.Add(line.Substring(0,equals),line.Substring(equals+1));
+            }
+            if (config.Count != 4 || config["mode"] != "spawn-descendant-nonzero") throw new InvalidOperationException("Unexpected fixture config.");
+            string root=LifeFixtureNative.Normalize(config["root"]);
+            string archive=LifeFixtureNative.Owned(root,args[11]);
+            string output=LifeFixtureNative.Owned(root,args[9].Substring(2));
+            string witness=LifeFixtureNative.Owned(root,config["witness"]);
+            LifeFixtureNative.OrdinaryDirectory(root,root);
+            LifeFixtureNative.OrdinaryDirectory(root,output);
+            LifeFixtureNative.OrdinaryDirectory(root,witness.Substring(0,witness.LastIndexOf('\\')));
+            LifeFixtureNative.FileIdentity(archive);
+            // Use the owned caller's spelling for launch paths. Native image
+            // queries may expand an 8.3 ancestor; compare physical identity.
+            string self=LifeFixtureNative.Owned(root,config["exe"]);
+            LifeFixtureNative.OrdinaryDirectory(root,self.Substring(0,self.LastIndexOf('\\')));
+            LifeFixtureNative.OrdinaryDirectory(root,archive.Substring(0,archive.LastIndexOf('\\')));
+            uint pid=unchecked((uint)Process.GetCurrentProcess().Id);
+            using (SafeWaitHandle current=LifeFixtureNative.OpenProcess(0x00101000,false,pid)) {
+                if(current.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(),"OpenProcess(self)");
+                string image=LifeFixtureNative.Image(current);
+                if(LifeFixtureNative.FileIdentity(image) != LifeFixtureNative.FileIdentity(self)) throw new InvalidOperationException("Owned executable identity mismatch.");
+                LifeFixtureNative.AtomicWitness(witness+".parent-started",LifeFixtureNative.Witness(pid,LifeFixtureNative.Creation(current),image));
+            }
+            ProcessStartInfo start=new ProcessStartInfo(self,"--child "+LifeFixtureNative.Quote(root)+" "+LifeFixtureNative.Quote(witness)+" "+LifeFixtureNative.Quote(output));
+            start.UseShellExecute=false; start.CreateNoWindow=true;
+            using(Process child=Process.Start(start)) {
+                if(child == null) throw new InvalidOperationException("Child process did not start.");
+                Stopwatch deadline=Stopwatch.StartNew(); string childStarted=witness+".child-started";
+                while(!File.Exists(childStarted)) {
+                    if(child.HasExited || deadline.ElapsedMilliseconds > 30000) throw new InvalidOperationException("Child startup handshake failed.");
+                    Thread.Sleep(5);
+                }
+                string identity=File.ReadAllText(childStarted,new UTF8Encoding(false,true));
+                LifeFixtureNative.AtomicWitness(witness+".parent-ready",identity);
+                string ack=witness+".ack";
+                while(!File.Exists(ack)) {
+                    if(child.HasExited || deadline.ElapsedMilliseconds > 30000) throw new InvalidOperationException("Node acknowledgment handshake failed.");
+                    Thread.Sleep(5);
+                }
+                if(File.ReadAllText(ack,new UTF8Encoding(false,true)) != identity || child.HasExited) throw new InvalidOperationException("Acknowledgment identity mismatch or child died early.");
+                return 9;
+            }
+        } catch(Exception error) { Console.Error.WriteLine(error.ToString()); return 91; }
+    }
+    private static int Child(string rawRoot,string rawWitness,string rawOutput) {
+        string root=LifeFixtureNative.Normalize(rawRoot);
+        string witness=LifeFixtureNative.Owned(root,rawWitness);
+        string output=LifeFixtureNative.Owned(root,rawOutput);
+        LifeFixtureNative.OrdinaryDirectory(root,root);
+        LifeFixtureNative.OrdinaryDirectory(root,output);
+        LifeFixtureNative.OrdinaryDirectory(root,witness.Substring(0,witness.LastIndexOf('\\')));
+        uint pid=unchecked((uint)Process.GetCurrentProcess().Id);
+        using(SafeWaitHandle current=LifeFixtureNative.OpenProcess(0x00101000,false,pid)) {
+            if(current.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(),"OpenProcess(child-self)");
+            string identity=LifeFixtureNative.Witness(pid,LifeFixtureNative.Creation(current),LifeFixtureNative.Image(current));
+            string sentinel=LifeFixtureNative.Owned(root,output+"\\descendant-writes.bin");
+            byte[] bytes=Encoding.ASCII.GetBytes("LIFE_FIXTURE_CHILD\n");
+            using(FileStream stream=new FileStream(sentinel,FileMode.CreateNew,FileAccess.Write,FileShare.ReadWrite)) {
+                stream.Write(bytes,0,bytes.Length); stream.Flush(true);
+                LifeFixtureNative.AtomicWitness(witness+".pid",pid.ToString(CultureInfo.InvariantCulture));
+                LifeFixtureNative.AtomicWitness(witness+".child-started",identity);
+                Stopwatch safety=Stopwatch.StartNew();
+                while(safety.ElapsedMilliseconds < 90000) { stream.Write(bytes,0,bytes.Length); stream.Flush(true); Thread.Sleep(10); }
+            }
+        }
+        return 93;
+    }
+}
+`
+
+const fakeDecoderCompileScript =
+  [
+    'param([Parameter(Mandatory=$true)][string]$OwnedRoot,[Parameter(Mandatory=$true)][string]$Source,[Parameter(Mandatory=$true)][string]$Output)',
+    "$ErrorActionPreference = 'Stop'",
+    'Set-StrictMode -Version Latest',
+    "if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop') { throw 'Fixture executable compilation requires Windows PowerShell 5 Desktop.' }",
+    "$rootPath = [IO.Path]::GetFullPath($OwnedRoot).TrimEnd([char]'\\')",
+    '$sourcePath = [IO.Path]::GetFullPath($Source)',
+    '$outputPath = [IO.Path]::GetFullPath($Output)',
+    "if ($rootPath.Length -le 3 -or -not $sourcePath.StartsWith($rootPath + '\\',[StringComparison]::OrdinalIgnoreCase) -or -not $outputPath.StartsWith($rootPath + '\\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Compiler source and executable must stay inside owned scratch.' }",
+    "if (-not $outputPath.EndsWith('.exe',[StringComparison]::OrdinalIgnoreCase) -or [IO.File]::Exists($outputPath)) { throw 'Compiler output must be a fresh owned executable.' }",
+    "Add-Type -Path $sourcePath -OutputAssembly $outputPath -OutputType ConsoleApplication -ReferencedAssemblies 'System.dll','System.Core.dll'",
+    "if (-not [IO.File]::Exists($outputPath)) { throw 'Fixture compiler did not create the executable.' }",
+    '[PSCustomObject]@{ Source = $sourcePath; Output = $outputPath } | ConvertTo-Json -Compress',
+  ].join('\n') + '\n'
+
+const fakeDecoderObserverScript =
+  [
+    "$ErrorActionPreference = 'Stop'",
+    'Set-StrictMode -Version Latest',
+    "if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop') { throw 'Observer requires Windows PowerShell 5 Desktop.' }",
+    '# All values are literal environment data passed to this child, never command text.',
+    "$rootInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_ROOT')",
+    "$sourceInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_SOURCE')",
+    "$witnessInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_WITNESS')",
+    "$exeInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_EXE')",
+    "$outputInput = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_OBSERVER_OUTPUT')",
+    "foreach ($value in @($rootInput,$sourceInput,$witnessInput,$exeInput,$outputInput)) { if ([String]::IsNullOrEmpty($value)) { throw 'Missing literal observer environment.' } }",
+    "$preRoot = [IO.Path]::GetFullPath($rootInput).TrimEnd([char]'\\')",
+    '$preSource = [IO.Path]::GetFullPath($sourceInput)',
+    "if ($preRoot.Length -le 3 -or -not $preSource.StartsWith($preRoot + '\\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Observer C# source escaped owned scratch.' }",
+    'Add-Type -Path $preSource',
+    '$root = [LifeFixtureNative]::Normalize($rootInput)',
+    '$source = [LifeFixtureNative]::Owned($root,$sourceInput)',
+    '$witness = [LifeFixtureNative]::Owned($root,$witnessInput)',
+    '$exe = [LifeFixtureNative]::Owned($root,$exeInput)',
+    '$output = [LifeFixtureNative]::Owned($root,$outputInput)',
+    '[LifeFixtureNative]::OrdinaryDirectory($root,$root)',
+    '[LifeFixtureNative]::OrdinaryDirectory($root,$output)',
+    "[LifeFixtureNative]::OrdinaryDirectory($root,$witness.Substring(0,$witness.LastIndexOf('\\')))",
+    "[LifeFixtureNative]::OrdinaryDirectory($root,$exe.Substring(0,$exe.LastIndexOf('\\')))",
+    '[LifeFixtureNative]::FileIdentity($source) | Out-Null',
+    '[LifeFixtureNative]::FileIdentity($exe) | Out-Null',
+    '$utf8 = [Text.UTF8Encoding]::new($false,$true)',
+    '$pinned = $null',
+    '$primary = $null',
+    '$cleanup = $null',
+    'function Get-SentinelSnapshot([String]$filename) {',
+    '  $bytes = [IO.File]::ReadAllBytes($filename)',
+    '  $digest = [Security.Cryptography.SHA256]::Create()',
+    "  try { $hash = [BitConverter]::ToString($digest.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() } finally { $digest.Dispose() }",
+    '  [PSCustomObject]@{ Bytes = $bytes.Length; Sha256 = $hash }',
+    '}',
+    'try {',
+    '  $clock = [Diagnostics.Stopwatch]::StartNew()',
+    "  $started = $witness + '.child-started'",
+    '  while (-not [IO.File]::Exists($started)) {',
+    "    if ($clock.ElapsedMilliseconds -gt 30000) { throw 'Timed out waiting for child identity witness.' }",
+    '    [Threading.Thread]::Sleep(5)',
+    '  }',
+    '  $identityText = [IO.File]::ReadAllText($started,$utf8)',
+    '  $identity = @{}',
+    '  foreach ($line in $identityText.Split([char]"`n")) {',
+    '    if ($line.Length -eq 0) { continue }',
+    "    $equals = $line.IndexOf('=')",
+    "    if ($equals -le 0) { throw 'Malformed child identity witness.' }",
+    '    $key = $line.Substring(0,$equals)',
+    "    if ($identity.ContainsKey($key)) { throw 'Repeated child identity key.' }",
+    '    $identity.Add($key,$line.Substring($equals + 1))',
+    '  }',
+    "  if ($identity.Count -ne 3 -or -not $identity.ContainsKey('pid') -or -not $identity.ContainsKey('creation') -or -not $identity.ContainsKey('image')) { throw 'Incomplete child identity witness.' }",
+    "  if ($identity.pid -cnotmatch '^[1-9][0-9]*$' -or $identity.creation -cnotmatch '^[1-9][0-9]*$') { throw 'PID and creation must be positive exact decimal strings.' }",
+    "  if ([IO.File]::ReadAllText($witness + '.pid',$utf8) -cne $identity.pid) { throw 'Plain native PID marker does not match pinned witness.' }",
+    '  $pinned = [LifeFixturePinnedProcess]::new([UInt32]::Parse($identity.pid,[Globalization.CultureInfo]::InvariantCulture),[String]$identity.creation,[String]$exe)',
+    "  if ($pinned.Image -cne $identity.image -or -not $pinned.IsAlive()) { throw 'Pinned child identity changed or child is already terminated.' }",
+    "  $sentinel = [LifeFixtureNative]::Owned($root,$output + '\\descendant-writes.bin')",
+    '  $firstLength = ([IO.FileInfo]::new($sentinel)).Length',
+    "  if ($firstLength -le 0) { throw 'Child did not flush first sentinel record.' }",
+    '  $progress = [Diagnostics.Stopwatch]::StartNew()',
+    '  while (([IO.FileInfo]::new($sentinel)).Length -le $firstLength) {',
+    "    if (-not $pinned.IsAlive() -or $progress.ElapsedMilliseconds -gt 5000) { throw 'Pinned live child did not continue writing before acknowledgment.' }",
+    '    [Threading.Thread]::Sleep(5)',
+    '  }',
+    '  $ready = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ImageIdentity = $pinned.ImageIdentity; FirstBytes = $firstLength; ProgressBytes = ([IO.FileInfo]::new($sentinel)).Length }',
+    "  [LifeFixtureNative]::AtomicWitness($witness + '.observer-ready.json',(ConvertTo-Json -InputObject $ready -Depth 4 -Compress))",
+    "  if (-not $pinned.IsAlive()) { throw 'Child died before acknowledgment.' }",
+    "  [LifeFixtureNative]::AtomicWitness($witness + '.ack',$identityText)",
+    "  # The fixture's immediate native post-Launch check must precede Node creating",
+    '  # this marker. This observer checks again without a blocking exit wait.',
+    "  $completion = $witness + '.launch-complete'",
+    '  while (-not [IO.File]::Exists($completion)) {',
+    "    if ($clock.ElapsedMilliseconds -gt 60000) { throw 'Timed out waiting for raw Launch completion.' }",
+    '    [Threading.Thread]::Sleep(5)',
+    '  }',
+    '  if ([IO.File]::ReadAllText($completion,$utf8) -cne "error`n") { throw \'Launch completion marker must report exact error.\' }',
+    '  $exitCode = $pinned.RequireExitedNow()',
+    "  if ($exitCode -eq 91 -or $exitCode -eq 93) { throw 'Child fixture failed or reached its watchdog instead of launcher cleanup.' }",
+    '  $before = Get-SentinelSnapshot $sentinel',
+    '  [Threading.Thread]::Sleep(25)',
+    '  $after = Get-SentinelSnapshot $sentinel',
+    "  if ($before.Bytes -ne $after.Bytes -or $before.Sha256 -cne $after.Sha256 -or $pinned.IsAlive()) { throw 'Terminated child output changed after completed wait.' }",
+    '  $finished = [PSCustomObject]@{ Pid = $pinned.Pid; Creation = $pinned.Creation; Image = $pinned.Image; ExitCode = $exitCode; Bytes = $after.Bytes; Sha256 = $after.Sha256 }',
+    "  [LifeFixtureNative]::AtomicWitness($witness + '.observer-finished.json',(ConvertTo-Json -InputObject $finished -Depth 4 -Compress))",
+    '  [Console]::WriteLine((ConvertTo-Json -InputObject $finished -Depth 4 -Compress))',
+    '} catch { $primary = $_.Exception; [Console]::Error.WriteLine($primary.ToString()) }',
+    'finally {',
+    '  if ($null -ne $pinned) {',
+    "    if ($null -ne $primary) { try { $pinned.TerminateForCleanup() } catch { $cleanup = $_.Exception; [Console]::Error.WriteLine('Observer cleanup failure: ' + $cleanup.ToString()) } }",
+    '    $pinned.Dispose()',
+    '  }',
+    '}',
+    'if ($null -ne $primary -or $null -ne $cleanup) { exit 1 }',
+  ].join('\n') + '\n'
+
+const directoryMutationNative = String.raw`using System;
+using System.ComponentModel;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+// Scratch-only diagnostic: report actual results, including successful mutation.
+public static class LifeFixtureDirectoryMutation
+{
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern uint GetFullPathNameW(string path,uint size,StringBuilder result,IntPtr part);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern uint GetFileAttributesW(string path);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern IntPtr CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll",SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(IntPtr handle,uint control,[In]byte[] input,uint inputSize,IntPtr output,uint outputSize,out uint returned,IntPtr overlapped);
+    [DllImport("kernel32.dll",SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential)] private struct FileTime { public uint Low,High; }
+    [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] private struct FindData {
+        public uint Attributes; public FileTime Created,Accessed,Written;
+        public uint SizeHigh,SizeLow,Reserved0,Reserved1;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] public string Name;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=14)] public string Alternate;
+    }
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern IntPtr FindFirstFileW(string pattern,out FindData data);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextFileW(IntPtr find,out FindData data);
+    [DllImport("kernel32.dll",SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr find);
+
+    public sealed class Result {
+        public string root,target,outside,sentinel,lease;
+        public string[] targetEntries;
+        public bool writeOpen,attrOpen;
+        public string writeHandle,attrHandle;
+        public int writeError,attrError,writeLastErrorCaptured,attrLastErrorCaptured;
+        public bool? setReparse;
+        public int? setReparseError,setReparseLastErrorCaptured;
+        public uint? bytesReturned;
+        public bool? writeClosed,attrClosed;
+        public int? writeCloseError,attrCloseError;
+        public int inputBytes;
+        public uint targetAttributesAfter;
+        public int targetAttributesError;
+    }
+    public static string Normalize(string path) {
+        if(String.IsNullOrEmpty(path) || path.Length < 3 || !((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z')) || path[1]!=':' || path[2]!='\\') throw new InvalidOperationException("Expected drive-absolute fixture path.");
+        for(int i=0;i<path.Length;i++) if(path[i]<32 || path[i]=='*' || path[i]=='?' || path[i]=='"' || (path[i]==':'&&i!=1)) throw new InvalidOperationException("Unsafe fixture path.");
+        StringBuilder buffer=new StringBuilder(32768);
+        uint count=GetFullPathNameW(path,(uint)buffer.Capacity,buffer,IntPtr.Zero); int error=Marshal.GetLastWin32Error();
+        if(count==0) throw new Win32Exception(error,"GetFullPathNameW");
+        if(count>=buffer.Capacity || count!=buffer.Length) throw new InvalidOperationException("Normalized path overflow.");
+        return buffer.ToString().TrimEnd('\\');
+    }
+    private static string Owned(string root,string path) {
+        path=Normalize(path);
+        if(root.Length<=3 || !path.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Mutation path escaped exact owned root.");
+        return path;
+    }
+    private static uint Attributes(string path) {
+        uint attributes=GetFileAttributesW(path); int error=Marshal.GetLastWin32Error();
+        if(attributes==UInt32.MaxValue) throw new Win32Exception(error,"GetFileAttributesW(precondition)");
+        return attributes;
+    }
+    private static void OrdinaryDirectory(string root,string path) {
+        if(!String.Equals(path,root,StringComparison.OrdinalIgnoreCase)) path=Owned(root,path);
+        for(;;) {
+            if((Attributes(path)&0x410)!=0x10) throw new InvalidOperationException("Expected ordinary directory before mutation.");
+            if(String.Equals(path,root,StringComparison.OrdinalIgnoreCase)) return;
+            int slash=path.LastIndexOf('\\');
+            if(slash<=2) throw new InvalidOperationException("Directory containment failed.");
+            path=path.Substring(0,slash);
+        }
+    }
+    private static void U16(byte[] buffer,int offset,int value) {
+        if(value<0 || value>UInt16.MaxValue) throw new InvalidOperationException("Reparse USHORT overflow.");
+        buffer[offset]=(byte)value; buffer[offset+1]=(byte)(value>>8);
+    }
+    public static byte[] MountPointBuffer(string outside) {
+        // Offsets are bytes relative to PathBuffer; lengths exclude UTF-16 NUL.
+        byte[] substitute=Encoding.Unicode.GetBytes("\\??\\"+outside);
+        byte[] print=Encoding.Unicode.GetBytes(outside);
+        int printOffset=checked(substitute.Length+2);
+        int dataBytes=checked(8+substitute.Length+2+print.Length+2);
+        int total=checked(8+dataBytes);
+        if(total>16384 || (substitute.Length&1)!=0 || (print.Length&1)!=0) throw new InvalidOperationException("Reparse buffer exceeds native bounds.");
+        byte[] buffer=new byte[total];
+        buffer[0]=3; buffer[1]=0; buffer[2]=0; buffer[3]=0xA0; // IO_REPARSE_TAG_MOUNT_POINT.
+        U16(buffer,4,dataBytes); U16(buffer,6,0);
+        U16(buffer,8,0); U16(buffer,10,substitute.Length);
+        U16(buffer,12,printOffset); U16(buffer,14,print.Length);
+        Buffer.BlockCopy(substitute,0,buffer,16,substitute.Length);
+        Buffer.BlockCopy(print,0,buffer,16+printOffset,print.Length);
+        return buffer;
+    }
+    private static bool Valid(IntPtr handle) { return handle!=new IntPtr(-1)&&handle!=IntPtr.Zero; }
+    private static string[] ExactEntries(string target,string lease) {
+        List<string> entries=new List<string>(); FindData data;
+        IntPtr find=FindFirstFileW(target+"\\*",out data); int error=Marshal.GetLastWin32Error();
+        if(!Valid(find)) { if(error==2) { if(lease!=null) throw new InvalidOperationException("Expected exact lease is absent."); return entries.ToArray(); } throw new Win32Exception(error,"FindFirstFileW(target)"); }
+        Exception primary=null;
+        try {
+            for(;;) {
+                if(data.Name!="."&&data.Name!="..") {
+                    if(String.IsNullOrEmpty(data.Name)||data.Name.IndexOf('\\')>=0||data.Name.IndexOf('/')>=0) throw new InvalidOperationException("Unexpected native directory entry name.");
+                    string full=target+"\\"+data.Name; entries.Add(full);
+                    if(lease==null || !String.Equals(full,lease,StringComparison.Ordinal) || (data.Attributes&0x410)!=0) throw new InvalidOperationException("Only the exact ordinary lease may occupy the paused target.");
+                }
+                bool more=FindNextFileW(find,out data); error=Marshal.GetLastWin32Error();
+                if(!more) { if(error!=18) throw new Win32Exception(error,"FindNextFileW(target)"); break; }
+            }
+            if(lease!=null && entries.Count!=1) throw new InvalidOperationException("Paused target must contain exactly one known lease.");
+        } catch(Exception failure) { primary=failure; }
+        finally {
+            bool closed=FindClose(find); int closeError=Marshal.GetLastWin32Error();
+            if(!closed) { Exception cleanup=new Win32Exception(closeError,"FindClose(target)"); if(primary!=null) primary=new AggregateException(primary,cleanup); else primary=cleanup; }
+        }
+        if(primary!=null) throw primary;
+        return entries.ToArray();
+    }
+    public static Result Probe(string rawRoot,string rawTarget,string rawOutside,string rawSentinel,string rawLease=null) {
+        string root=Normalize(rawRoot),target=Owned(root,rawTarget),outside=Owned(root,rawOutside),sentinel=Owned(root,rawSentinel);
+        if(String.Equals(target,outside,StringComparison.OrdinalIgnoreCase) || target.StartsWith(outside+"\\",StringComparison.OrdinalIgnoreCase) || outside.StartsWith(target+"\\",StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Target and outside directories must be disjoint.");
+        if(!sentinel.StartsWith(outside+"\\",StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Outside sentinel escaped outside target.");
+        OrdinaryDirectory(root,root); OrdinaryDirectory(root,target); OrdinaryDirectory(root,outside);
+        OrdinaryDirectory(root,sentinel.Substring(0,sentinel.LastIndexOf('\\')));
+        if((Attributes(sentinel)&0x410)!=0) throw new InvalidOperationException("Outside sentinel must be an existing ordinary file.");
+        string lease=String.IsNullOrEmpty(rawLease)?null:Owned(root,rawLease);
+        if(lease!=null && !String.Equals(lease.Substring(0,lease.LastIndexOf('\\')),target,StringComparison.Ordinal)) throw new InvalidOperationException("Known lease must be directly inside exact target.");
+        string[] entries=ExactEntries(target,lease);
+        byte[] buffer=MountPointBuffer(outside);
+        Result result=new Result(); result.root=root; result.target=target; result.outside=outside; result.sentinel=sentinel; result.lease=lease; result.targetEntries=entries; result.inputBytes=buffer.Length;
+        IntPtr write=IntPtr.Zero,attributes=IntPtr.Zero;
+        try {
+            write=CreateFileW(target,0x40000000,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+            int error=Marshal.GetLastWin32Error();
+            result.writeHandle=write.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            result.writeOpen=Valid(write); result.writeLastErrorCaptured=error; result.writeError=result.writeOpen?0:error;
+            // Close any unexpectedly successful first open before the independent
+            // attribute-only attempt, so it cannot perturb the second operation.
+            if(result.writeOpen) {
+                result.writeClosed=CloseHandle(write); int closeError=Marshal.GetLastWin32Error();
+                result.writeCloseError=result.writeClosed.Value?0:closeError;
+                if(result.writeClosed.Value) write=IntPtr.Zero;
+            }
+            attributes=CreateFileW(target,0x100,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+            error=Marshal.GetLastWin32Error();
+            result.attrHandle=attributes.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            result.attrOpen=Valid(attributes); result.attrLastErrorCaptured=error; result.attrError=result.attrOpen?0:error;
+            if(result.attrOpen) {
+                uint returned;
+                result.setReparse=DeviceIoControl(attributes,0x000900A4,buffer,(uint)buffer.Length,IntPtr.Zero,0,out returned,IntPtr.Zero);
+                int ioctlError=Marshal.GetLastWin32Error();
+                result.setReparseLastErrorCaptured=ioctlError; result.setReparseError=result.setReparse.Value?0:ioctlError; result.bytesReturned=returned;
+            }
+        } finally {
+            if(Valid(attributes)) {
+                result.attrClosed=CloseHandle(attributes); int closeError=Marshal.GetLastWin32Error();
+                result.attrCloseError=result.attrClosed.Value?0:closeError;
+            }
+            if(Valid(write)) {
+                bool closed=CloseHandle(write); int closeError=Marshal.GetLastWin32Error();
+                // Preserve an initial close failure even if a retry succeeds.
+                if(!result.writeClosed.HasValue) { result.writeClosed=closed; result.writeCloseError=closed?0:closeError; }
+            }
+        }
+        result.targetAttributesAfter=GetFileAttributesW(target); int attributeError=Marshal.GetLastWin32Error();
+        result.targetAttributesError=result.targetAttributesAfter==UInt32.MaxValue?attributeError:0;
+        return result;
+    }
+}
+`
+
+const directoryMutationScript =
+  [
+    "$ErrorActionPreference = 'Stop'",
+    'Set-StrictMode -Version Latest',
+    "if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSEdition -ne 'Desktop') { throw 'Mutation probe requires Windows PowerShell 5 Desktop.' }",
+    "$root = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_ROOT')",
+    "$source = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_SOURCE')",
+    "$target = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_TARGET')",
+    "$outside = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_OUTSIDE')",
+    "$sentinel = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_SENTINEL')",
+    "$lease = [Environment]::GetEnvironmentVariable('LIFE_FIXTURE_MUTATION_LEASE')",
+    "foreach ($value in @($root,$source,$target,$outside,$sentinel)) { if ([String]::IsNullOrEmpty($value)) { throw 'Missing literal directory mutation environment.' } }",
+    "$preRoot = [IO.Path]::GetFullPath($root).TrimEnd([char]'\\')",
+    '$preSource = [IO.Path]::GetFullPath($source)',
+    "if ($preRoot.Length -le 3 -or -not $preSource.StartsWith($preRoot + '\\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Mutation C# source escaped owned scratch.' }",
+    'Add-Type -Path $preSource',
+    '$result = [LifeFixtureDirectoryMutation]::Probe($root,$target,$outside,$sentinel,$lease)',
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)',
+    '[Console]::WriteLine((ConvertTo-Json -InputObject $result -Depth 4 -Compress))',
+    '# Successful reparse mutation is diagnostic evidence, never hidden by this shim.',
+    '# The Node owner decides whether it blocks adoption and cleans up after killing',
+    '# and reaping the paused launcher. Only resource-close failures fail this helper.',
+    "if (($null -ne $result.writeClosed -and -not [bool]$result.writeClosed) -or ($null -ne $result.attrClosed -and -not [bool]$result.attrClosed)) { throw 'Native mutation probe failed to close an acquired directory handle.' }",
+    "if ($result.targetAttributesError -ne 0) { throw 'Unable to read target attributes after mutation attempt.' }",
+  ].join('\n') + '\n'
+
 const metadataScript = String.raw`$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $metadataRoot = [Environment]::GetEnvironmentVariable('LIFE_NSIS_METADATA_ROOT')
@@ -697,6 +1663,111 @@ function phases(text) {
     .map((line) => line.split('\t')[0])
 }
 
+async function waitFixtureFile(filename, timeoutMs, description, completion) {
+  const deadline = performance.now() + timeoutMs
+  let ended
+  completion?.then((result) => {
+    ended = result
+  })
+  while (performance.now() < deadline) {
+    const content = maybeRead(filename, 'utf8')
+    if (content !== undefined) return content
+    if (ended)
+      throw new Error(`${description}: observer exited before evidence (${JSON.stringify(ended)})`)
+    await immediate()
+  }
+  throw new Error(`${description}: evidence deadline expired`)
+}
+
+function fixtureChild(executable, args, env) {
+  const child = spawn(executable, args, {
+    cwd: path.dirname(executable),
+    env,
+    windowsHide: true,
+    shell: false,
+    detached: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = '',
+    stderr = '',
+    spawnError
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString('utf8')
+  })
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf8')
+  })
+  child.once('error', (error) => {
+    spawnError = error
+  })
+  const completion = new Promise((resolve) =>
+    child.once('close', (code, signal) =>
+      resolve({ code, signal, error: spawnError?.message, stdout, stderr }),
+    ),
+  )
+  return { child, completion }
+}
+
+async function startDecoderObserver({ scratch, name, source, config, env }) {
+  const configFile = path.join(scratch, `${name}.observer-config.json`)
+  fs.writeFileSync(configFile, JSON.stringify(config))
+  const observer = fixtureChild(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      source,
+      '-ConfigPath',
+      configFile,
+    ],
+    windowsPowerShellEnvironment(env),
+  )
+  assert.equal(
+    await waitFixtureFile(
+      config.ReadyFile,
+      30000,
+      `${name} native observer startup`,
+      observer.completion,
+    ),
+    'ready\r\n',
+  )
+  return {
+    ...observer,
+    config,
+    async observed() {
+      return JSON.parse(
+        await waitFixtureFile(
+          config.ObservedFile,
+          30000,
+          `${name} pinned process identities`,
+          observer.completion,
+        ),
+      )
+    },
+    async result() {
+      const exit = await bounded(
+        observer.completion,
+        35000,
+        `${name} native observer did not terminate`,
+      )
+      const diagnostic = maybeRead(config.ResultFile, 'utf8')
+      console.log(`${name} native lifetime evidence: ${diagnostic || JSON.stringify(exit)}`)
+      assert.equal(
+        exit.code,
+        0,
+        `${name}: native observer failed\n${exit.stdout}\n${exit.stderr}\n${diagnostic}`,
+      )
+      const result = JSON.parse(diagnostic)
+      assert.equal(result.Success, true)
+      assert.deepEqual(result.CleanupFailures, [])
+      return result
+    },
+  }
+}
+
 // Caller builds a separate good Copy-method archive and compiles the actual
 // normal wrapper against its manifest. It writes its own process ID into
 // `${report}.pid` immediately before calling extractUsing7za.
@@ -711,6 +1782,7 @@ async function interruptActualExtraction({
   expectedTail,
   expectedSha256,
   filename = 'large.bin',
+  observer,
 }) {
   assert.equal(process.platform, 'win32')
   assert.ok(expectedPrefix.length > 0 && expectedTail.length > 0)
@@ -755,6 +1827,16 @@ async function interruptActualExtraction({
   let started = false
   let pidConfirmed = false
   let observed
+  let pinned, pinFailure
+  let interruptionFailure
+  const pinning = observer?.observed().then(
+    (value) => {
+      pinned = value
+    },
+    (error) => {
+      pinFailure = error
+    },
+  )
   const prefix = Buffer.alloc(expectedPrefix.length)
   const tail = Buffer.alloc(expectedTail.length)
   try {
@@ -768,6 +1850,7 @@ async function interruptActualExtraction({
     )
     const deadline = performance.now() + 30000
     while (performance.now() < deadline) {
+      if (pinFailure) throw pinFailure
       if (exited)
         throw new Error('Native extraction completed before an incomplete write was observed')
       if (!pidConfirmed) {
@@ -786,7 +1869,10 @@ async function interruptActualExtraction({
         if (logged.includes('extract-complete')) {
           throw new Error('Extractor returned before incomplete content was observed')
         }
-        started = logged.includes('payload-direct-start') && logged.includes('extract-start')
+        started =
+          logged.includes('payload-direct-start') &&
+          logged.includes('extract-start') &&
+          (!observer || logged.includes('modern-decoder-start'))
       }
       if (started && pidConfirmed) {
         if (fd === undefined) {
@@ -801,22 +1887,36 @@ async function interruptActualExtraction({
         if (fd !== undefined) {
           const prefixRead = fs.readSync(fd, prefix, 0, prefix.length, 0)
           const tailRead = fs.readSync(fd, tail, 0, tail.length, expectedSize - tail.length)
+          const currentSize = fs.fstatSync(fd).size
+          const growing = observer && currentSize >= prefix.length && currentSize < expectedSize
           if (
             prefixRead === prefix.length &&
             prefix.equals(expectedPrefix) &&
-            tailRead === tail.length &&
-            tail.every((byte) => byte === 0)
+            (growing || (tailRead === tail.length && tail.every((byte) => byte === 0))) &&
+            (!observer || pinned)
           ) {
             observed = {
               pid: child.pid,
-              size: fs.fstatSync(fd).size,
+              size: currentSize,
               elapsedMs: 30000 - (deadline - performance.now()),
             }
-            assert.equal(
-              child.kill('SIGKILL'),
-              true,
-              'Native extractor must receive the termination request',
-            )
+            if (observer) {
+              assert.equal(pinned.parentPid, child.pid, 'Observer must pin the actual NSIS owner')
+              fs.writeFileSync(
+                observer.config.KillRequestFile + '.pending',
+                observer.config.RequestToken + '\r\n',
+                { flag: 'wx' },
+              )
+              fs.renameSync(
+                observer.config.KillRequestFile + '.pending',
+                observer.config.KillRequestFile,
+              )
+            } else
+              assert.equal(
+                child.kill('SIGKILL'),
+                true,
+                'Native extractor must receive the termination request',
+              )
             break
           }
         }
@@ -826,6 +1926,21 @@ async function interruptActualExtraction({
       await immediate()
     }
     assert.ok(observed, 'No actual incomplete extraction was observed before the deadline')
+    let lifetime
+    if (observer) {
+      await pinning
+      lifetime = await observer.result()
+      assert.equal(lifetime.ParentPid, child.pid)
+      assert.equal(lifetime.DecoderPid, pinned.decoderPid)
+      assert.equal(lifetime.ParentWait, 0)
+      assert.equal(lifetime.DecoderWait, 0)
+      assert.equal(lifetime.ParentKilled, true)
+      assert.equal(
+        fs.existsSync(path.join(target, '.life-installer-extractor-guard')),
+        false,
+        'After both exact exits, the owned guard must be absent before any verifier, recovery or cleanup',
+      )
+    }
     const exit = await bounded(completion, 10000, 'Killed native extractor did not exit')
     if (exit.error) throw exit.error
     assert.ok(exit.code !== 0 || exit.signal, 'Interrupted fixture cannot report successful exit')
@@ -833,19 +1948,26 @@ async function interruptActualExtraction({
     fs.closeSync(fd)
     fd = undefined
     const after = fs.readFileSync(output)
-    assert.equal(
-      after.length,
-      expectedSize,
-      'Preallocated file length must survive the interruption',
-    )
+    if (!observer)
+      assert.equal(
+        after.length,
+        expectedSize,
+        'Preallocated file length must survive the interruption',
+      )
+    else
+      assert.ok(
+        after.length >= expectedPrefix.length && after.length <= expectedSize,
+        'Modern extraction must retain its actual incomplete written bytes',
+      )
     assert.ok(
       after.subarray(0, expectedPrefix.length).equals(expectedPrefix),
       'Written prefix must survive interruption',
     )
-    assert.ok(
-      after.subarray(expectedSize - expectedTail.length).every((byte) => byte === 0),
-      'Post-exit tail must remain unwritten; a kill that lost its race is not interruption evidence',
-    )
+    if (!observer || after.length === expectedSize)
+      assert.ok(
+        after.subarray(expectedSize - expectedTail.length).every((byte) => byte === 0),
+        'Post-exit tail must remain unwritten; a kill that lost its race is not interruption evidence',
+      )
     assert.notEqual(
       createHash('sha256').update(after).digest('hex'),
       expectedSha256,
@@ -854,7 +1976,7 @@ async function interruptActualExtraction({
     const logged = phases(fs.readFileSync(trace, 'ascii'))
     assert.deepEqual(
       logged,
-      ['payload-direct-start', 'extract-start'],
+      ['payload-direct-start', 'extract-start', ...(observer ? ['modern-decoder-start'] : [])],
       'Interrupted extraction cannot reach verification, completion, registration or launch',
     )
     for (const item of [report, `${report}.registered`, `${report}.launched`]) {
@@ -864,13 +1986,60 @@ async function interruptActualExtraction({
         'Interrupted extraction cannot produce successful action sentinels',
       )
     }
-    return { ...observed, exit, finalSize: after.length, phases: logged }
+    if (observer) {
+      const stable = inventory(target)
+      assert.deepEqual(
+        inventory(target),
+        stable,
+        'After both exact process waits, the complete output inventory and all hashes must remain stable',
+      )
+      assert.equal(fs.statSync(output).size, after.length)
+      assert.equal(sha256(output), createHash('sha256').update(after).digest('hex'))
+    }
+    return { ...observed, exit, lifetime, finalSize: after.length, phases: logged }
+  } catch (error) {
+    interruptionFailure = error
   } finally {
-    if (fd !== undefined) fs.closeSync(fd)
+    const cleanupErrors = []
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd)
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
     if (!exited) {
       child.kill('SIGKILL')
-      await bounded(completion, 10000, 'Failed interrupted trial left a live fixture process')
+      try {
+        await bounded(completion, 10000, 'Failed interrupted trial left a live fixture process')
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
     }
+    if (observer) {
+      try {
+        const exit = await bounded(
+          observer.completion,
+          35000,
+          'Native observer did not release its pinned process handles before cleanup',
+        )
+        if (exit.code !== 0) {
+          const diagnostic = maybeRead(observer.config.ResultFile, 'utf8') || JSON.stringify(exit)
+          console.error(`Native observer failure retained before cleanup: ${diagnostic}`)
+          cleanupErrors.push(new Error(`Native observer cleanup failed: ${diagnostic}`))
+        }
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    finishFixtureCleanup(
+      interruptionFailure,
+      () => {
+        if (cleanupErrors.length)
+          throw new AggregateError(cleanupErrors, 'Native interruption cleanup failed')
+      },
+      'interrupted extractor and observer',
+    )
   }
 }
 
@@ -940,6 +2109,77 @@ async function main() {
       getMakeNsisPath(),
       getNsisPluginsPath(),
     ])
+    let modern
+    if (process.platform === 'win32') {
+      const {
+        prepareWindowsDecoderBundle,
+        binaryName,
+        pins,
+      } = require('./package-windows-decoder.cjs')
+      const decoderDirectory = await prepareWindowsDecoderBundle({
+        root,
+        output: path.join(scratch, 'official-modern-decoder'),
+      })
+      const decoder = path.join(decoderDirectory, binaryName)
+      assert.equal(
+        sha256(decoder),
+        pins.binary.sha256,
+        'Native fixture requires the exact official decoder',
+      )
+      assert.equal(
+        pins.binary.sha256,
+        '15d4c788c148e3677e2fc1c4a01f191fb6669eba4f6acf8a465f0f1a6f1e1260',
+      )
+      const pluginDirectory = path.join(scratch, 'production-launcher')
+      const fixturePluginDirectory = path.join(scratch, 'fixture-launcher')
+      for (const [outputDirectory, fixture] of [
+        [pluginDirectory, false],
+        [fixturePluginDirectory, true],
+      ]) {
+        requireSuccess(process.execPath, [
+          path.join(root, 'scripts', 'build-modern-extractor.cjs'),
+          '--output-directory',
+          outputDirectory,
+          ...(fixture ? ['--fixture'] : []),
+        ])
+        assert.ok(fs.statSync(path.join(outputDirectory, 'LifeInstallerLauncher.dll')).isFile())
+      }
+      modern = { decoder, pluginDirectory, fixturePluginDirectory }
+      modern.observerSource = path.join(scratch, 'life-modern-decoder-observer.ps1')
+      modern.fakeSource = path.join(scratch, 'life-fake-decoder.cs')
+      modern.fakeCompileSource = path.join(scratch, 'life-fake-decoder-compile.ps1')
+      modern.fakeObserverSource = path.join(scratch, 'life-fake-decoder-observer.ps1')
+      modern.fakeExecutable = path.join(scratch, 'life-fake-decoder.exe')
+      modern.mutationNativeSource = path.join(scratch, 'life-directory-mutation.cs')
+      modern.mutationSource = path.join(scratch, 'life-directory-mutation.ps1')
+      fs.writeFileSync(path.join(scratch, 'life-modern-decoder-observer.cs'), decoderObserverNative)
+      fs.writeFileSync(modern.observerSource, '\ufeff' + decoderObserverScript)
+      fs.writeFileSync(modern.fakeSource, fakeDecoderNative)
+      fs.writeFileSync(modern.fakeCompileSource, '\ufeff' + fakeDecoderCompileScript)
+      fs.writeFileSync(modern.fakeObserverSource, '\ufeff' + fakeDecoderObserverScript)
+      fs.writeFileSync(modern.mutationNativeSource, directoryMutationNative)
+      fs.writeFileSync(modern.mutationSource, '\ufeff' + directoryMutationScript)
+      requireSuccess(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          modern.fakeCompileSource,
+          '-OwnedRoot',
+          scratch,
+          '-Source',
+          modern.fakeSource,
+          '-Output',
+          modern.fakeExecutable,
+        ],
+        {
+          env: windowsPowerShellEnvironment(process.env),
+        },
+      )
+    }
     const payload = path.join(scratch, 'trusted-payload')
     fs.mkdirSync(path.join(payload, 'nested', '研究$'), { recursive: true })
     fs.mkdirSync(path.join(payload, 'empty'))
@@ -1009,6 +2249,12 @@ async function main() {
     fs.cpSync(payload, shortPayload, { recursive: true })
     fs.writeFileSync(path.join(shortPayload, 'payload.bin'), bytes.subarray(0, bytes.length - 1))
     const short = archive(shortPayload, 'short-valid-crc.7z')
+    const collisionPayload = path.join(scratch, 'guard-collision-payload')
+    fs.cpSync(payload, collisionPayload, { recursive: true })
+    const collisionText = 'Legitimate trusted file using the installer guard name\n'
+    fs.writeFileSync(path.join(collisionPayload, '.life-installer-extractor-guard'), collisionText)
+    fixPayloadTimes(collisionPayload)
+    const collisionArchive = archive(collisionPayload, 'guard-collision-good.7z')
 
     for (const [name, filename] of [
       ['crc', corrupt],
@@ -1067,6 +2313,8 @@ SilentInstall silent
 !define PROJECT_DIR "${nsisString(root)}"
 !define APP_64 "${nsisString(good)}"
 !define PRODUCT_NAME "Life fixture"
+!define LIFE_NSIS_MODERN_FIXTURE
+${modern ? `!define LIFE_MODERN_ENABLED\n!define LIFE_MODERN_DECODER_EXE "${nsisString(modern.decoder)}"\n!define LIFE_MODERN_PLUGIN_DIR "${nsisString(modern.pluginDirectory)}"` : ''}
 !addincludedir "${nsisString(includes)}"
 !addincludedir "${nsisString(path.join(root, 'build'))}"
 !addplugindir /x86-unicode "${nsisString(path.join(plugins, 'x86-unicode'))}"
@@ -1099,6 +2347,19 @@ Var fixtureStackBottom
 Var fixturePendingTop
 Var fixturePendingBottom
 Var fixtureCurrentHandleCount
+Var fixtureDecoder
+Var fixtureOutput
+Var fixtureWarmOutput
+Var fixtureLaunchMarker
+Var fixtureLaunchMode
+Var fixtureDescendantPidFile
+!ifdef LIFE_MODERN_ENABLED
+Var fixtureDescendantPid
+Var fixtureDescendantHandle
+Var fixtureNativeStatus
+Var fixtureNativeWait
+Var fixtureBoundaryError
+!endif
 
 !macro FixtureObserveError OUTPUT
   StrCpy ${'${OUTPUT}'} "0"
@@ -1178,6 +2439,49 @@ Var fixtureCurrentHandleCount
   !insertmacro FixtureCheck
 !macroend
 
+!ifdef LIFE_MODERN_ENABLED
+!macro FixtureLaunch
+  !insertmacro FixtureBegin
+  Push "$fixtureOutput"
+  Push "$fixtureArchive"
+  Push "$fixtureDecoder"
+  LifeInstallerLauncher::Launch /NOUNLOAD
+  Pop $fixtureResult
+  ${'${If}'} $fixtureDescendantPidFile != ""
+  !insertmacro FixtureObserveError $fixtureBoundaryError
+  FileOpen $fixtureHandle "$fixtureDescendantPidFile" r
+  IfErrors fixture_failed
+  FileRead $fixtureHandle $fixtureDescendantPid
+  FileClose $fixtureHandle
+  ClearErrors
+  StrCmp $fixtureDescendantPid "" fixture_failed
+  StrCpy $fixtureStage "descendant-open-after-launch"
+  System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $fixtureDescendantPid) p.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureDescendantHandle
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+  StrCmp $fixtureDescendantHandle 0 fixture_failed
+  StrCpy $fixtureStage "descendant-signaled-at-launch-return"
+  System::Call 'kernel32::WaitForSingleObject(p $fixtureDescendantHandle, i 0) i.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureNativeWait
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+  StrCmp $fixtureNativeWait 0 0 fixture_failed
+  System::Call 'kernel32::CloseHandle(p $fixtureDescendantHandle) i.s ?r'
+  Pop $fixtureNativeStatus
+  Pop $fixtureNativeWait
+  StrCmp $fixtureNativeStatus "ok" 0 fixture_failed
+  StrCmp $fixtureNativeWait 0 fixture_failed
+  ${'${If}'} $fixtureBoundaryError == "1"
+    SetErrors
+  ${'${Else}'}
+    ClearErrors
+  ${'${EndIf}'}
+  ${'${EndIf}'}
+  !insertmacro FixtureCheck
+!macroend
+!endif
+
 Section
   InitPluginsDir
   ; The process helper has its own native fixture; retain its definition under
@@ -1188,12 +2492,31 @@ Section
   ReadEnvStr $fixtureExpected "LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED"
   ReadEnvStr $fixtureReport "LIFE_NSIS_PAYLOAD_FIXTURE_RESULT"
   ReadEnvStr $fixtureArchive "LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE"
+  ReadEnvStr $fixtureDecoder "LIFE_NSIS_PAYLOAD_FIXTURE_DECODER"
+  ReadEnvStr $fixtureOutput "LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT"
+  ReadEnvStr $fixtureWarmOutput "LIFE_NSIS_PAYLOAD_FIXTURE_WARM_OUTPUT"
+  ReadEnvStr $fixtureLaunchMarker "LIFE_NSIS_PAYLOAD_FIXTURE_LAUNCH_MARKER"
+  ReadEnvStr $fixtureLaunchMode "LIFE_NSIS_PAYLOAD_FIXTURE_LAUNCH_MODE"
+  ReadEnvStr $fixtureDescendantPidFile "LIFE_NSIS_PAYLOAD_FIXTURE_DESCENDANT_PID_FILE"
   StrCpy $packageArch "64"
   ; Warm persistent plug-in loads before checking for enumeration/hash handle leaks.
   ${'${GetProcessInfo}'} 0 $pid $1 $2 $3 $4
   ${'${StdUtils.HashFile}'} $fixtureScratch "SHA2-256" "$fixtureArchive"
   !insertmacro LifeNativeHashFile "$fixtureArchive" $fixtureScratch
   !insertmacro LifeHashFile "$fixtureArchive" $fixtureScratch
+  !ifdef LIFE_MODERN_ENABLED
+    StrCmp $fixtureMode "launch" fixture_warm_launch
+    StrCmp $fixtureMode "launch-once" fixture_warm_launch
+    StrCmp $fixtureMode "launch-locked" fixture_warm_launch fixture_warm_complete
+    fixture_warm_launch:
+      Push "$fixtureWarmOutput"
+      Push "${nsisString(good)}"
+      Push "${nsisString(modern?.decoder || '')}"
+      LifeInstallerLauncher::Launch /NOUNLOAD
+      Pop $fixtureScratch
+      StrCmp $fixtureScratch "ok" 0 fixture_failed
+    fixture_warm_complete:
+  !endif
   System::Call 'kernel32::GetCurrentProcess() p .r0'
   System::Call 'kernel32::GetProcessHandleCount(p r0, *i .r1) i .r2'
   StrCmp $2 "0" fixture_failed
@@ -1208,7 +2531,18 @@ Section
   StrCmp $fixtureMode "hash-stock" fixture_hash_stock
   StrCmp $fixtureMode "hash-native-locked" fixture_hash_native_locked
   StrCmp $fixtureMode "hash-wrapper-locked" fixture_hash_wrapper_locked
+  !ifdef LIFE_MODERN_ENABLED
+    StrCmp $fixtureMode "launch" fixture_launch
+    StrCmp $fixtureMode "launch-once" fixture_launch_once
+    StrCmp $fixtureMode "launch-locked" fixture_launch_locked
+    !ifdef LIFE_LAUNCHER_NATIVE_FIXTURE
+      StrCmp $fixtureMode "launch-fixture" fixture_launch_fault
+    !endif
+  !endif
   StrCmp $fixtureMode "extract" fixture_extract
+  !ifdef LIFE_MODERN_ENABLED
+    StrCmp $fixtureMode "extract-wrong-pin" fixture_extract_wrong_pin
+  !endif
   StrCmp $fixtureMode "extract-locked" fixture_extract_locked fixture_failed
 
   fixture_guard:
@@ -1220,6 +2554,51 @@ Section
     IfErrors +2 0
     Goto fixture_failed
     Goto fixture_check_handles
+
+  !ifdef LIFE_MODERN_ENABLED
+    fixture_launch_once:
+      ClearErrors
+      !insertmacro FixtureLaunch
+      StrCpy $fixtureStage "error-clear"
+      IfErrors fixture_failed
+      Goto fixture_check_handles
+    !ifdef LIFE_LAUNCHER_NATIVE_FIXTURE
+      fixture_launch_fault:
+        System::Call 'kernel32::GetCurrentProcessId() i .r0'
+        FileOpen $fixtureHandle "$fixtureReport.pid" w
+        IfErrors fixture_failed
+        FileWrite $fixtureHandle "$0$\r$\n"
+        FileClose $fixtureHandle
+        !insertmacro FixtureBegin
+        Push "$fixtureLaunchMode"
+        Push "$fixtureLaunchMarker"
+        Push "$fixtureOutput"
+        Push "$fixtureArchive"
+        Push "$fixtureDecoder"
+        LifeInstallerLauncher::LaunchFixture /NOUNLOAD
+        Pop $fixtureResult
+        !insertmacro FixtureCheck
+        Goto fixture_check_handles
+    !endif
+    fixture_launch_locked:
+      System::Call 'kernel32::CreateFileW(w "$INSTDIR", i 0xC0000000, i 7, p 0, i 3, i 0, p 0) p .r0'
+      StrCmp $0 "-1" fixture_failed
+      StrCpy $fixtureLock $0
+    fixture_launch:
+      StrCpy $fixtureHashCount 8
+    fixture_launch_repeat:
+      ClearErrors
+      !insertmacro FixtureLaunch
+      StrCpy $fixtureStage "error-clear"
+      IfErrors fixture_failed
+      SetErrors
+      !insertmacro FixtureLaunch
+      StrCpy $fixtureStage "error-set"
+      IfErrors +2 0
+      Goto fixture_failed
+      IntOp $fixtureHashCount $fixtureHashCount - 1
+      StrCmp $fixtureHashCount 0 fixture_hash_complete fixture_launch_repeat
+  !endif
 
   fixture_required:
     ClearErrors
@@ -1334,6 +2713,16 @@ Section
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\payload.bin", i 0x80000000, i 0, p 0, i 3, i 0, p 0) p .r0'
     StrCmp $0 "-1" fixture_failed
     StrCpy $fixtureLock $0
+    Goto fixture_extract
+  !ifdef LIFE_MODERN_ENABLED
+    fixture_extract_wrong_pin:
+      CreateDirectory "$PLUGINSDIR\life-modern-decoder"
+      IfErrors fixture_failed
+      FileOpen $fixtureHandle "$PLUGINSDIR\life-modern-decoder\7za-26.04-x64.exe" w
+      IfErrors fixture_failed
+      FileWrite $fixtureHandle "Invalid fixture decoder pin$\r$\n"
+      FileClose $fixtureHandle
+  !endif
   fixture_extract:
     SetOutPath "$INSTDIR"
     System::Call 'kernel32::GetCurrentProcessId() i .r0'
@@ -1468,6 +2857,27 @@ SectionEnd
     requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', largeSource], {
       env: { ...process.env, ...binary.env },
     })
+    let legacyLargeExecutable = largeExecutable
+    if (modern) {
+      legacyLargeExecutable = path.join(scratch, 'large-legacy-fixture.exe')
+      const legacyLargeSource = path.join(scratch, 'large-legacy-fixture.nsi')
+      fs.writeFileSync(
+        legacyLargeSource,
+        fs
+          .readFileSync(largeSource, 'utf8')
+          .replace(
+            '!define LIFE_MODERN_ENABLED',
+            '; Explicit legacy control for the original interruption proof',
+          )
+          .replace(
+            `OutFile "${nsisString(largeExecutable)}"`,
+            () => `OutFile "${nsisString(legacyLargeExecutable)}"`,
+          ),
+      )
+      requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', legacyLargeSource], {
+        env: { ...process.env, ...binary.env },
+      })
+    }
     const unavailableExecutable = path.join(scratch, 'hash-unavailable-fixture.exe')
     const unavailableSource = path.join(scratch, 'hash-unavailable-fixture.nsi')
     fs.writeFileSync(
@@ -1486,6 +2896,46 @@ SectionEnd
     requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', unavailableSource], {
       env: { ...process.env, ...binary.env },
     })
+    const collisionExecutable = path.join(scratch, 'guard-collision-fixture.exe')
+    const collisionSource = path.join(scratch, 'guard-collision-fixture.nsi')
+    fs.writeFileSync(
+      collisionSource,
+      fs
+        .readFileSync(source, 'utf8')
+        .replace(
+          `OutFile "${nsisString(executable)}"`,
+          () => `OutFile "${nsisString(collisionExecutable)}"`,
+        )
+        .replace(
+          `!define APP_64 "${nsisString(good)}"`,
+          () => `!define APP_64 "${nsisString(collisionArchive)}"`,
+        ),
+    )
+    requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', collisionSource], {
+      env: { ...process.env, ...binary.env },
+    })
+    let launcherFixtureExecutable
+    if (modern) {
+      launcherFixtureExecutable = path.join(scratch, 'launcher-fault-fixture.exe')
+      const launcherFixtureSource = path.join(scratch, 'launcher-fault-fixture.nsi')
+      fs.writeFileSync(
+        launcherFixtureSource,
+        fs
+          .readFileSync(source, 'utf8')
+          .replace('Unicode true', 'Unicode true\n!define LIFE_LAUNCHER_NATIVE_FIXTURE')
+          .replace(
+            `OutFile "${nsisString(executable)}"`,
+            () => `OutFile "${nsisString(launcherFixtureExecutable)}"`,
+          )
+          .replace(
+            `!define LIFE_MODERN_PLUGIN_DIR "${nsisString(modern.pluginDirectory)}"`,
+            () => `!define LIFE_MODERN_PLUGIN_DIR "${nsisString(modern.fixturePluginDirectory)}"`,
+          ),
+      )
+      requireSuccess(binary.path, ['-WX', '-V2', '-INPUTCHARSET', 'UTF8', launcherFixtureSource], {
+        env: { ...process.env, ...binary.env },
+      })
+    }
     if (process.platform !== 'win32') {
       console.log(
         'Real NSIS payload, unchanged stock-control, large-interruption and forced-unavailable hash fixtures compiled; CRC and truncated archives rejected. Native runtime assertions require Windows.',
@@ -1583,6 +3033,504 @@ SectionEnd
       if (copyPayload) fs.cpSync(payload, target, { recursive: true })
       else fs.mkdirSync(target)
       return target
+    }
+    function observerConfig(name, parentImage, decoderRoot, decoderSuffix, mode, report) {
+      return {
+        OwnedRoot: scratch,
+        ReadyFile: path.join(scratch, `${name}.observer-ready`),
+        ParentPidFile: `${report}.pid`,
+        ObservedFile: path.join(scratch, `${name}.observer-observed.json`),
+        ResultFile: path.join(scratch, `${name}.observer-result.json`),
+        KillRequestFile: path.join(scratch, `${name}.observer-kill`),
+        RequestToken: name,
+        ParentImage: parentImage,
+        DecoderRoot: decoderRoot,
+        DecoderSuffix: decoderSuffix,
+        DecoderSha256: sha256(modern.decoder),
+        Mode: mode,
+      }
+    }
+    function mutationProbe(target, outside, sentinel, lease) {
+      const result = requireSuccess(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          modern.mutationSource,
+        ],
+        {
+          env: windowsPowerShellEnvironment({
+            ...process.env,
+            TEMP: nativeTemp,
+            TMP: nativeTemp,
+            LIFE_FIXTURE_MUTATION_ROOT: scratch,
+            LIFE_FIXTURE_MUTATION_SOURCE: modern.mutationNativeSource,
+            LIFE_FIXTURE_MUTATION_TARGET: target,
+            LIFE_FIXTURE_MUTATION_OUTSIDE: outside,
+            LIFE_FIXTURE_MUTATION_SENTINEL: sentinel,
+            LIFE_FIXTURE_MUTATION_LEASE: lease || '',
+          }),
+        },
+      )
+      const diagnostic = JSON.parse(result.stdout.trim())
+      console.log(`Native directory mutation evidence: ${JSON.stringify(diagnostic)}`)
+      return diagnostic
+    }
+
+    assert.ok(modern, 'Windows native assertions must use the prepared modern backend')
+    const rawDecoderDirectory = directory("launcher decoder 研究$-'quote-`tick")
+    const rawDecoder = path.join(rawDecoderDirectory, "7za decoder $-'quote-`tick.exe")
+    fs.copyFileSync(modern.decoder, rawDecoder)
+    assert.equal(sha256(rawDecoder), sha256(modern.decoder))
+    const rawArchive = path.join(scratch, "launcher archive 研究$-'quote-`tick.7z")
+    fs.copyFileSync(good, rawArchive)
+    function rawLaunch(
+      name,
+      decoder,
+      filename,
+      expected,
+      mode = 'launch',
+      heldFile,
+      suppliedOutput,
+    ) {
+      const output = suppliedOutput || directory(`launcher output ${name} 研究$-'quote-\`tick`)
+      const warmOutput = directory(`launcher warm ${name}`)
+      const before = inventory(output)
+      execute(`launcher-${name}`, mode, heldFile || output, expected, filename, true, executable, {
+        LIFE_NSIS_PAYLOAD_FIXTURE_DECODER: decoder,
+        LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT: `${output}\\`,
+        LIFE_NSIS_PAYLOAD_FIXTURE_WARM_OUTPUT: warmOutput,
+      })
+      assert.deepEqual(
+        inventory(warmOutput),
+        inventory(payload),
+        'Launcher warm-up must actually extract the trusted tree',
+      )
+      if (expected === 'ok')
+        assert.deepEqual(
+          inventory(output),
+          inventory(payload),
+          'Raw modern launch must produce every trusted hash and literal filename',
+        )
+      else if (expected === 'unavailable')
+        assert.deepEqual(
+          inventory(output),
+          before,
+          'Unavailable launcher must not write any output',
+        )
+      return output
+    }
+    rawLaunch('literal-paths', rawDecoder, rawArchive, 'ok')
+    rawLaunch('missing-exe', path.join(scratch, 'missing-decoder.exe'), rawArchive, 'unavailable')
+    rawLaunch(
+      'missing-archive',
+      rawDecoder,
+      path.join(scratch, 'missing-launch-archive.7z'),
+      'unavailable',
+    )
+    rawLaunch('crc', rawDecoder, corrupt, 'error')
+    rawLaunch('truncated', rawDecoder, truncated, 'error')
+    for (const [name, heldFile] of [
+      ['held-decoder', rawDecoder],
+      ['held-archive', rawArchive],
+    ]) {
+      const beforeHash = sha256(heldFile)
+      rawLaunch(name, rawDecoder, rawArchive, 'unavailable', 'launch-locked', heldFile)
+      assert.equal(
+        sha256(heldFile),
+        beforeHash,
+        'Launcher failure must preserve the independent caller writer handle and exact bytes',
+      )
+    }
+    const linkedDecoder = path.join(scratch, 'linked-modern-decoder.exe')
+    fs.symlinkSync(rawDecoder, linkedDecoder, 'file')
+    rawLaunch('linked-decoder', linkedDecoder, rawArchive, 'unavailable')
+    const linkedArchive = path.join(scratch, 'linked-modern-archive.7z')
+    fs.symlinkSync(rawArchive, linkedArchive, 'file')
+    rawLaunch('linked-archive', rawDecoder, linkedArchive, 'unavailable')
+    const launcherOutside = directory('launcher-outside')
+    const launcherOutsideSentinel = path.join(launcherOutside, 'outside-sentinel.txt')
+    fs.writeFileSync(launcherOutsideSentinel, 'Retain outside launcher bytes\n')
+    const launcherOutsideBefore = inventory(launcherOutside)
+    const linkedOutput = path.join(scratch, 'linked-modern-output')
+    fs.symlinkSync(launcherOutside, linkedOutput, 'junction')
+    rawLaunch(
+      'linked-output',
+      rawDecoder,
+      rawArchive,
+      'unavailable',
+      'launch',
+      undefined,
+      linkedOutput,
+    )
+    assert.deepEqual(inventory(launcherOutside), launcherOutsideBefore)
+    const mutationBaseline = directory('launcher-unpinned-mutation-baseline')
+    const baselineMutation = mutationProbe(
+      mutationBaseline,
+      launcherOutside,
+      launcherOutsideSentinel,
+    )
+    assert.equal(
+      baselineMutation.attrOpen,
+      true,
+      'Unpinned ordinary directory must establish actual attribute-only access',
+    )
+    assert.equal(
+      baselineMutation.setReparse,
+      true,
+      'The same native FSCTL and exact buffer must establish a real unpinned junction before guard comparison',
+    )
+    assert.ok(fs.lstatSync(mutationBaseline).isSymbolicLink())
+    fs.rmdirSync(mutationBaseline)
+    assert.deepEqual(
+      inventory(launcherOutside),
+      launcherOutsideBefore,
+      'Baseline native junction mutation must preserve every outside hash',
+    )
+    const guardCollision = directory('launcher-existing-guard')
+    fs.writeFileSync(
+      path.join(guardCollision, '.life-installer-extractor-guard'),
+      'Unowned guard filename must remain intact\n',
+    )
+    rawLaunch(
+      'existing-guard',
+      rawDecoder,
+      rawArchive,
+      'unavailable',
+      'launch',
+      undefined,
+      guardCollision,
+    )
+
+    for (const mode of ['pause-after-create', 'fail-job-query']) {
+      const name = `launcher-fault-${mode}`
+      const output = directory(`${name}-output`)
+      const report = path.join(scratch, `${name}.result`)
+      const marker = path.join(scratch, `${name}.created`)
+      const config = {
+        ...observerConfig(
+          name,
+          launcherFixtureExecutable,
+          path.dirname(modern.decoder),
+          path.basename(modern.decoder),
+          mode === 'pause-after-create' ? 'MarkerKill' : 'MarkerExit',
+          report,
+        ),
+        ChildPidFile: marker,
+        AckFile: `${marker}.ack`,
+      }
+      const observer = await startDecoderObserver({
+        scratch,
+        name,
+        source: modern.observerSource,
+        config,
+        env: { ...process.env, TEMP: nativeTemp, TMP: nativeTemp },
+      })
+      trials++
+      const trial = fixtureChild(launcherFixtureExecutable, ['/S'], {
+        ...process.env,
+        TEMP: nativeTemp,
+        TMP: nativeTemp,
+        LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'launch-fixture',
+        LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: output,
+        LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: 'error',
+        LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: report,
+        LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: good,
+        LIFE_NSIS_PAYLOAD_FIXTURE_DECODER: modern.decoder,
+        LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT: output,
+        LIFE_NSIS_PAYLOAD_FIXTURE_LAUNCH_MARKER: marker,
+        LIFE_NSIS_PAYLOAD_FIXTURE_LAUNCH_MODE: mode,
+      })
+      let faultFailure
+      let mutation
+      try {
+        const pinned = await observer.observed()
+        assert.equal(pinned.parentPid, trial.child.pid)
+        assert.match(pinned.parentCreationTime, /^[1-9]\d+$/)
+        assert.match(pinned.decoderCreationTime, /^[1-9]\d+$/)
+        if (mode === 'pause-after-create') {
+          const guard = path.join(output, '.life-installer-extractor-guard')
+          assert.deepEqual(
+            fs.readdirSync(output),
+            ['.life-installer-extractor-guard'],
+            'Paused launch must hold only its exact owned guard before ResumeThread',
+          )
+          assert.ok(fs.lstatSync(guard).isFile() && !fs.lstatSync(guard).isSymbolicLink())
+          assert.deepEqual(
+            fs.readFileSync(guard),
+            Buffer.from('L'),
+            'Handle-relative guard must exist inside the actual owned output directory',
+          )
+          mutation = mutationProbe(output, launcherOutside, launcherOutsideSentinel, guard)
+          const renamed = `${output}.renamed`
+          let renameError
+          try {
+            fs.renameSync(output, renamed)
+            fs.renameSync(renamed, output)
+          } catch (error) {
+            renameError = error
+          }
+          assert.ok(
+            renameError && ['EACCES', 'EPERM', 'EBUSY'].includes(renameError.code),
+            'Pinned output directory must reject rename before child resume',
+          )
+          fs.writeFileSync(config.KillRequestFile + '.pending', config.RequestToken + '\r\n', {
+            flag: 'wx',
+          })
+          fs.renameSync(config.KillRequestFile + '.pending', config.KillRequestFile)
+        }
+        const lifetime = await observer.result()
+        const exit = await bounded(
+          trial.completion,
+          10000,
+          `${name}: NSIS original child handle did not close`,
+        )
+        assert.equal(lifetime.ParentPid, trial.child.pid)
+        assert.equal(lifetime.ParentWait, 0)
+        assert.equal(lifetime.DecoderWait, 0)
+        if (mode === 'fail-job-query') {
+          assert.equal(exit.code, 77)
+          assert.equal(lifetime.ParentExit, 77)
+          assert.equal(lifetime.ParentKilled, false)
+          assert.equal(
+            fs.readFileSync(config.AckFile, 'ascii'),
+            'LIFE_LAUNCHER_OBSERVER_READY_V1\n',
+          )
+        } else {
+          assert.equal(lifetime.ParentKilled, true)
+          assert.ok(exit.code !== 0 || exit.signal)
+        }
+        assert.deepEqual(
+          inventory(launcherOutside),
+          launcherOutsideBefore,
+          'Paused/fatal launcher must preserve the complete outside tree and every hash',
+        )
+        if (mutation?.setReparse) {
+          assert.ok(fs.lstatSync(output).isSymbolicLink())
+          fs.rmdirSync(output)
+          fs.mkdirSync(output)
+        }
+        assert.ok(fs.lstatSync(output).isDirectory() && !fs.lstatSync(output).isSymbolicLink())
+        assert.deepEqual(
+          fs.readdirSync(output),
+          [],
+          'Both exact process exits must release the owned guard before cleanup or verification',
+        )
+        for (const item of [report, `${report}.registered`, `${report}.launched`])
+          assert.equal(
+            fs.existsSync(item),
+            false,
+            'Faulted native launcher cannot produce a successful result, registration or launch',
+          )
+        if (mutation) {
+          assert.equal(mutation.writeOpen, false)
+          assert.equal(
+            mutation.writeError,
+            32,
+            'Actual generic-write handle must fail with sharing violation',
+          )
+          assert.equal(
+            mutation.setReparse,
+            false,
+            'Actual attribute-only junction mutation must fail while the owned guard is held',
+          )
+          assert.ok(mutation.setReparseError > 0)
+          assert.equal(mutation.targetAttributesAfter & 0x410, 0x10)
+          assert.deepEqual(mutation.targetEntries, [
+            path.join(output, '.life-installer-extractor-guard'),
+          ])
+          const renamed = `${output}.after-exit`
+          fs.renameSync(output, renamed)
+          fs.renameSync(renamed, output)
+        }
+      } catch (error) {
+        faultFailure = error
+      } finally {
+        const cleanupErrors = []
+        if (faultFailure) {
+          trial.child.kill('SIGKILL')
+          try {
+            await bounded(trial.completion, 10000, `${name} failed NSIS did not terminate`)
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+          try {
+            const exit = await bounded(
+              observer.completion,
+              35000,
+              `${name} failed observer did not release exact process handles`,
+            )
+            if (exit.code !== 0)
+              cleanupErrors.push(
+                new Error(
+                  `${name} observer teardown: ${maybeRead(config.ResultFile, 'utf8') || JSON.stringify(exit)}`,
+                ),
+              )
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+          try {
+            if (fs.lstatSync(output).isSymbolicLink()) {
+              fs.rmdirSync(output)
+              fs.mkdirSync(output)
+            }
+            assert.deepEqual(inventory(launcherOutside), launcherOutsideBefore)
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        }
+        finishFixtureCleanup(
+          faultFailure,
+          () => {
+            if (cleanupErrors.length)
+              throw new AggregateError(cleanupErrors, `${name} safe teardown failed`)
+          },
+          name,
+        )
+      }
+    }
+
+    const descendantOutput = directory('launcher-descendant-output')
+    const descendantWarm = directory('launcher-descendant-warm')
+    const descendantWitness = path.join(scratch, 'launcher-descendant-witness')
+    const descendantConfig = path.join(scratch, 'launcher-descendant-config.txt')
+    const descendantReport = path.join(scratch, 'launcher-descendant.result')
+    fs.writeFileSync(
+      descendantConfig,
+      `mode=spawn-descendant-nonzero\nroot=${scratch}\nwitness=${descendantWitness}\nexe=${modern.fakeExecutable}\n`,
+    )
+    const descendantObserver = fixtureChild(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        modern.fakeObserverSource,
+      ],
+      windowsPowerShellEnvironment({
+        ...process.env,
+        TEMP: nativeTemp,
+        TMP: nativeTemp,
+        LIFE_FIXTURE_OBSERVER_ROOT: scratch,
+        LIFE_FIXTURE_OBSERVER_SOURCE: modern.fakeSource,
+        LIFE_FIXTURE_OBSERVER_WITNESS: descendantWitness,
+        LIFE_FIXTURE_OBSERVER_EXE: modern.fakeExecutable,
+        LIFE_FIXTURE_OBSERVER_OUTPUT: descendantOutput,
+      }),
+    )
+    trials++
+    const descendantTrial = fixtureChild(executable, ['/S'], {
+      ...process.env,
+      TEMP: nativeTemp,
+      TMP: nativeTemp,
+      LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'launch-once',
+      LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: descendantOutput,
+      LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: 'error',
+      LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: descendantReport,
+      LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: descendantConfig,
+      LIFE_NSIS_PAYLOAD_FIXTURE_DECODER: modern.fakeExecutable,
+      LIFE_NSIS_PAYLOAD_FIXTURE_OUTPUT: descendantOutput,
+      LIFE_NSIS_PAYLOAD_FIXTURE_WARM_OUTPUT: descendantWarm,
+      LIFE_NSIS_PAYLOAD_FIXTURE_DESCENDANT_PID_FILE: `${descendantWitness}.pid`,
+    })
+    let descendantFailure
+    try {
+      const pinned = JSON.parse(
+        await waitFixtureFile(
+          `${descendantWitness}.observer-ready.json`,
+          30000,
+          'Pinned live fake descendant',
+          descendantObserver.completion,
+        ),
+      )
+      assert.ok(pinned.ProgressBytes > pinned.FirstBytes && pinned.FirstBytes > 0)
+      assert.match(pinned.Creation, /^[1-9]\d+$/)
+      const exit = await bounded(
+        descendantTrial.completion,
+        30000,
+        'Raw launcher did not return after failing decoder',
+      )
+      const diagnostic = maybeRead(`${descendantReport}.diagnostic.txt`, 'utf16le')
+      if (diagnostic) console.error(`Fake descendant boundary diagnostic:\n${diagnostic}`)
+      assert.equal(
+        exit.code,
+        0,
+        `Raw launcher descendant proof failed\n${JSON.stringify(exit)}\n${diagnostic}`,
+      )
+      assert.equal(fs.readFileSync(descendantReport, 'utf8'), 'ok\r\n')
+      fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
+      const observerExit = await bounded(
+        descendantObserver.completion,
+        30000,
+        'Pinned descendant observer did not terminate',
+      )
+      const finished = maybeRead(`${descendantWitness}.observer-finished.json`, 'utf8')
+      console.log(
+        `Native descendant lifetime evidence: ${finished || JSON.stringify(observerExit)}`,
+      )
+      assert.equal(observerExit.code, 0, observerExit.stderr)
+      const final = JSON.parse(finished)
+      assert.equal(final.Pid, pinned.Pid)
+      assert.equal(final.Creation, pinned.Creation)
+      assert.equal(final.Image, pinned.Image)
+      assert.equal(final.Sha256, sha256(path.join(descendantOutput, 'descendant-writes.bin')))
+      assert.equal(
+        final.Bytes,
+        fs.statSync(path.join(descendantOutput, 'descendant-writes.bin')).size,
+      )
+      assert.deepEqual(
+        fs.readdirSync(descendantOutput),
+        ['descendant-writes.bin'],
+        'Raw descendant failure must remove its owned guard before reporting completion',
+      )
+      for (const action of ['registered', 'launched'])
+        assert.equal(fs.existsSync(`${descendantReport}.${action}`), false)
+    } catch (error) {
+      descendantFailure = error
+    } finally {
+      const cleanupErrors = []
+      if (descendantFailure) {
+        descendantTrial.child.kill('SIGKILL')
+        try {
+          await bounded(
+            descendantTrial.completion,
+            10000,
+            'Failed raw descendant fixture did not terminate',
+          )
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+        if (!fs.existsSync(`${descendantWitness}.launch-complete`))
+          try {
+            fs.writeFileSync(`${descendantWitness}.launch-complete`, 'error\n', { flag: 'wx' })
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        try {
+          const exit = await bounded(
+            descendantObserver.completion,
+            35000,
+            'Failed descendant observer did not release its pinned handles',
+          )
+          if (exit.code !== 0)
+            cleanupErrors.push(new Error(`Descendant observer teardown: ${JSON.stringify(exit)}`))
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      finishFixtureCleanup(
+        descendantFailure,
+        () => {
+          if (cleanupErrors.length)
+            throw new AggregateError(cleanupErrors, 'Descendant native teardown failed')
+        },
+        'fake descendant trial',
+      )
     }
 
     const hashVectors = directory('native-hash-vectors')
@@ -1944,6 +3892,10 @@ try {
       assert.ok(
         directMetadataPhases.includes('payload-direct-start'),
         `${label}: metadata comparison must exercise direct extraction`,
+      )
+      assert.ok(
+        directMetadataPhases.includes('modern-decoder-result-ok'),
+        `${label}: metadata parity must exercise the actual modern decoder`,
       )
       execute(
         `metadata-control-${label}`,
@@ -2350,6 +4302,7 @@ try {
       execute('exact-native-access-denied', 'exact', deniedTarget, 0)
       execute('preflight-native-access-denied', 'preflight', deniedTarget, 0)
       hashRejected('native-access-denied', deniedFile)
+      rawLaunch('native-access-denied', rawDecoder, deniedFile, 'unavailable')
       assert.deepEqual(
         execute('extract-native-access-denied', 'extract', deniedTarget, 0, good, false),
         [],
@@ -2401,6 +4354,8 @@ try {
       [
         'payload-direct-start',
         'extract-start',
+        'modern-decoder-start',
+        'modern-decoder-result-ok',
         'extract-complete',
         'payload-verification-start',
         'payload-verification-complete',
@@ -2423,6 +4378,49 @@ try {
       inventory(direct),
       inventory(payload),
       'Direct extraction must install the exact trusted tree',
+    )
+    const wrongPin = directory('extract-wrong-modern-pin')
+    const wrongPinPhases = execute('extract-wrong-modern-pin', 'extract-wrong-pin', wrongPin, 1)
+    assert.ok(wrongPinPhases.includes('modern-decoder-result-error'))
+    assert.equal(
+      wrongPinPhases.includes('modern-decoder-start'),
+      false,
+      'A wrong decoder pin must fail before CreateProcess',
+    )
+    assert.ok(wrongPinPhases.includes('payload-direct-fallback'))
+    assert.deepEqual(
+      inventory(wrongPin),
+      inventory(payload),
+      'Wrong decoder pin recovery must still verify every trusted payload hash',
+    )
+    const collisionTarget = directory('extract-trusted-guard-collision')
+    const collisionPhases = execute(
+      'extract-trusted-guard-collision',
+      'extract',
+      collisionTarget,
+      1,
+      collisionArchive,
+      true,
+      collisionExecutable,
+    )
+    assert.ok(collisionPhases.includes('modern-decoder-start'))
+    assert.ok(
+      collisionPhases.includes('modern-decoder-result-error'),
+      'The decoder must reject overwriting the held CREATE_NEW guard',
+    )
+    assert.equal(collisionPhases.includes('modern-decoder-result-ok'), false)
+    assert.ok(
+      collisionPhases.includes('payload-direct-fallback') &&
+        collisionPhases.includes('payload-copy-complete'),
+    )
+    assert.deepEqual(
+      inventory(collisionTarget),
+      inventory(collisionPayload),
+      'After guard removal the exact verified stock stage must install the legitimate trusted collision file',
+    )
+    assert.equal(
+      fs.readFileSync(path.join(collisionTarget, '.life-installer-extractor-guard'), 'utf8'),
+      collisionText,
     )
     const staged = directory('extract-staged')
     fs.writeFileSync(path.join(staged, 'payload.bin'), 'Old payload\n')
@@ -2636,6 +4634,89 @@ try {
     const interruptionOutsideBefore = inventory(outsidePayload)
     const interruptionReport = path.join(scratch, 'interruption.result')
     const interruptionTrace = path.join(scratch, 'interruption.trace.tsv')
+    const legacyInterrupted = directory('extract-legacy-interrupted')
+    const legacyInterruptionReport = path.join(scratch, 'legacy-interruption.result')
+    const legacyInterruptionTrace = path.join(scratch, 'legacy-interruption.trace.tsv')
+    const legacyInterruption = await interruptActualExtraction({
+      executable: legacyLargeExecutable,
+      env: {
+        ...process.env,
+        TEMP: nativeTemp,
+        TMP: nativeTemp,
+        ...redirectedAppData,
+        LIFE_NSIS_PAYLOAD_FIXTURE_MODE: 'extract',
+        LIFE_NSIS_PAYLOAD_FIXTURE_TARGET: legacyInterrupted,
+        LIFE_NSIS_PAYLOAD_FIXTURE_EXPECTED: '1',
+        LIFE_NSIS_PAYLOAD_FIXTURE_RESULT: legacyInterruptionReport,
+        LIFE_NSIS_PAYLOAD_FIXTURE_ARCHIVE: largeArchive,
+        LIFE_NSIS_TRACE_FILE: legacyInterruptionTrace,
+      },
+      target: legacyInterrupted,
+      report: legacyInterruptionReport,
+      trace: legacyInterruptionTrace,
+      expectedSize: largeBytes.length,
+      expectedPrefix: largeBytes.subarray(0, 4096),
+      expectedTail: largeBytes.subarray(largeBytes.length - 4096),
+      expectedSha256: sha256(path.join(largePayload, 'large.bin')),
+    })
+    const legacyAppDataAfterInterruption = inventory(appData)
+    console.log(
+      `Seeded AppData legacy interruption preservation: ${JSON.stringify({ appDataBefore, legacyAppDataAfterInterruption })}`,
+    )
+    assert.deepEqual(
+      legacyAppDataAfterInterruption,
+      appDataBefore,
+      'Original legacy interruption must preserve every seeded AppData hash',
+    )
+    assert.deepEqual(inventory(outsidePayload), interruptionOutsideBefore)
+    assert.deepEqual(
+      execute(
+        'extract-legacy-interrupted-retry',
+        'extract',
+        legacyInterrupted,
+        1,
+        largeArchive,
+        true,
+        legacyLargeExecutable,
+        redirectedAppData,
+      ),
+      stagedPhases,
+    )
+    assert.deepEqual(
+      inventory(legacyInterrupted),
+      inventory(largePayload),
+      'Original legacy reinstall must restore every trusted hash',
+    )
+    const legacyAppDataAfterRecovery = inventory(appData)
+    console.log(
+      `Seeded AppData legacy recovery preservation: ${JSON.stringify({ appDataBefore, legacyAppDataAfterRecovery })}`,
+    )
+    assert.deepEqual(legacyAppDataAfterRecovery, appDataBefore)
+    assert.deepEqual(inventory(outsidePayload), interruptionOutsideBefore)
+    console.log(
+      `Original legacy interruption proof retained: ${JSON.stringify(legacyInterruption)}`,
+    )
+    const modernObserverConfig = {
+      ...observerConfig(
+        'modern-interruption',
+        largeExecutable,
+        nativeTemp,
+        'life-modern-decoder\\7za-26.04-x64.exe',
+        'PartialKill',
+        interruptionReport,
+      ),
+      PayloadFile: path.join(interrupted, 'large.bin'),
+      ExpectedSize: largeBytes.length,
+      PrefixBase64: largeBytes.subarray(0, 4096).toString('base64'),
+      TailBase64: largeBytes.subarray(largeBytes.length - 4096).toString('base64'),
+    }
+    const modernObserver = await startDecoderObserver({
+      scratch,
+      name: 'modern-interruption',
+      source: modern.observerSource,
+      config: modernObserverConfig,
+      env: { ...process.env, TEMP: nativeTemp, TMP: nativeTemp, ...redirectedAppData },
+    })
     const interruption = await interruptActualExtraction({
       executable: largeExecutable,
       env: {
@@ -2657,6 +4738,7 @@ try {
       expectedPrefix: largeBytes.subarray(0, 4096),
       expectedTail: largeBytes.subarray(largeBytes.length - 4096),
       expectedSha256: sha256(path.join(largePayload, 'large.bin')),
+      observer: modernObserver,
     })
     const appDataAfterInterruption = inventory(appData)
     console.log(
@@ -2708,10 +4790,10 @@ try {
       'Interruption and reinstall must preserve outside fixture hashes',
     )
     console.log(
-      `Native interruption proof: actual extractor PID ${interruption.pid}, preallocated ${interruption.finalSize} bytes, written prefix and unwritten tail observed before kill and retained after process exit; stock reinstall restored every trusted hash.`,
+      `Modern native interruption proof: ${JSON.stringify(interruption)}; exact NSIS and decoder handles signaled before complete stable inventory/hash checks, and stock reinstall restored every trusted hash.`,
     )
     console.log(
-      `Real Windows NSIS payload fixture passed ${trials} trials plus actual in-progress interruption: full hashes and exact inventory, all 20 registers, stack, set/clear errors, handle preservation, file-symlink/native-access-denied rejection, reparse/compressed guard, unchanged stock metadata parity, custom ACL/ADS preservation, direct and stock extraction, CRC/truncated/short archives, retained extras, busy-file fail-closed behavior, stock-initialized AppData equality and verified interruption recovery.`,
+      `Real Windows NSIS payload fixture passed ${trials} trials plus independent legacy and modern in-progress interruptions: full hashes and exact inventory, all 20 registers, stack, set/clear errors, handle preservation, file-symlink/native-access-denied rejection, reparse/compressed guard, unchanged stock metadata parity, custom ACL/ADS preservation, modern raw protocol and private fault/descendant containment, actual attribute-only junction mutation rejection, trusted guard-filename collision recovery, direct and stock extraction, CRC/truncated/short archives, retained extras, busy-file fail-closed behavior, stock-initialized AppData equality and verified interruption recovery.`,
     )
   } catch (error) {
     primaryFailure = error

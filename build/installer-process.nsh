@@ -109,11 +109,29 @@
       ; A PS7 parent can pass incompatible module paths through this native
       ; process. Select only this Windows PowerShell child's own modules before
       ; autoloading; the parent environment and complete stock fallback stay intact.
-      nsExec::ExecToStack /TIMEOUT=2000 `"${LIFE_PROCESS_PROBE_EXECUTABLE}" -NoProfile -NonInteractive -Command "try { $$ErrorActionPreference = 'Stop'; $$ProgressPreference = 'SilentlyContinue'; $$env:PSModulePath = [IO.Path]::Combine($$PSHOME, 'Modules'); $$null = Get-Command Get-CimInstance -ErrorAction Stop; if ((Get-ExecutionPolicy -Scope Process -ErrorAction Stop) -eq 'Restricted') { exit 74 }; $$target = [Environment]::GetEnvironmentVariable('${LIFE_PROCESS_PROBE_ENV}', 'Process'); if ([String]::IsNullOrEmpty($$target)) { exit 74 }; $$processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop); if ($$processes.Count -eq 0) { exit 74 }; if (@($$processes | Where-Object { $$_.Path -and $$_.Path.StartsWith($$target, 'CurrentCultureIgnoreCase') }).Count -gt 0) { exit 74 }; [Console]::Out.Write('${LIFE_PROCESS_PROBE_MARKER}'); exit ${LIFE_PROCESS_PROBE_EXIT} } catch { exit 74 }"`
+      ; Projection requests only the path and automatic keys; every process is
+      ; still returned. PowerShell's Path property reads ExecutablePath.
+      !ifmacrodef LifeInstallerTrace
+        !insertmacro LifeInstallerTrace "process-probe-start"
+      !endif
+      nsExec::ExecToStack /TIMEOUT=2000 `"${LIFE_PROCESS_PROBE_EXECUTABLE}" -NoProfile -NonInteractive -Command "try { $$ErrorActionPreference = 'Stop'; $$ProgressPreference = 'SilentlyContinue'; $$env:PSModulePath = [IO.Path]::Combine($$PSHOME, 'Modules'); $$null = Get-Command Get-CimInstance -ErrorAction Stop; if ((Get-ExecutionPolicy -Scope Process -ErrorAction Stop) -eq 'Restricted') { exit 74 }; $$target = [Environment]::GetEnvironmentVariable('${LIFE_PROCESS_PROBE_ENV}', 'Process'); if ([String]::IsNullOrEmpty($$target)) { exit 74 }; $$processes = @(Get-CimInstance -ClassName Win32_Process -Property ExecutablePath -ErrorAction Stop); if ($$processes.Count -eq 0) { exit 74 }; if (@($$processes | Where-Object { $$_.Path -and $$_.Path.StartsWith($$target, 'CurrentCultureIgnoreCase') }).Count -gt 0) { exit 74 }; [Console]::Out.Write('${LIFE_PROCESS_PROBE_MARKER}'); exit ${LIFE_PROCESS_PROBE_EXIT} } catch { exit 74 }"`
       Pop $6
       Pop $7
       !ifmacrodef LifeProcessProbeTrace
         !insertmacro LifeProcessProbeTrace subprocess "$6|$7"
+      !endif
+      !ifmacrodef LifeInstallerTrace
+        ${If} $6 == "timeout"
+          !insertmacro LifeInstallerTrace "process-probe-timeout"
+        ${ElseIf} $6 == "error"
+          !insertmacro LifeInstallerTrace "process-probe-error"
+        ${ElseIf} $6 == "${LIFE_PROCESS_PROBE_EXIT}"
+          !insertmacro LifeInstallerTrace "process-probe-exit-73"
+        ${ElseIf} $6 == "74"
+          !insertmacro LifeInstallerTrace "process-probe-exit-74"
+        ${Else}
+          !insertmacro LifeInstallerTrace "process-probe-unexpected-exit"
+        ${EndIf}
       !endif
 
       ; Restore the process environment before considering the proof valid.
@@ -162,8 +180,14 @@
   Call LifeNoScopedProcess
   Pop $R0
   ${If} $R0 == "1"
+    !ifmacrodef LifeInstallerTrace
+      !insertmacro LifeInstallerTrace "process-probe-accepted"
+    !endif
     Pop $R0
   ${Else}
+    !ifmacrodef LifeInstallerTrace
+      !insertmacro LifeInstallerTrace "process-probe-stock-fallback"
+    !endif
     Pop $R0
     !insertmacro LifeStockCheckAppRunning
   ${EndIf}

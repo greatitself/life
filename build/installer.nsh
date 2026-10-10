@@ -9,6 +9,7 @@
 !include "installer-payload.nsh"
 !include "installer-hash.nsh"
 !include "installer-process.nsh"
+!include "installer-modern.nsh"
 Var pid
 
 !macro LifeInstallerTrace PHASE
@@ -22,6 +23,7 @@ Var pid
     !insertmacro LifeDefineHashFile
     !insertmacro LifeDefineProcessCheck
     !insertmacro LifeDefineEmptyPayloadDirectory
+    !insertmacro LifeDefineModernDecoder
     !ifdef APP_64
       !system 'node "${PROJECT_DIR}/scripts/generate-installer-payload.cjs" --archive "${APP_64}" --arch 64 --output "${APP_64}.life-payload.nsh"' = 0
       !include "${APP_64}.life-payload.nsh"

@@ -10,24 +10,38 @@ module.exports = async function packageDependencies(context) {
   const asar = await import(pathToFileURL(builderRequire.resolve('@electron/asar')).href)
   const resources = context.packager.getResourcesDir(context.appOutDir)
   const archive = join(resources, 'app.asar')
+  const manifest = await collectDependencyManifest(archive, asar)
+  await writeFile(join(resources, 'life-dependencies.json'), JSON.stringify(manifest), 'utf8')
+  console.log(
+    `  • compiler dependencies archived: ${manifest.files.length} files, cache ${manifest.key.slice(0, 12)}`,
+  )
+}
+
+async function collectDependencyManifest(archive, asar, filesystem = {}) {
+  const readStat = filesystem.stat || stat
+  const joinPath = filesystem.join || join
   const files = []
   for (const listed of asar.listPackage(archive)) {
-    const name = listed.replace(/^[/\\]/, '').replaceAll('\\', '/')
+    // ASAR's API resolves filenames with the host platform's path separator.
+    // Keep native lookup paths separate from portable manifest identifiers.
+    const archiveName = listed.replace(/^[/\\]+/, '')
+    const name = archiveName.replaceAll('\\', '/')
     if (!name.startsWith('node_modules/')) continue
-    const entry = asar.statFile(archive, name, true)
+    const entry = asar.statFile(archive, archiveName, true)
     if (entry.files || entry.size === undefined) continue
     // ASAR records the executable flag only for packed files; native binaries are
     // deliberately unpacked, so preserve their actual target-platform file mode.
     const executable =
       entry.executable ||
-      (entry.unpacked && Boolean((await stat(join(`${archive}.unpacked`, name))).mode & 0o111))
+      (entry.unpacked &&
+        Boolean((await readStat(joinPath(`${archive}.unpacked`, archiveName))).mode & 0o111))
     files.push({
       path: name.slice('node_modules/'.length),
       size: entry.size,
       sha256:
         entry.integrity?.algorithm === 'SHA256'
           ? entry.integrity.hash
-          : createHash('sha256').update(asar.extractFile(archive, name)).digest('hex'),
+          : createHash('sha256').update(asar.extractFile(archive, archiveName)).digest('hex'),
       ...(executable ? { executable: true } : {}),
     })
   }
@@ -39,12 +53,7 @@ module.exports = async function packageDependencies(context) {
   if (!files.some((file) => /^@esbuild\/[^/]+\/(?:bin\/esbuild|esbuild\.exe)$/.test(file.path)))
     throw new Error('The target-platform esbuild executable is missing from the compiler payload')
   const key = createHash('sha256').update(JSON.stringify(files)).digest('hex')
-  await writeFile(
-    join(resources, 'life-dependencies.json'),
-    JSON.stringify({ format: 1, key, files }),
-    'utf8',
-  )
-  console.log(
-    `  • compiler dependencies archived: ${files.length} files, cache ${key.slice(0, 12)}`,
-  )
+  return { format: 1, key, files }
 }
+
+module.exports.collectDependencyManifest = collectDependencyManifest

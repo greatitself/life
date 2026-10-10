@@ -1723,7 +1723,7 @@ function fixtureChild(executable, args, env) {
 }
 
 async function startDecoderObserver({ scratch, name, source, config, env }) {
-  const configFile = path.join(scratch, `${name}.observer-config.json`)
+  const configFile = path.join(path.dirname(config.ReadyFile), `${name}.observer-config.json`)
   fs.writeFileSync(configFile, JSON.stringify(config))
   const observer = fixtureChild(
     'powershell.exe',
@@ -3086,14 +3086,26 @@ SectionEnd
       else fs.mkdirSync(target)
       return target
     }
+    // Rename publication needs write access to its immediate parent. Keep
+    // controls below a fresh directory outside every pinned launch ancestry.
+    const observerControls = directory('launcher-observer-controls')
+    function assertControlIsolation(...launchPaths) {
+      for (const filename of launchPaths) {
+        const relative = path.relative(observerControls, filename)
+        assert.ok(
+          relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative),
+          `Launcher input/output would pin the control directory: ${filename}`,
+        )
+      }
+    }
     function observerConfig(name, parentImage, decoderRoot, decoderSuffix, mode, report) {
       return {
         OwnedRoot: scratch,
-        ReadyFile: path.join(scratch, `${name}.observer-ready`),
+        ReadyFile: path.join(observerControls, `${name}.observer-ready`),
         ParentPidFile: `${report}.pid`,
-        ObservedFile: path.join(scratch, `${name}.observer-observed.json`),
-        ResultFile: path.join(scratch, `${name}.observer-result.json`),
-        KillRequestFile: path.join(scratch, `${name}.observer-kill`),
+        ObservedFile: path.join(observerControls, `${name}.observer-observed.json`),
+        ResultFile: path.join(observerControls, `${name}.observer-result.json`),
+        KillRequestFile: path.join(observerControls, `${name}.observer-kill`),
         RequestToken: name,
         ParentImage: parentImage,
         DecoderRoot: decoderRoot,
@@ -3260,8 +3272,9 @@ SectionEnd
     for (const mode of ['pause-after-create', 'fail-job-query']) {
       const name = `launcher-fault-${mode}`
       const output = directory(`${name}-output`)
-      const report = path.join(scratch, `${name}.result`)
-      const marker = path.join(scratch, `${name}.created`)
+      const report = path.join(observerControls, `${name}.result`)
+      const marker = path.join(observerControls, `${name}.created`)
+      assertControlIsolation(modern.decoder, good, output)
       const config = {
         ...observerConfig(
           name,
@@ -3491,9 +3504,10 @@ SectionEnd
     ]) {
       const descendantOutput = directory(`${descendantName}-output`)
       const descendantWarm = directory(`${descendantName}-warm`)
-      const descendantWitness = path.join(scratch, `${descendantName}-witness`)
+      const descendantWitness = path.join(observerControls, `${descendantName}-witness`)
       const descendantConfig = path.join(scratch, `${descendantName}-config.txt`)
-      const descendantReport = path.join(scratch, `${descendantName}.result`)
+      const descendantReport = path.join(observerControls, `${descendantName}.result`)
+      assertControlIsolation(modern.fakeExecutable, descendantConfig, descendantOutput)
       fs.writeFileSync(
         descendantConfig,
         `mode=${descendantMode}\nroot=${scratch}\nwitness=${descendantWitness}\nexe=${modern.fakeExecutable}\n`,
@@ -4736,8 +4750,8 @@ try {
     fs.writeFileSync(path.join(localAppData, 'notes.txt'), 'Retain AppData through interruption\n')
     const appDataBefore = inventory(appData)
     const interruptionOutsideBefore = inventory(outsidePayload)
-    const interruptionReport = path.join(scratch, 'interruption.result')
-    const interruptionTrace = path.join(scratch, 'interruption.trace.tsv')
+    const interruptionReport = path.join(observerControls, 'interruption.result')
+    const interruptionTrace = path.join(observerControls, 'interruption.trace.tsv')
     const legacyInterrupted = directory('extract-legacy-interrupted')
     const legacyInterruptionReport = path.join(scratch, 'legacy-interruption.result')
     const legacyInterruptionTrace = path.join(scratch, 'legacy-interruption.trace.tsv')
@@ -4800,6 +4814,7 @@ try {
     console.log(
       `Original legacy interruption proof retained: ${JSON.stringify(legacyInterruption)}`,
     )
+    assertControlIsolation(nativeTemp, largeArchive, interrupted)
     const modernObserverConfig = {
       ...observerConfig(
         'modern-interruption',

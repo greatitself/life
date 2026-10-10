@@ -226,15 +226,97 @@ $identitySections = [Security.AccessControl.AccessControlSections]::Owner -bor [
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 Add-Type -TypeDefinition @'
 using System;
+using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 public static class LifeFixtureAttributes {
   public sealed class Result { public long Attributes; public int Error; }
+  public sealed class FileRead { public long Length; public string Sha256; }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
   private static extern uint GetFileAttributesW(string path);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+  private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, out uint size);
+  [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, [MarshalAs(UnmanagedType.Bool)] out bool present, out IntPtr dacl, [MarshalAs(UnmanagedType.Bool)] out bool defaulted);
+  [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  private static extern uint SetNamedSecurityInfoW(string path, int objectType, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+  private static extern IntPtr LocalFree(IntPtr memory);
   public static Result Read(string path) {
     uint attributes = GetFileAttributesW(path);
     int error = Marshal.GetLastWin32Error();
     return new Result { Attributes = unchecked((int)attributes), Error = error };
+  }
+  public static FileRead ReadFile(string path) {
+    SafeFileHandle handle = CreateFileW(path, 0x80000000u, 1, IntPtr.Zero, 3, 0x80, IntPtr.Zero);
+    int error = Marshal.GetLastWin32Error();
+    if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(error, "Native fixture file read open failed"); }
+    FileStream stream;
+    try { stream = new FileStream(handle, FileAccess.Read, 4096, false); }
+    catch { handle.Dispose(); throw; }
+    using (stream)
+    using (SHA256 hash = SHA256.Create()) {
+      long length = stream.Length;
+      if (length < 0 || length > 1048576) throw new InvalidOperationException("ACL fixture file exceeds read bounds");
+      string sha256 = BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+      if (stream.Position != length || stream.Length != length) throw new IOException("ACL fixture file changed during native read");
+      return new FileRead { Length = length, Sha256 = sha256 };
+    }
+  }
+  public static void ValidateAccess(string sddl) { AccessDescriptor(null, sddl, false); }
+  public static void RestoreAccess(string path, string sddl) { AccessDescriptor(path, sddl, true); }
+  private static void AccessDescriptor(string path, string sddl, bool restore) {
+    if (String.IsNullOrEmpty(sddl) || sddl.Length > 65536) throw new ArgumentException("Invalid saved fixture DACL");
+    IntPtr descriptor = IntPtr.Zero;
+    uint size;
+    bool converted = ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, out size);
+    int conversionError = Marshal.GetLastWin32Error();
+    Exception failure = null;
+    try {
+      if (!converted) throw new Win32Exception(conversionError, "Saved fixture DACL conversion failed");
+      if (descriptor == IntPtr.Zero || size < 20 || size > 65536) throw new InvalidOperationException("Saved fixture security descriptor exceeds bounds");
+      bool present, defaulted;
+      IntPtr dacl;
+      bool gotDacl = GetSecurityDescriptorDacl(descriptor, out present, out dacl, out defaulted);
+      int daclError = Marshal.GetLastWin32Error();
+      if (!gotDacl) throw new Win32Exception(daclError, "Saved fixture DACL lookup failed");
+      if (!present || dacl == IntPtr.Zero) throw new InvalidOperationException("Fixture restoration refuses an absent or NULL DACL");
+      long offset = dacl.ToInt64() - descriptor.ToInt64();
+      if (offset < 20 || offset > size - 8) throw new InvalidOperationException("Saved fixture DACL lies outside its descriptor");
+      int aclSize = unchecked((ushort)Marshal.ReadInt16(dacl, 2));
+      if (aclSize < 8 || offset + aclSize > size) throw new InvalidOperationException("Saved fixture DACL exceeds descriptor bounds");
+      ushort control;
+      uint revision;
+      bool gotControl = GetSecurityDescriptorControl(descriptor, out control, out revision);
+      int controlError = Marshal.GetLastWin32Error();
+      if (!gotControl) throw new Win32Exception(controlError, "Saved fixture DACL control lookup failed");
+      if (revision != 1) throw new InvalidOperationException("Unexpected saved fixture descriptor revision");
+      uint information = 4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u);
+      if (restore) {
+        uint status = SetNamedSecurityInfoW(path, 1, information, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+        if (status != 0) throw new Win32Exception(unchecked((int)status), "Native saved fixture DACL restoration failed: " + path);
+      }
+    } catch (Exception error) { failure = error; }
+    finally {
+      if (descriptor != IntPtr.Zero) {
+        IntPtr remaining = LocalFree(descriptor);
+        int freeError = Marshal.GetLastWin32Error();
+        if (remaining != IntPtr.Zero) {
+          Exception freeFailure = new Win32Exception(freeError, "Saved fixture descriptor release failed");
+          failure = failure == null ? freeFailure : new AggregateException("DACL restoration and descriptor release failed", failure, freeFailure);
+        }
+      }
+    }
+    if (failure != null) throw failure;
   }
 }
 '@
@@ -244,9 +326,13 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
     if ($attributes.Attributes -eq -1 -or ($attributes.Attributes -band 0x10) -eq 0 -or ($attributes.Attributes -band 0x400) -ne 0) { throw 'Access denial requires ordinary fixture directories.' }
   }
   $beforeFile = [LifeFixtureAttributes]::Read($fixtureFile)
+  $beforeParent = [LifeFixtureAttributes]::Read($fixtureParent)
   if ($beforeFile.Attributes -eq -1 -or ($beforeFile.Attributes -band 0x410) -ne 0) { throw 'Access denial requires an ordinary expected file.' }
   $parentAcl = [IO.Directory]::GetAccessControl($fixtureParent)
   $fileAcl = [IO.File]::GetAccessControl($fixtureFile)
+  $beforeRead = [LifeFixtureAttributes]::ReadFile($fixtureFile)
+  $beforeEntries = @([IO.Directory]::GetFileSystemEntries($fixtureParent) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+  if ($beforeEntries.Count -gt 16) { throw 'ACL fixture directory exceeds enumeration bounds.' }
   $backup = [PSCustomObject]@{
     Parent = $fixtureParent; File = $fixtureFile; Sid = $currentSid.Value
     ParentAccess = $parentAcl.GetSecurityDescriptorSddlForm($sections)
@@ -254,7 +340,12 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
     ParentIdentity = $parentAcl.GetSecurityDescriptorSddlForm($identitySections)
     FileIdentity = $fileAcl.GetSecurityDescriptorSddlForm($identitySections)
     FileAttributes = $beforeFile.Attributes
+    ParentAttributes = $beforeParent.Attributes
+    FileLength = $beforeRead.Length; FileSha256 = $beforeRead.Sha256
+    ParentEntries = $beforeEntries
   }
+  [LifeFixtureAttributes]::ValidateAccess($backup.ParentAccess)
+  [LifeFixtureAttributes]::ValidateAccess($backup.FileAccess)
   [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_BACKUP, (ConvertTo-Json -InputObject $backup -Compress), [Text.UTF8Encoding]::new($false))
   # NTFS also exposes a child's attributes through parent directory listing.
   # Deny both independent rights, without denying traversal or WRITE_DAC.
@@ -268,25 +359,163 @@ if ($env:LIFE_ACL_FIXTURE_ACTION -eq 'apply') {
 } elseif ($env:LIFE_ACL_FIXTURE_ACTION -eq 'restore') {
   $backup = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($env:LIFE_ACL_FIXTURE_BACKUP))
   if ($backup.Parent -cne $fixtureParent -or $backup.File -cne $fixtureFile -or $backup.Sid -cne $currentSid.Value) { throw 'ACL backup paths or identity do not match this owned fixture.' }
-  # New security objects mark the saved Access section modified for persistence.
-  $fileAcl = [Security.AccessControl.FileSecurity]::new()
-  $fileAcl.SetSecurityDescriptorSddlForm($backup.FileAccess, $sections)
-  $parentAcl = [Security.AccessControl.DirectorySecurity]::new()
-  $parentAcl.SetSecurityDescriptorSddlForm($backup.ParentAccess, $sections)
+  $diagnostics = [ordered]@{ SavedParentAccess = $backup.ParentAccess; SavedFileAccess = $backup.FileAccess; CurrentParentAccess = $null; CurrentFileAccess = $null; ParentReadError = $null; FileReadError = $null }
+  try { $diagnostics.CurrentParentAccess = ([IO.Directory]::GetAccessControl($fixtureParent)).GetSecurityDescriptorSddlForm($sections) } catch { $diagnostics.ParentReadError = $_.Exception.ToString() }
+  try { $diagnostics.CurrentFileAccess = ([IO.File]::GetAccessControl($fixtureFile)).GetSecurityDescriptorSddlForm($sections) } catch { $diagnostics.FileReadError = $_.Exception.ToString() }
+  [Console]::Error.WriteLine('Fixture ACL restoration before native writes: ' + (ConvertTo-Json -InputObject $diagnostics -Compress))
+  # Restore the parent first so any inheritance propagation precedes the final
+  # exact file DACL restoration. Native calls set only the saved Access section.
   $restoreFailures = @()
-  try { [IO.File]::SetAccessControl($fixtureFile, $fileAcl) } catch { $restoreFailures += $_.Exception.ToString() }
-  try { [IO.Directory]::SetAccessControl($fixtureParent, $parentAcl) } catch { $restoreFailures += $_.Exception.ToString() }
+  try { [LifeFixtureAttributes]::RestoreAccess($fixtureParent, $backup.ParentAccess) } catch { $restoreFailures += $_.Exception.ToString() }
+  try { [LifeFixtureAttributes]::RestoreAccess($fixtureFile, $backup.FileAccess) } catch { $restoreFailures += $_.Exception.ToString() }
   if ($restoreFailures.Count -gt 0) { throw ('Fixture ACL restoration failed: ' + ($restoreFailures -join '; ')) }
   $restoredFile = [IO.File]::GetAccessControl($fixtureFile)
   $restoredParent = [IO.Directory]::GetAccessControl($fixtureParent)
+  $afterDiagnostics = [ordered]@{
+    SavedParentAccess = $backup.ParentAccess; RestoredParentAccess = $restoredParent.GetSecurityDescriptorSddlForm($sections)
+    SavedFileAccess = $backup.FileAccess; RestoredFileAccess = $restoredFile.GetSecurityDescriptorSddlForm($sections)
+    SavedParentIdentity = $backup.ParentIdentity; RestoredParentIdentity = $restoredParent.GetSecurityDescriptorSddlForm($identitySections)
+    SavedFileIdentity = $backup.FileIdentity; RestoredFileIdentity = $restoredFile.GetSecurityDescriptorSddlForm($identitySections)
+  }
+  [Console]::Error.WriteLine('Fixture ACL restoration after native writes: ' + (ConvertTo-Json -InputObject $afterDiagnostics -Compress))
   if ($restoredFile.GetSecurityDescriptorSddlForm($sections) -cne $backup.FileAccess -or $restoredParent.GetSecurityDescriptorSddlForm($sections) -cne $backup.ParentAccess -or $restoredFile.GetSecurityDescriptorSddlForm($identitySections) -cne $backup.FileIdentity -or $restoredParent.GetSecurityDescriptorSddlForm($identitySections) -cne $backup.ParentIdentity) { throw 'Access denial cleanup did not restore the exact DACL, owner and group.' }
   $restoredAttributes = [LifeFixtureAttributes]::Read($fixtureFile)
+  $restoredParentAttributes = [LifeFixtureAttributes]::Read($fixtureParent)
   if ($restoredAttributes.Attributes -ne $backup.FileAttributes) { throw 'Access denial cleanup did not restore native attribute access.' }
-  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; Sid = $currentSid.Value }
+  if ($restoredParentAttributes.Attributes -ne $backup.ParentAttributes) { throw 'Access denial cleanup did not restore exact parent native attributes.' }
+  $restoredEntries = @([IO.Directory]::GetFileSystemEntries($fixtureParent) | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+  if ($restoredEntries.Count -ne @($backup.ParentEntries).Count -or [String]::Join([char]0, [String[]]$restoredEntries) -cne [String]::Join([char]0, [String[]]$backup.ParentEntries)) { throw 'Access denial cleanup did not restore exact directory enumeration.' }
+  $restoredRead = [LifeFixtureAttributes]::ReadFile($fixtureFile)
+  if ($restoredRead.Length -ne $backup.FileLength -or $restoredRead.Sha256 -cne $backup.FileSha256) { throw 'Access denial cleanup did not restore exact native file read/hash.' }
+  $result = [PSCustomObject]@{ Restored = $true; Attributes = $restoredAttributes.Attributes; ParentAttributes = $restoredParentAttributes.Attributes; Sid = $currentSid.Value; DirectoryEntries = $restoredEntries; FileLength = $restoredRead.Length; FileSha256 = $restoredRead.Sha256 }
 } else { throw 'Unsupported access denial fixture action.' }
 [IO.File]::WriteAllText($env:LIFE_ACL_FIXTURE_OUTPUT, (ConvertTo-Json -InputObject $result -Compress), [Text.UTF8Encoding]::new($false))`
 
 const immediate = () => new Promise((resolve) => setImmediate(resolve))
+
+function reportFixtureFailure(
+  error,
+  label = 'Native payload fixture failure',
+  write = console.error,
+  seen = new Set(),
+) {
+  write(`${label}:\n${error?.stack ?? String(error)}`)
+  if (seen.has(error)) return
+  seen.add(error)
+  if (error instanceof AggregateError) {
+    error.errors.forEach((inner, index) =>
+      reportFixtureFailure(inner, `${label} [${index + 1}]`, write, seen),
+    )
+  }
+}
+
+function finishFixtureCleanup(primaryFailure, cleanup, stage, report = reportFixtureFailure) {
+  let cleanupFailure
+  try {
+    cleanup()
+  } catch (error) {
+    cleanupFailure = error
+  }
+  if (primaryFailure !== undefined) report(primaryFailure, `Original failure before ${stage}`)
+  if (cleanupFailure !== undefined) report(cleanupFailure, `${stage} failure`)
+  if (primaryFailure !== undefined && cleanupFailure !== undefined) {
+    throw new AggregateError(
+      [primaryFailure, cleanupFailure],
+      `${stage} failed after an earlier fixture failure`,
+      {
+        cause: primaryFailure,
+      },
+    )
+  }
+  if (primaryFailure !== undefined) throw primaryFailure
+  if (cleanupFailure !== undefined) throw cleanupFailure
+}
+
+function verifyFixtureCleanup() {
+  const primary = new Error('Owned primary fixture probe')
+  const cleanup = new Error('Owned cleanup fixture probe')
+  const reports = []
+  const report = (error) => reports.push(error)
+  let cleanups = 0
+  function observe(primaryFailure, failsCleanup) {
+    reports.length = 0
+    try {
+      finishFixtureCleanup(
+        primaryFailure,
+        () => {
+          cleanups++
+          if (failsCleanup) throw cleanup
+        },
+        'fixture cleanup probe',
+        report,
+      )
+    } catch (error) {
+      return error
+    }
+    return undefined
+  }
+  assert.equal(observe(primary, false), primary)
+  assert.deepEqual(reports, [primary])
+  assert.equal(observe(undefined, true), cleanup)
+  assert.deepEqual(reports, [cleanup])
+  const both = observe(primary, true)
+  assert.ok(both instanceof AggregateError)
+  assert.equal(both.errors[0], primary)
+  assert.equal(both.errors[1], cleanup)
+  assert.equal(both.cause, primary)
+  assert.deepEqual(reports, [primary, cleanup])
+  assert.equal(observe(undefined, false), undefined)
+  assert.deepEqual(reports, [])
+  assert.equal(cleanups, 4, 'Cleanup must execute after primary failures and success')
+  const scratchCleanup = new Error('Owned scratch cleanup fixture probe')
+  let nested
+  try {
+    finishFixtureCleanup(
+      both,
+      () => {
+        throw scratchCleanup
+      },
+      'nested cleanup probe',
+      report,
+    )
+  } catch (error) {
+    nested = error
+  }
+  assert.ok(nested instanceof AggregateError)
+  assert.equal(nested.errors[0], both)
+  assert.equal(nested.errors[1], scratchCleanup)
+  const fullDiagnostics = []
+  reportFixtureFailure(nested, 'nested diagnostic probe', (line) => fullDiagnostics.push(line))
+  for (const error of [primary, cleanup, scratchCleanup]) {
+    assert.ok(
+      fullDiagnostics.join('\n').includes(error.stack),
+      'Nested failure diagnostics must include every original full stack',
+    )
+  }
+  let earlyFailure
+  try {
+    ;(() => {
+      try {
+        return 'early return'
+      } finally {
+        finishFixtureCleanup(
+          undefined,
+          () => {
+            throw cleanup
+          },
+          'early return cleanup probe',
+          report,
+        )
+      }
+    })()
+  } catch (error) {
+    earlyFailure = error
+  }
+  assert.equal(earlyFailure, cleanup, 'A cleanup failure must override a successful early return')
+  console.log(
+    'Fixture cleanup probe passed: primary and cleanup identities retained separately, ordered AggregateError preserved, and early return cannot hide a cleanup failure.',
+  )
+}
 
 async function bounded(promise, timeoutMs, message) {
   let timer
@@ -553,7 +782,9 @@ function inventory(directory) {
 
 async function main() {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'life-nsis-payload-fixture-'))
+  let primaryFailure
   try {
+    verifyFixtureCleanup()
     const [sevenZip, binary, plugins] = await Promise.all([
       getPath7za(),
       getMakeNsisPath(),
@@ -1419,13 +1650,16 @@ try {
     const deniedTarget = directory('verify-native-access-denied', true)
     const deniedFile = path.join(deniedTarget, 'nested', '研究$', "entry-$value-'quote-`tick.txt")
     const deniedBefore = inventory(deniedTarget)
+    const deniedFileHash = sha256(deniedFile)
+    const deniedFileLength = fs.statSync(deniedFile).size
+    const deniedParentEntries = fs.readdirSync(path.dirname(deniedFile)).sort()
     const deniedOutsideBefore = inventory(fileSymlinkOutside)
     const deniedSource = path.join(scratch, 'native-access-denied.ps1')
     const deniedBackup = path.join(scratch, 'native-access-denied.backup.json')
     fs.writeFileSync(deniedSource, '\ufeff' + accessDeniedScript)
     function deniedAcl(action) {
       const output = path.join(scratch, `native-access-denied.${action}.json`)
-      requireSuccess(
+      const child = requireSuccess(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', deniedSource],
         {
@@ -1442,8 +1676,10 @@ try {
           }),
         },
       )
+      if (child.stderr.trim()) console.log(child.stderr.trim())
       return JSON.parse(fs.readFileSync(output, 'utf8'))
     }
+    let deniedPrimaryFailure
     try {
       const denied = deniedAcl('apply')
       assert.equal(denied.Attributes, -1, 'Access denial must come from actual GetFileAttributesW')
@@ -1465,11 +1701,23 @@ try {
       console.log(
         `Native access-denied proof: GetFileAttributesW=-1, GetLastError=5 for expected nested payload; ordinary root guard retained stock eligibility, preflight rejected, extraction exited before writes for SID ${denied.Sid}.`,
       )
+    } catch (error) {
+      deniedPrimaryFailure = error
     } finally {
-      if (fs.existsSync(deniedBackup)) {
-        const restored = deniedAcl('restore')
-        assert.equal(restored.Restored, true)
-      }
+      finishFixtureCleanup(
+        deniedPrimaryFailure,
+        () => {
+          if (fs.existsSync(deniedBackup)) {
+            const restored = deniedAcl('restore')
+            assert.equal(restored.Restored, true)
+            assert.deepEqual(restored.DirectoryEntries, deniedParentEntries)
+            assert.equal(restored.FileLength, deniedFileLength)
+            assert.equal(restored.FileSha256, deniedFileHash)
+            assert.equal(restored.ParentAttributes & 0x410, 0x10)
+          }
+        },
+        'owned fixture ACL restoration',
+      )
     }
     assert.deepEqual(
       inventory(deniedTarget),
@@ -1796,12 +2044,18 @@ try {
     console.log(
       `Real Windows NSIS payload fixture passed ${trials} trials plus actual in-progress interruption: full hashes and exact inventory, all 20 registers, stack, set/clear errors, handle preservation, file-symlink/native-access-denied rejection, reparse/compressed guard, unchanged stock metadata parity, custom ACL/ADS preservation, direct and stock extraction, CRC/truncated/short archives, retained extras, busy-file fail-closed behavior, stock-initialized AppData equality and verified interruption recovery.`,
     )
+  } catch (error) {
+    primaryFailure = error
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true })
+    finishFixtureCleanup(
+      primaryFailure,
+      () => fs.rmSync(scratch, { recursive: true, force: true }),
+      'owned fixture scratch cleanup',
+    )
   }
 }
 
 main().catch((error) => {
-  console.error(error)
+  reportFixtureFailure(error)
   process.exitCode = 1
 })

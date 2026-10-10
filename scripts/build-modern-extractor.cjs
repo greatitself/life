@@ -353,13 +353,27 @@ function inspectPe(buffer, expectedExports) {
   assert(relocations.bytes >= 8, 'Missing ASLR base relocations')
   mapped(relocations.rva, relocations.bytes)
   const loadConfig = directory(10)
-  assert(loadConfig.bytes >= 92, 'Missing CFG load configuration')
-  const configuration = mapped(loadConfig.rva, loadConfig.bytes).offset
-  const configurationBytes = buffer.readUInt32LE(configuration)
+  const reportedConfigurationBytes = loadConfig.rva
+    ? buffer.readUInt32LE(mapped(loadConfig.rva, 4).offset)
+    : 0
   assert(
-    configurationBytes >= 92 && configurationBytes <= loadConfig.bytes,
-    'Invalid CFG load configuration size',
+    loadConfig.bytes === 64 || loadConfig.bytes >= 92,
+    `Missing CFG load configuration (directory RVA 0x${loadConfig.rva.toString(16)}, directory bytes ${loadConfig.bytes}, structure bytes ${reportedConfigurationBytes})`,
   )
+  const configurationBytes = reportedConfigurationBytes
+  assert(configurationBytes >= 92, 'Invalid CFG load configuration size')
+  assert(
+    loadConfig.bytes === 64 || configurationBytes <= loadConfig.bytes,
+    'CFG load configuration exceeds its advertised directory',
+  )
+  // The x86 directory size can remain the legacy 64-byte version marker even
+  // when the internal Size covers the modern CFG fields. Validate all actual
+  // bytes instead of treating the version marker as the structure boundary.
+  // https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#load-configuration-directory
+  const configuration = mapped(
+    loadConfig.rva,
+    Math.max(loadConfig.bytes, configurationBytes),
+  ).offset
   const guardFlags = buffer.readUInt32LE(configuration + 88)
   assert(
     (guardFlags & 0x500) === 0x500,
@@ -372,11 +386,13 @@ function inspectPe(buffer, expectedExports) {
   assert(guardCount > 0 && guardTable >= imageBase, 'Missing CFG function targets')
   const stride = 4 + (guardFlags >>> 28)
   const table = mapped(guardTable - imageBase, guardCount * stride).offset
-  for (let index = 0; index < guardCount; index++)
-    assert(
-      mapped(buffer.readUInt32LE(table + index * stride)).flags & 0x20000000,
-      'CFG target must point into executable code',
-    )
+  let previousTarget = -1
+  for (let index = 0; index < guardCount; index++) {
+    const target = buffer.readUInt32LE(table + index * stride)
+    assert(target > previousTarget, 'CFG targets must be strictly sorted and unique')
+    assert(mapped(target).flags & 0x20000000, 'CFG target must point into executable code')
+    previousTarget = target
+  }
   return {
     machine: '0x014c',
     format: 'PE32',
@@ -519,7 +535,31 @@ async function main(argv = process.argv.slice(2)) {
   if (buildLog) process.stdout.write(buildLog)
   const buffer = await fs.readFile(binary)
   const expectedExports = options.fixture ? ['Launch', 'LaunchFixture'] : ['Launch']
-  const pe = inspectPe(buffer, expectedExports)
+  let pe
+  try {
+    pe = inspectPe(buffer, expectedExports)
+  } catch (error) {
+    // A failed DLL is not published as an approved plugin. Keep compiler and
+    // actual PE evidence together so a Windows failure can be diagnosed before
+    // changing build flags or verifier requirements.
+    let diagnostics = `\nPE verification failed: ${error.message}\n`
+    const dumpbin = await findOnPath('dumpbin.exe', toolchain.environment)
+    if (dumpbin) {
+      try {
+        const report = await execFile(dumpbin, ['/headers', '/loadconfig', binary], {
+          cwd: stage,
+          env: toolchain.environment,
+          maxBuffer: 16 * 1024 * 1024,
+        })
+        diagnostics += report.stdout + report.stderr
+      } catch (diagnosticError) {
+        diagnostics += `dumpbin diagnostics failed: ${diagnosticError.message}\n`
+      }
+    } else diagnostics += 'dumpbin.exe was not found in the initialized MSVC environment.\n'
+    await fs.appendFile(path.join(stage, 'compile-output.txt'), diagnostics)
+    process.stdout.write(diagnostics)
+    throw error
+  }
   assert.deepEqual(
     await sourceIdentities(),
     sources,

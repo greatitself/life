@@ -28,8 +28,10 @@ const fixture = String.raw`
 #include <cwchar>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 using DWORD = unsigned long;
+using HANDLE = unsigned long;
 constexpr DWORD FILE_ATTRIBUTE_DIRECTORY = 0x10;
 constexpr DWORD FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 constexpr DWORD FILE_ATTRIBUTE_ENCRYPTED = 0x4000;
@@ -44,14 +46,42 @@ DWORD GetFileAttributesW(const wchar_t* input) {
   return found == attributes.end() ? INVALID_FILE_ATTRIBUTES : found->second;
 }
 ${functionSource('bool ordinary_ancestors(')}
-struct OwnedHandle { std::wstring path; };
+std::map<HANDLE, std::wstring> handle_paths;
+HANDLE next_handle = 1;
+struct OwnedHandle {
+  HANDLE value = 0;
+  OwnedHandle() = default;
+  OwnedHandle(const OwnedHandle&) = delete;
+  OwnedHandle& operator=(const OwnedHandle&) = delete;
+  OwnedHandle(OwnedHandle&& other) noexcept : value(std::exchange(other.value, 0)) {}
+};
 bool open_ordinary(const std::wstring& value, bool directory, OwnedHandle& handle) {
-  assert(directory);
-  handle.path = value;
+  assert(directory && value.size() == 3); // Only the drive root uses a pathname.
   const DWORD attr = GetFileAttributesW(value.c_str());
-  return attr != INVALID_FILE_ATTRIBUTES && (attr & 0x4c10) == 0x10;
+  if (attr == INVALID_FILE_ATTRIBUTES || (attr & 0x4c10) != 0x10) return false;
+  handle.value = next_handle++;
+  handle_paths[handle.value] = value;
+  return true;
 }
-${functionSource('bool pin_ancestors(')}
+struct RelativeRequest { HANDLE parent; std::wstring component; bool directory; };
+std::vector<RelativeRequest> relative_requests;
+struct NativeFiles {
+  bool open_relative(HANDLE parent, const std::wstring& component, bool directory, OwnedHandle& result) const {
+    assert(parent && handle_paths.count(parent));
+    assert(!component.empty() && component.find_first_of(L"\\/:") == std::wstring::npos);
+    relative_requests.push_back({parent, component, directory});
+    assert(relative_requests.size() < 12);
+    const std::wstring& parent_path = handle_paths.at(parent);
+    assert(attributes.at(parent_path) == FILE_ATTRIBUTE_DIRECTORY);
+    const std::wstring value = parent_path + (parent_path.size() == 3 ? L"" : L"\\") + component;
+    const DWORD attr = GetFileAttributesW(value.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return false;
+    result.value = next_handle++;
+    handle_paths[result.value] = value;
+    return !(attr & 0x4c00) && (((attr & 0x10) != 0) == directory);
+  }
+};
+${functionSource('bool pin_path(')}
 ${functionSource('std::wstring quote(')}
 
 // An independent decoder of Windows CRT backslash/quote rules, used only to
@@ -93,25 +123,41 @@ int main() {
   assert((observed == std::vector<std::wstring>{L"D:\\", L"D:\\f"}));
   observed.clear();
   std::vector<OwnedHandle> pins;
-  assert(pin_ancestors(L"D:\\a\\b", true, pins));
+  OwnedHandle leaf;
+  const NativeFiles native;
+  assert(pin_path(L"D:\\a\\b", true, native, pins, leaf));
   assert((observed == std::vector<std::wstring>{L"D:\\", L"D:\\a", L"D:\\a\\b"}));
-  assert(pins.size() == 3 && pins[0].path == L"D:\\" && pins[2].path == L"D:\\a\\b");
-  pins.clear(); observed.clear();
-  assert(pin_ancestors(L"D:\\f", false, pins));
-  assert(observed == std::vector<std::wstring>{L"D:\\"} && pins.size() == 1);
-  pins.clear(); observed.clear();
-  assert(pin_ancestors(L"D:\\", true, pins));
-  assert(observed == std::vector<std::wstring>{L"D:\\"} && pins.size() == 1);
+  assert(pins.size() == 2 && handle_paths.at(pins[0].value) == L"D:\\" && handle_paths.at(pins[1].value) == L"D:\\a");
+  assert(handle_paths.at(leaf.value) == L"D:\\a\\b");
+  assert(relative_requests.size() == 2 && relative_requests[0].parent == pins[0].value &&
+      relative_requests[0].component == L"a" && relative_requests[0].directory &&
+      relative_requests[1].parent == pins[1].value && relative_requests[1].component == L"b" &&
+      relative_requests[1].directory);
+  pins.clear(); observed.clear(); relative_requests.clear(); leaf.value = 0;
+  assert(pin_path(L"D:\\f", false, native, pins, leaf));
+  assert((observed == std::vector<std::wstring>{L"D:\\", L"D:\\f"}) && pins.size() == 1);
+  assert(relative_requests.size() == 1 && relative_requests[0].parent == pins[0].value &&
+      relative_requests[0].component == L"f" && !relative_requests[0].directory);
+  assert(handle_paths.at(leaf.value) == L"D:\\f");
+  pins.clear(); observed.clear(); relative_requests.clear(); leaf.value = 0;
+  assert(!pin_path(L"D:\\", true, native, pins, leaf));
+  assert(observed == std::vector<std::wstring>{L"D:\\"} && pins.size() == 1 &&
+      relative_requests.empty() && !leaf.value);
   observed.clear();
   assert(!ordinary_ancestors(L"D:\\a\\b", false));
   for (DWORD unsafe : {0x400UL, 0x800UL, 0x4000UL, 0xffffffffUL}) {
     observed.clear(); attributes[L"D:\\a"] = unsafe;
     assert(!ordinary_ancestors(L"D:\\a\\b", true));
     assert((observed == std::vector<std::wstring>{L"D:\\", L"D:\\a"}));
-    pins.clear(); observed.clear();
-    assert(!pin_ancestors(L"D:\\a\\b", true, pins));
+    pins.clear(); observed.clear(); relative_requests.clear(); leaf.value = 0;
+    assert(!pin_path(L"D:\\a\\b", true, native, pins, leaf));
     assert((observed == std::vector<std::wstring>{L"D:\\", L"D:\\a"}));
+    assert(!leaf.value && relative_requests.size() == 1 && relative_requests[0].parent == pins[0].value);
   }
+  attributes[L"D:\\a"] = FILE_ATTRIBUTE_DIRECTORY;
+  pins.clear(); observed.clear(); relative_requests.clear(); leaf.value = 0;
+  assert(!pin_path(L"D:\\a\\b", false, native, pins, leaf));
+  assert(leaf.value && handle_paths.at(leaf.value) == L"D:\\a\\b"); // A failed leaf check still owns its handle.
   const std::vector<std::wstring> expected = {
     L"C:\\private tools\\7za.exe", L"x", L"-t7z", L"-y", L"-aoa", L"-bd", L"-bb0",
     L"-bso0", L"-bse0", L"-bsp0", L"-oC:\\Unicode-\u03bb-$-'\u0060\\target",

@@ -3,9 +3,11 @@
 // before checking their identities, and retains them through this call. Success
 // here means decoder exit 0 and a drained job, never payload verification.
 #include "nsis-plugin-api.h"
+#include <winternl.h>
 
 #include <algorithm>
 #include <cwchar>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +21,9 @@ static_assert(sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION) == 112);
 static_assert(offsetof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, ActiveProcesses) == 40);
 static_assert(PROC_THREAD_ATTRIBUTE_JOB_LIST == 0x2000d);
 static_assert(PROC_THREAD_ATTRIBUTE_HANDLE_LIST == 0x20002);
+static_assert(sizeof(UNICODE_STRING) == 8 && offsetof(UNICODE_STRING, Buffer) == 4);
+static_assert(sizeof(OBJECT_ATTRIBUTES) == 24 && offsetof(OBJECT_ATTRIBUTES, RootDirectory) == 4);
+static_assert(sizeof(IO_STATUS_BLOCK) == 8 && offsetof(IO_STATUS_BLOCK, Information) == 4);
 
 namespace {
 constexpr DWORD kTerminalExit = 77;
@@ -96,7 +101,7 @@ bool ordinary_ancestors(const std::wstring& path, bool directory) {
 }
 
 bool open_ordinary(const std::wstring& path, bool directory, OwnedHandle& result) {
-  result.value = CreateFileW(path.c_str(), directory ? FILE_READ_ATTRIBUTES : GENERIC_READ,
+  result.value = CreateFileW(path.c_str(), directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ,
       FILE_SHARE_READ, nullptr, OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
   if (!result.valid()) return false;
@@ -107,19 +112,59 @@ bool open_ordinary(const std::wstring& path, bool directory, OwnedHandle& result
       (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) == directory);
 }
 
-bool pin_ancestors(const std::wstring& path, bool directory, std::vector<OwnedHandle>& pins) {
-  // Traverse top-down while earlier components stay write/delete-denying. Open
-  // each component itself without following a reparse point, then inspect the
-  // held object before resolving the next component. Leaf files are held below.
-  for (size_t end = 3; end <= path.size();) {
-    if (end == path.size() && !directory) break;
-    pins.emplace_back();
-    if (!open_ordinary(path.substr(0, end), true, pins.back())) return false;
-    if (end == path.size()) break;
-    const size_t next = path.find(L'\\', end + 1);
-    end = next == std::wstring::npos ? path.size() : next;
+struct NativeFiles {
+  decltype(&NtCreateFile) create_file = nullptr;
+  bool resolve() {
+    const HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    if (!module) return false;
+    const FARPROC procedure = GetProcAddress(module, "NtCreateFile");
+    if (!procedure) return false;
+    static_assert(sizeof(procedure) == sizeof(create_file));
+    std::memcpy(&create_file, &procedure, sizeof(create_file));
+    return true;
   }
-  return true;
+  bool open_relative(HANDLE parent, const std::wstring& component, bool directory, OwnedHandle& result) const {
+    if (component.empty() || component.size() >= 32768 || component.find_first_of(L"\\/:") != std::wstring::npos) return false;
+    UNICODE_STRING unicode{static_cast<USHORT>(component.size() * sizeof(wchar_t)),
+        static_cast<USHORT>(component.size() * sizeof(wchar_t)), const_cast<wchar_t*>(component.c_str())};
+    OBJECT_ATTRIBUTES attributes{sizeof(OBJECT_ATTRIBUTES), parent, &unicode,
+        OBJ_CASE_INSENSITIVE | 0x1000, nullptr, nullptr}; // OBJ_DONT_REPARSE
+    IO_STATUS_BLOCK io{};
+    BY_HANDLE_FILE_INFORMATION parent_info{};
+    if (!GetFileInformationByHandle(parent, &parent_info) || (parent_info.dwFileAttributes & 0x4c10) != 0x10) return false;
+    const NTSTATUS status = create_file(&result.value,
+        (directory ? FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY : GENERIC_READ) | SYNCHRONIZE,
+        &attributes, &io, nullptr, 0, FILE_SHARE_READ, FILE_OPEN,
+        (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+        nullptr, 0);
+    if (status != 0 || io.Status != 0 || io.Information != 1 || !result.valid()) return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    DWORD flags = 0;
+    return GetHandleInformation(result.value, &flags) && !(flags & HANDLE_FLAG_INHERIT) &&
+        GetFileType(result.value) == FILE_TYPE_DISK && GetFileInformationByHandle(result.value, &info) &&
+        !(info.dwFileAttributes & 0x4c00) && (((info.dwFileAttributes & 0x10) != 0) == directory) &&
+        GetFileInformationByHandle(parent, &parent_info) && (parent_info.dwFileAttributes & 0x4c10) == 0x10;
+  }
+};
+
+bool pin_path(const std::wstring& path, bool directory, const NativeFiles& native,
+    std::vector<OwnedHandle>& pins, OwnedHandle& leaf) {
+  OwnedHandle drive;
+  if (!open_ordinary(path.substr(0, 3), true, drive)) return false;
+  pins.emplace_back(std::move(drive));
+  HANDLE parent = pins.back().value;
+  size_t start = 3;
+  while (start < path.size()) {
+    const size_t separator = path.find(L'\\', start);
+    const bool last = separator == std::wstring::npos;
+    const std::wstring component = path.substr(start, last ? std::wstring::npos : separator - start);
+    if (last) return native.open_relative(parent, component, directory, leaf);
+    pins.emplace_back();
+    if (!native.open_relative(parent, component, true, pins.back())) return false;
+    parent = pins.back().value;
+    start = separator + 1;
+  }
+  return false;
 }
 
 // Standard Windows argv quoting, including trailing backslashes before a quote.
@@ -149,6 +194,66 @@ std::wstring quote(const std::wstring& argument) {
   if (job && job != INVALID_HANDLE_VALUE) TerminateJobObject(job, kTerminalExit);
   ExitProcess(kTerminalExit);
 }
+
+struct OutputGuard {
+  OwnedHandle file;
+  HANDLE root = nullptr;
+  decltype(&NtCreateFile) create_file = nullptr;
+  bool created = false;
+  static constexpr wchar_t name[] = L".life-installer-extractor-guard";
+  static constexpr ULONG dont_reparse = 0x1000;
+  static constexpr NTSTATUS name_missing = static_cast<NTSTATUS>(0xc0000034UL);
+
+  NTSTATUS open(HANDLE& handle, IO_STATUS_BLOCK& io, ACCESS_MASK access, ULONG sharing, ULONG disposition,
+      ULONG options) const {
+    wchar_t component[sizeof(name) / sizeof(wchar_t)]{};
+    std::memcpy(component, name, sizeof(name));
+    UNICODE_STRING unicode{static_cast<USHORT>(sizeof(name) - sizeof(wchar_t)),
+        static_cast<USHORT>(sizeof(name)), component};
+    OBJECT_ATTRIBUTES attributes{sizeof(OBJECT_ATTRIBUTES), root, &unicode,
+        OBJ_CASE_INSENSITIVE | dont_reparse, nullptr, nullptr};
+    return create_file(&handle, access, &attributes, &io, nullptr, FILE_ATTRIBUTE_HIDDEN,
+        sharing, disposition, options, nullptr, 0);
+  }
+
+  bool ordinary_root() const {
+    BY_HANDLE_FILE_INFORMATION info{};
+    return GetFileInformationByHandle(root, &info) && (info.dwFileAttributes & 0x4c10) == FILE_ATTRIBUTE_DIRECTORY;
+  }
+
+  bool create(HANDLE directory, const NativeFiles& native) {
+    root = directory;
+    create_file = native.create_file;
+    IO_STATUS_BLOCK io{};
+    const NTSTATUS status = open(file.value, io, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
+        FILE_SHARE_READ, FILE_CREATE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_DELETE_ON_CLOSE);
+    if (file.valid()) created = true; // A FILE_CREATE handle must own a new entry.
+    if (status != 0 || io.Status != 0 || io.Information != 2 || !file.valid()) return false;
+    DWORD flags = 0;
+    BY_HANDLE_FILE_INFORMATION info{};
+    char byte = 'L';
+    DWORD written = 0;
+    return GetHandleInformation(file.value, &flags) && !(flags & HANDLE_FLAG_INHERIT) &&
+        GetFileType(file.value) == FILE_TYPE_DISK && GetFileInformationByHandle(file.value, &info) &&
+        !(info.dwFileAttributes & 0x4c10) && WriteFile(file.value, &byte, 1, &written, nullptr) && written == 1 &&
+        FlushFileBuffers(file.value) && ordinary_root();
+  }
+
+  bool remove() {
+    if (!created) return file.close() && (!root || ordinary_root());
+    if (!file.close() || !ordinary_root()) return false;
+    OwnedHandle probe;
+    IO_STATUS_BLOCK io{};
+    const NTSTATUS status = open(probe.value, io, SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT);
+    const bool removed = status == name_missing && !probe.valid();
+    const bool closed = probe.close();
+    if (removed && closed) created = false;
+    return removed && closed;
+  }
+};
 
 struct Child {
   OwnedHandle job;
@@ -208,6 +313,40 @@ struct Fixture {
   std::wstring mode;
 };
 
+bool fixture_acknowledged(const std::wstring& marker) {
+  const std::wstring path = marker + L".ack";
+  constexpr char token[] = "LIFE_LAUNCHER_OBSERVER_READY_V1\n";
+  constexpr DWORD bytes = sizeof(token) - 1;
+  const ULONGLONG started = GetTickCount64();
+  for (;;) {
+    OwnedHandle ack;
+    ack.value = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    const DWORD error = ack.valid() ? ERROR_SUCCESS : GetLastError();
+    if (!ack.valid()) {
+      if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return false;
+      if (GetTickCount64() - started >= 60000) return false;
+      Sleep(1);
+      continue;
+    }
+    BY_HANDLE_FILE_INFORMATION information{};
+    LARGE_INTEGER length{};
+    char data[sizeof(token)]{};
+    DWORD read = 0;
+    bool good = GetFileType(ack.value) == FILE_TYPE_DISK &&
+        GetFileInformationByHandle(ack.value, &information) && !(information.dwFileAttributes & 0x4c10) &&
+        GetFileSizeEx(ack.value, &length) && length.QuadPart == static_cast<LONGLONG>(bytes) &&
+        ReadFile(ack.value, data, bytes, &read, nullptr) && read == bytes;
+    if (good) {
+      for (DWORD i = 0; i < bytes; ++i) if (data[i] != token[i]) good = false;
+      char tail = 0;
+      DWORD tail_bytes = 1;
+      good = ReadFile(ack.value, &tail, 1, &tail_bytes, nullptr) && tail_bytes == 0 && good;
+    }
+    return ack.close() && good;
+  }
+}
+
 bool fixture_created(const Fixture* fixture, DWORD pid) {
   if (!fixture) return true;
   std::wstring path;
@@ -224,7 +363,7 @@ bool fixture_created(const Fixture* fixture, DWORD pid) {
       FlushFileBuffers(marker.value);
   if (!marker.close() || !good) return false;
   if (fixture->mode == L"pause-after-create") Sleep(INFINITE);
-  return fixture->mode == L"fail-job-query";
+  return fixture->mode == L"fail-job-query" && fixture_acknowledged(path);
 }
 #endif
 
@@ -249,16 +388,22 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
   if (command.size() >= kMaxPathCharacters) return L"unavailable";
 
   OwnedHandle exe_file, archive_file, output_directory, null_io;
+  OutputGuard guard;
+  NativeFiles native;
   std::vector<OwnedHandle> ancestor_pins;
   Child child;
   Attributes attributes;
   const wchar_t* result = L"unavailable";
   // All allocations and throwing string work precede successful CreateProcess.
   auto operation = [&]() {
-    if (!pin_ancestors(exe, false, ancestor_pins) || !pin_ancestors(archive, false, ancestor_pins) ||
-        !pin_ancestors(output, true, ancestor_pins) ||
-        !open_ordinary(exe, false, exe_file) || !open_ordinary(archive, false, archive_file) ||
-        !open_ordinary(output, true, output_directory)) return;
+    if (!native.resolve() || !pin_path(exe, false, native, ancestor_pins, exe_file) ||
+        !pin_path(archive, false, native, ancestor_pins, archive_file) ||
+        !pin_path(output, true, native, ancestor_pins, output_directory)) return;
+    // Relative FILE_CREATE cannot follow a junction installed while the root
+    // was empty. A retained, nonzero child keeps it nonempty during extraction;
+    // NTFS rejects junction/symlink conversion of nonempty directories. No ACL
+    // or token changes are made, and the entry is removed before verification.
+    if (!guard.create(output_directory.value, native)) return;
     child.job.value = CreateJobObjectW(nullptr, nullptr);
     if (!child.job.valid()) return;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -325,6 +470,13 @@ const wchar_t* run(const std::wstring& input_exe, const std::wstring& input_arch
     if (child.launched) { child.terminate_and_drain(); result = L"error"; }
   }
   attributes.clear();
+  // A remaining owned guard must never reach recovery's required-files mode,
+  // which deliberately preserves unrelated target entries. Unknown deletion
+  // is terminal even before a decoder launch, with delete-on-close as backup.
+  // A relative open can return a leaf handle before its final validation fails;
+  // validate that assigned output root even when guard creation was not reached.
+  if (output_directory.valid()) guard.root = output_directory.value;
+  if (!guard.remove()) terminal_failure(child.job.value);
   bool cleaned = child.close();
   cleaned = null_io.close() && cleaned;
   cleaned = output_directory.close() && cleaned;

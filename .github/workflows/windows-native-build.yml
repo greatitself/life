@@ -41,8 +41,10 @@ jobs:
           node-version: 22
       - name: Compile native launcher and verify PE exports
         run: node scripts/build-modern-extractor.cjs --output-directory output/native-compiler-proof
+      - name: Compile fixture launcher and verify PE exports
+        run: node scripts/build-modern-extractor.cjs --fixture --output-directory output/native-compiler-proof/fixture
       - name: Save native compiler evidence
-        if: always() && hashFiles('output/native-compiler-proof/LifeInstallerLauncher.dll', 'output/native-compiler-proof/launcher-metadata.json', 'output/native-compiler-proof/launcher-compile-output.txt', 'output/native-compiler-proof/.launcher-build-*/compile-output.txt', 'output/native-compiler-proof/.launcher-build-*/LifeInstallerLauncher.dll') != ''
+        if: always() && hashFiles('output/native-compiler-proof/LifeInstallerLauncher.dll', 'output/native-compiler-proof/launcher-metadata.json', 'output/native-compiler-proof/launcher-compile-output.txt', 'output/native-compiler-proof/.launcher-build-*/compile-output.txt', 'output/native-compiler-proof/.launcher-build-*/LifeInstallerLauncher.dll', 'output/native-compiler-proof/fixture/LifeInstallerLauncher.dll', 'output/native-compiler-proof/fixture/launcher-metadata.json', 'output/native-compiler-proof/fixture/launcher-compile-output.txt', 'output/native-compiler-proof/fixture/.launcher-build-*/compile-output.txt', 'output/native-compiler-proof/fixture/.launcher-build-*/LifeInstallerLauncher.dll') != ''
         uses: actions/upload-artifact@v4
         with:
           name: life-windows-native-compiler-proof
@@ -52,5 +54,10 @@ jobs:
             output/native-compiler-proof/launcher-compile-output.txt
             output/native-compiler-proof/.launcher-build-*/compile-output.txt
             output/native-compiler-proof/.launcher-build-*/LifeInstallerLauncher.dll
+            output/native-compiler-proof/fixture/LifeInstallerLauncher.dll
+            output/native-compiler-proof/fixture/launcher-metadata.json
+            output/native-compiler-proof/fixture/launcher-compile-output.txt
+            output/native-compiler-proof/fixture/.launcher-build-*/compile-output.txt
+            output/native-compiler-proof/fixture/.launcher-build-*/LifeInstallerLauncher.dll
           if-no-files-found: error
           include-hidden-files: true

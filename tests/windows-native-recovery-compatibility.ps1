@@ -35,14 +35,19 @@ try {
   if (!$gateProcess.Start()) { throw "Could not start the actual Windows compatibility gate." }
   $stdout = $gateProcess.StandardOutput.ReadToEndAsync()
   $stderr = $gateProcess.StandardError.ReadToEndAsync()
-  if (!$gateProcess.WaitForExit($TimeoutSeconds * 1000)) {
+  $timedOut = !$gateProcess.WaitForExit($TimeoutSeconds * 1000)
+  if ($timedOut) {
     $gateProcess.Kill($true)
     $gateProcess.WaitForExit()
-    throw "Windows packaged compatibility gate exceeded $TimeoutSeconds seconds."
   }
-  Write-Output $stdout.GetAwaiter().GetResult()
+  $standardOutput = $stdout.GetAwaiter().GetResult()
   $errorOutput = $stderr.GetAwaiter().GetResult()
+  [System.IO.Directory]::CreateDirectory($proofPath) | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $proofPath "gate-stdout.log"), $standardOutput)
+  [System.IO.File]::WriteAllText((Join-Path $proofPath "gate-stderr.log"), $errorOutput)
+  if ($standardOutput) { Write-Output $standardOutput }
   if ($errorOutput) { Write-Output $errorOutput }
+  if ($timedOut) { throw "Windows packaged compatibility gate exceeded $TimeoutSeconds seconds." }
   if ($gateProcess.ExitCode -ne 0) { throw "Windows compatibility gate failed (exit $($gateProcess.ExitCode))." }
   $resultPath = Join-Path $proofPath "proof.json"
   if (!(Test-Path $resultPath)) { throw "The gate did not produce packaged Windows proof." }

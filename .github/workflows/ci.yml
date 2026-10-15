@@ -96,106 +96,140 @@ jobs:
       - run: npm run test:recovery
         id: release_check_01
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/thread-queue-smoke.cjs
         id: release_check_02
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/thread-presentation-smoke.cjs
         id: release_check_03
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/studio-lifecycle-smoke.cjs
         id: release_check_04
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/app-live-controls-smoke.cjs
         id: release_check_05
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/app-live-controls-smoke.cjs --presentation
         id: release_check_06
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/app-live-controls-smoke.cjs --history-hydration
         id: release_check_07
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/app-live-controls-smoke.cjs --provider-utilities
         id: release_check_08
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/app-live-controls-smoke.cjs --fluidity
         id: release_check_09
         continue-on-error: true
+        timeout-minutes: 15
       - name: Verify thread organization and draft workflows
         id: release_check_10
         continue-on-error: true
+        timeout-minutes: 15
         run: node tests/thread-workflows-smoke.cjs
       - run: node tests/transcript-performance.cjs current
         id: release_check_11
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/agent-event-batch-performance.cjs
         id: release_check_12
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/sidebar-history-performance.cjs current
         id: release_check_13
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/conversation-history-performance.cjs
         id: release_check_14
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/workspace-surfaces-performance.cjs
         id: release_check_15
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/conversation-scroll-performance.cjs
         id: release_check_16
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/thread-message-navigator-smoke.cjs
         id: release_check_17
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/thread-finder-timeline-smoke.cjs
         id: release_check_18
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/settled-markdown-smoke.cjs
         id: release_check_19
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/native-checkpoint-performance.cjs
         id: release_check_20
         continue-on-error: true
+        timeout-minutes: 15
       - run: npm run test:checkpoints
         id: release_check_21
         continue-on-error: true
+        timeout-minutes: 15
       - run: npm run test:loads
         id: release_check_22
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/studio-layout-smoke.cjs
         id: release_check_23
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/run-selectors-smoke.cjs
         id: release_check_24
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/research-method-ui-smoke.cjs
         id: release_check_25
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/provider-request-ui-smoke.cjs
         id: release_check_26
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/conversation-scroll-smoke.cjs
         id: release_check_27
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/provider-updates-ui-smoke.cjs
         id: release_check_28
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/usage-smoke.cjs
         id: release_check_29
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/updates-ui-smoke.cjs
         id: release_check_30
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/graph-canvas-smoke.cjs
         id: release_check_31
         continue-on-error: true
+        timeout-minutes: 15
       - run: node tests/deferred-dialogs-smoke.cjs
         id: release_check_32
         continue-on-error: true
+        timeout-minutes: 15
       - run: npm run test:desktop
         id: release_check_33
         continue-on-error: true
+        timeout-minutes: 15
       - run: npm run format:check
         id: release_check_34
         continue-on-error: true
+        timeout-minutes: 15
       - name: Require every existing workflow check to pass
         if: always()
         env:

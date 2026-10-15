@@ -70,6 +70,23 @@ async function waitUntil(check, description, timeout = 30000) {
   throw new Error(`Timed out waiting for ${description}`)
 }
 
+async function within(check, description, timeout = 30000) {
+  let deadline
+  try {
+    return await Promise.race([
+      check(),
+      new Promise((_, reject) => {
+        deadline = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${description}`)),
+          timeout,
+        )
+      }),
+    ])
+  } finally {
+    clearTimeout(deadline)
+  }
+}
+
 async function inventory(root) {
   const entries = []
   async function visit(path) {
@@ -1083,6 +1100,7 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
       })
     }, mode)
     try {
+      phase = `passive recovery query ${mode}: reload`
       await page.reload()
       await page.locator('.app-shell').waitFor()
       await waitUntil(
@@ -1093,9 +1111,14 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
       // Main admits this new document's read only after the preceding
       // document's accepted history checkpoint has drained. Measure passive
       // behavior from that boundary, including the refused action below.
-      const admittedHistory = await page.evaluate(() => window.relay.conversations.load())
+      phase = `passive recovery query ${mode}: native history read after handoff`
+      const admittedHistory = await within(
+        () => page.evaluate(() => window.relay.conversations.load()),
+        `${mode} native history read after document handoff`,
+      )
       assert(admittedHistory.threads.length >= 2)
       const before = hash(await readFile(join(userData, 'conversations.json')))
+      phase = `passive recovery query ${mode}: refused Studio action`
       await page.getByRole('button', { name: 'Customize', exact: true }).click()
       const studio = page.getByRole('region', { name: 'Life Customization Studio', exact: true })
       await studio.waitFor()
@@ -1141,18 +1164,31 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
         historySha256: before,
         historyThreads: history.threads.length,
       })
-    } finally {
-      await application.evaluate(({ ipcMain }) => {
-        const state = globalThis.__windowsRecoveryQueryFixture
-        ipcMain.removeHandler('agent:recovery-support')
-        ipcMain.handle('agent:recovery-support', state.original)
-        for (const resolve of state.held) resolve()
-        delete globalThis.__windowsRecoveryQueryFixture
+    } catch (error) {
+      await json(join(output, `passive-query-${mode}-failure.json`), {
+        phase,
+        error: String(error.stack || error),
+        at: new Date().toISOString(),
       })
+      throw error
+    } finally {
+      phase = `passive recovery query ${mode}: restore genuine handler`
+      await within(
+        () =>
+          application.evaluate(({ ipcMain }) => {
+            const state = globalThis.__windowsRecoveryQueryFixture
+            ipcMain.removeHandler('agent:recovery-support')
+            ipcMain.handle('agent:recovery-support', state.original)
+            for (const resolve of state.held) resolve()
+            delete globalThis.__windowsRecoveryQueryFixture
+          }),
+        `${mode} recovery query handler restoration`,
+      )
     }
   }
   // End the explicit query-failure fixture with the genuine handler and a fresh
   // healthy document; raw pending markers remain available for manual recovery.
+  phase = 'passive recovery queries: healthy document restore'
   await page.reload()
   await page.locator('.app-shell').waitFor()
   assert.deepEqual(
@@ -1268,7 +1304,17 @@ async function run() {
     resources,
   }
   let fixture, current
-  const progress = setInterval(() => console.log(`Windows compatibility gate: ${phase}`), 30000)
+  const progress = setInterval(() => {
+    console.log(`Windows compatibility gate: ${phase}`)
+    void json(join(output, 'progress.json'), {
+      ok: false,
+      phase,
+      at: new Date().toISOString(),
+      privateFixtureRoot: root,
+      mainLogs: current?.logs,
+      rendererErrors: current?.rendererErrors,
+    }).catch((error) => console.error('Could not retain Windows progress:', String(error)))
+  }, 30000)
   try {
     const provenanceBytes = await readFile(resolve(provenancePath))
     const provenance = JSON.parse(provenanceBytes.toString('utf8'))

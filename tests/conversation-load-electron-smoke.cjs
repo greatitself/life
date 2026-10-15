@@ -605,6 +605,7 @@ async function run() {
   const nativeLogs = []
   const phases = []
   let application
+  let failed = false
   let launchProof
   let phase = 'launch'
   const progressTimer = setInterval(
@@ -1249,6 +1250,8 @@ async function run() {
     )
     console.log(JSON.stringify(report, null, 2))
   } catch (error) {
+    failed = true
+    console.error('Conversation load Electron failed:', phase, error.stack || String(error))
     await writeFile(
       join(artifacts, 'conversation-load-electron-failure.json'),
       JSON.stringify(
@@ -1267,7 +1270,43 @@ async function run() {
     throw error
   } finally {
     clearInterval(progressTimer)
-    if (application) await application.close().catch(() => {})
+    if (application) {
+      if (!failed) await application.close()
+      else {
+        let deadline
+        let closed = false
+        try {
+          await Promise.race([
+            application.close().then(() => {
+              closed = true
+            }),
+            new Promise((resolve) => {
+              deadline = setTimeout(resolve, 5000)
+            }),
+          ]).catch(() => {})
+        } finally {
+          clearTimeout(deadline)
+        }
+        if (!closed) {
+          const child = application.process()
+          const forced = child.exitCode === null && child.signalCode === null
+          if (forced) child.kill('SIGKILL')
+          await writeFile(
+            join(artifacts, 'failed-fixture-cleanup.json'),
+            JSON.stringify(
+              {
+                pid: child.pid,
+                forcedOwnMain: forced,
+                nativeProtocolExitConfirmed: false,
+                reason: 'Only failed fixture cleanup; the original assertion remains failed',
+              },
+              null,
+              2,
+            ),
+          )
+        }
+      }
+    }
     await rm(configurationRoot, { recursive: true, force: true })
   }
 }

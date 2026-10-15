@@ -1633,12 +1633,31 @@ async function run() {
     proof.fixtureMessages = fixture?.messages
     proof.mainLogs = current?.logs
     proof.rendererErrors = current?.rendererErrors
-    await current?.page.screenshot({ path: join(output, 'failure.png') }).catch(() => {})
     await json(join(output, 'failure-proof.json'), proof)
+    console.error('Windows compatibility failed:', phase, String(error.stack || error))
+    await current?.page
+      .screenshot({ path: join(output, 'failure.png'), timeout: 5000 })
+      .catch(() => {})
     throw error
   } finally {
     clearInterval(progress)
-    await current?.application.close().catch(() => {})
+    if (current) {
+      if (proof.ok) await current.application.close()
+      else
+        await within(() => current.application.close(), 'failed fixture cleanup', 5000).catch(
+          async () => {
+            const child = current.application.process()
+            const forced = child.exitCode === null && child.signalCode === null
+            if (forced) child.kill('SIGKILL')
+            await json(join(output, 'failed-fixture-cleanup.json'), {
+              pid: child.pid,
+              forcedOwnMain: forced,
+              nativeProtocolExitConfirmed: false,
+              reason: 'Only failed fixture cleanup; the original assertion remains failed',
+            })
+          },
+        )
+    }
     await fixture?.close()
     if (proof.ok) await rm(root, { recursive: true, force: true })
   }

@@ -267,6 +267,16 @@ jobs:
             output/linux-source-after.json
             output/linux-compiled-build.json
           if-no-files-found: error
+      - name: Preserve workflow failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-workflow-failures
+          path: |
+            output/playwright/**/*failure*.json
+            output/playwright/**/failed-fixture-cleanup.json
+            output/playwright/**/*.png
+          if-no-files-found: warn
 
   linux-active-recovery:
     name: Linux native active recovery

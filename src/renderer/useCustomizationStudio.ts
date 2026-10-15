@@ -1087,12 +1087,16 @@ export function useCustomizationStudio(options: StudioOptions) {
       latest.current.connection.profile?.id !== run.profileId
     )
       return false
-    run.repairs++
-    run.recovery = parseStudioPlannerRecovery({
+    const repairs = run.repairs + 1
+    // Capture the admitted attempt before advancing its counter and intent together.
+    const recovery = parseStudioPlannerRecovery({
       ...capturePlanner(id, run, 'repairing'),
+      repairs,
       action: undefined,
-      continuation: { repair: { attempt: run.repairs, diagnostics: diagnostics.slice(0, 40_000) } },
+      continuation: { repair: { attempt: repairs, diagnostics: diagnostics.slice(0, 40_000) } },
     })
+    run.repairs = repairs
+    run.recovery = recovery
     const index = await readPlannerSource(id, run, 'repair-index')
     const session = current.current.find((item) => item.id === id)
     const proposed =

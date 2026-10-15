@@ -49,3 +49,7 @@ Studio waits for its native owner before checkpointing a restored cache and resu
 Studio binds its registered native workspace before replay, so reconnecting preserves its projection proof while mutation controls continue to follow native ownership.
 
 Recovered Studio planners restore their active planning stage after native ownership returns. Recovery claims distinguish the last acknowledged cache occurrence from a newer live projection, preserving exact cache-hash checks while allowing a genuine replay tail to continue.
+
+Recovered idle Codex connections recognize deliberate retirement and confirmed native exit, preserving known session ownership during source reload. Unexpected disconnections and unconfirmed exits continue to block replacement.
+
+Changed Studio cache rows wait for their exact current native owner and projection proof before replacing acknowledged bytes. A crash after a source commit preserves the compiled revision while retaining the existing built-in-interface safety fallback.

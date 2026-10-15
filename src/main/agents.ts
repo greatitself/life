@@ -370,7 +370,16 @@ export class Agents {
   private recoveryAdmissionDepth = 0
   private recoveryAdmissionEvents: AgentEvent[] = []
   private pendingOwnerUpdates = new Set<Promise<void>>()
-  private pendingStartAdmissions = new Map<string, { machine: string; provider: Provider }>()
+  private pendingStartAdmissions = new Map<
+    string,
+    {
+      machine: string
+      provider: Provider
+      cancelled: Error | undefined
+      settled: Deferred.Deferred<void>
+      session?: Session
+    }
+  >()
   private pendingPermissionResponses = new Map<
     string,
     { sessionId: string; promise: Promise<void> }
@@ -4215,29 +4224,51 @@ export class Agents {
     this.assertEnvironmentAdmission()
     if (this.pendingStartAdmissions.has(input.sessionId))
       throw new Error('This thread is already starting')
-    this.pendingStartAdmissions.set(input.sessionId, {
+    const admission = {
       machine: this.machineIdentity(),
       provider: input.provider,
-    })
+      cancelled: undefined as Error | undefined,
+      settled: Deferred.makeUnsafe<void>(),
+      session: undefined as Session | undefined,
+    }
+    this.pendingStartAdmissions.set(input.sessionId, admission)
     const priorRelease =
       input.provider === 'codex' ? this.idleProviderRelease : this.idleClaudeProviderRelease
-    const starting = this.startSession(input, this.generation, this.machineIdentity(), priorRelease)
+    const starting = this.startSession(
+      input,
+      this.generation,
+      this.machineIdentity(),
+      admission,
+      priorRelease,
+    )
     this.pendingNativeOperations.add(starting)
     this.pendingNativeOperationMachines.set(starting, this.machineIdentity())
     try {
       await starting
+    } catch (cause) {
+      // Cancellation before publication has no provider completion to replay.
+      // Let Stop settle the exact renderer turn; preserve unrelated failures.
+      if (cause !== admission.cancelled) throw cause
     } finally {
       this.pendingNativeOperations.delete(starting)
-      this.pendingStartAdmissions.delete(input.sessionId)
+      if (this.pendingStartAdmissions.get(input.sessionId) === admission)
+        this.pendingStartAdmissions.delete(input.sessionId)
+      Deferred.doneUnsafe(admission.settled, Effect.void)
     }
   }
   private async startSession(
     input: StartInput,
     generation: number,
     machine: string,
+    admission: {
+      cancelled: Error | undefined
+      settled: Deferred.Deferred<void>
+      session?: Session
+    },
     priorRelease?: Promise<boolean[]>,
   ) {
     const assertCurrent = () => {
+      if (admission.cancelled) throw admission.cancelled
       if (
         this.generation !== generation ||
         this.machineIdentity() !== machine ||
@@ -4421,6 +4452,7 @@ export class Agents {
     if (!reuseClaude && old?.input.provider === 'claude') {
       this.resolveClaudeRequests(input.sessionId, old)
     }
+    admission.session = activeSession
     this.sessions.set(input.sessionId, activeSession)
     const initialize = async () => {
       if (input.scope === 'life-customization') {
@@ -6756,6 +6788,15 @@ export class Agents {
     await this.flushRecovery()
   }
   async stop(sessionId: string) {
+    const admission = this.pendingStartAdmissions.get(sessionId)
+    if (admission && !admission.session && !this.recoveryReservations.has(sessionId)) {
+      // This Stop owns the new, not-yet-admitted turn. An earlier completed
+      // Stop cannot acknowledge it or let that turn start after interruption.
+      admission.cancelled ||= new Error('Agent startup cancelled before native admission.')
+      const previous = this.sessions.get(sessionId)
+      await runEffect(Deferred.await(admission.settled))
+      if (this.sessions.get(sessionId) !== previous) return
+    }
     const pendingCompletion = this.stopCompletions.get(sessionId)
     if (pendingCompletion) return runEffect(Deferred.await(pendingCompletion))
     this.assertRecovered(sessionId)

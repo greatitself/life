@@ -76,8 +76,8 @@
     },
     {
       "path": "tests/helpers/active-recovery-observer/runner-contract.cjs",
-      "bytes": 19077,
-      "sha256": "780a333e569caf70b14d1a88e5613f661d75408dd954afb42fd0d57f8ce472d2"
+      "bytes": 19519,
+      "sha256": "f24dfdf2cf49656ed791f6462d442ee6b204c158aa72f4e8050c10f04f64ef96"
     },
     {
       "path": "tests/helpers/active-recovery-observer/local-proof.cjs",
@@ -126,8 +126,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 26066,
-      "sha256": "e76ac8ac6efc4b22c081ff088711d34951ca4d6d50472e4fef16e6f2a6af6745"
+      "bytes": 26996,
+      "sha256": "f9d9d5c0e2a29c061b9a6eedafe737674bcfa901874c0249526cb73643b39085"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",
@@ -163,8 +163,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 26066,
-      "sha256": "e76ac8ac6efc4b22c081ff088711d34951ca4d6d50472e4fef16e6f2a6af6745"
+      "bytes": 26996,
+      "sha256": "f9d9d5c0e2a29c061b9a6eedafe737674bcfa901874c0249526cb73643b39085"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",

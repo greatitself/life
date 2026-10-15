@@ -225,8 +225,9 @@ export function useCustomizationStudio(options: StudioOptions) {
   function bindNativeStudioWorkspace(thread: Thread, owner: NativeRecoveryOwnerState): Thread {
     const input = owner.originalInput
     const workspace = input?.workspace
+    // The private native workspace stays known while its transport reconnects.
+    // Bind that identity before replay; owner status still gates every mutation.
     if (
-      (owner.status !== 'running' && owner.status !== 'idle') ||
       owner.sessionId !== thread.id ||
       input?.sessionId !== thread.id ||
       input.scope !== 'life-customization' ||

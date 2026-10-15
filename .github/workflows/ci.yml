@@ -757,7 +757,7 @@ jobs:
               ;;
             active-tail)
               failed=0
-              for stage in ssh-thread-binding ssh-turn-start ssh-string-approval ssh-studio source-commit reload; do
+              for stage in ssh-thread-binding ssh-turn-start ssh-string-approval ssh-codex-studio-planning ssh-codex-studio-source-read ssh-codex-studio-source-proposal ssh-codex-studio-repair ssh-claude-studio-planning ssh-claude-studio-source-read ssh-claude-studio-source-proposal ssh-claude-studio-repair source-commit reload; do
                 node tests/active-recovery-run.cjs "$stage" || failed=1
               done
               test "$failed" = 0

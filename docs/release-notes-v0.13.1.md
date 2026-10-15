@@ -45,3 +45,5 @@ Disconnected documents load their original committed native ledger before replay
 Studio can rebuild a missing cache from the current document’s exact native replay deliveries. Saved cursors, stale document tokens, and mismatched cache hashes cannot authorize reconstruction.
 
 Studio waits for its native owner before checkpointing a restored cache and resumes a planner that was waiting for reconnect. A programmatic renderer reload during window close joins the existing shutdown boundary, preserving orderly native exit.
+
+Studio binds its registered native workspace before replay, so reconnecting preserves its projection proof while mutation controls continue to follow native ownership.

@@ -494,11 +494,30 @@ async function slowExitReload(harness) {
     )
     assertWrittenCloseReceipt(observed.journal)
     reload = await reloadDocument(harness, { allowPaused: true })
-    assert.equal(
-      reload.documentShellVisible,
-      false,
-      'A closing window never admits the replacement interface before native exit',
+    reload.initialMutationAttempt = await harness.page.evaluate((input) => {
+      window.__lifeSlowExitFreshAttempt = { status: 'pending' }
+      void window.relay.agent.start(input).then(
+        () => {
+          window.__lifeSlowExitFreshAttempt.status = 'resolved'
+        },
+        (error) => {
+          window.__lifeSlowExitFreshAttempt.status = 'rejected'
+          window.__lifeSlowExitFreshAttempt.error = String(error)
+        },
+      )
+      return window.__lifeSlowExitFreshAttempt
+    }, pending.input)
+    await delay(100)
+    reload.mutationAttempt = await harness.page.evaluate(() => window.__lifeSlowExitFreshAttempt)
+    assert.ok(
+      ['pending', 'rejected'].includes(reload.mutationAttempt.status),
+      'The real replacement document cannot admit a competing native turn during shutdown',
     )
+    if (reload.mutationAttempt.status === 'rejected')
+      assert.match(
+        reload.mutationAttempt.error,
+        /restarting its interface|previous Codex process|original native process is still closing|unavailable|recovery replay|shutting down/i,
+      )
     assert.equal(alive(record.started.pid), true)
     assert.equal(harness.log().filter((entry) => entry.kind === 'turn-started').length, 1)
     assert.ok(

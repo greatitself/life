@@ -47,6 +47,21 @@ const STAGES = {
     cases: 1,
     mode: 'ssh',
   },
+  ...Object.fromEntries(
+    ['codex', 'claude'].flatMap((provider) =>
+      ['studio-planning', 'studio-source-read', 'studio-source-proposal', 'studio-repair'].map(
+        (kind) => [
+          `ssh-${provider}-${kind}`,
+          {
+            script: 'tests/active-session-recovery-smoke.cjs',
+            selected: `${provider}-${kind}-crash`,
+            cases: 1,
+            mode: 'ssh',
+          },
+        ],
+      ),
+    ),
+  ),
   'ssh-studio': {
     script: 'tests/active-session-recovery-smoke.cjs',
     selected: 'studio-',

@@ -201,11 +201,49 @@ export class WindowsSSHFixture {
       finish('windows-fixture\n')
     } else if (/git .*(?:status|diff)/.test(command)) {
       finish('')
+    } else if (
+      command ===
+      `exec "$SHELL" -lc 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:$PATH"; exec "$SHELL" -s'`
+    ) {
+      this.branchMetadata(channel, command)
     } else {
       this.rejectedCommands.push(command)
       channel.stderr.write(`Unsupported fixture command: ${command}`)
       finish('', 127)
     }
+  }
+
+  private branchMetadata(channel: ServerChannel, command: string): void {
+    const chunks: Buffer[] = []
+    let bytes = 0
+    const expected =
+      `cd '${this.workspace}' || exit\n` +
+      String.raw`printf 'LIFE_BRANCH='
+git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || printf '\n'
+printf '\nLIFE_PR='
+if command -v gh >/dev/null 2>&1; then gh pr view --json number,title,url 2>/dev/null || true; fi`
+    channel.on('data', (chunk: Buffer) => {
+      bytes += chunk.length
+      if (bytes > 100_000) {
+        this.protocolErrors.push('Fixture branch metadata script exceeds its bound')
+        channel.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    channel.on('end', () => {
+      if (channel.destroyed) return
+      const input = Buffer.concat(chunks).toString('utf8')
+      if (input !== expected) {
+        this.rejectedCommands.push(command + '\n' + input)
+        channel.stderr.write('Unsupported fixture stdin script')
+        channel.exit(127)
+      } else {
+        channel.write('LIFE_BRANCH=windows-fixture\nLIFE_PR=\n')
+        channel.exit(0)
+      }
+      channel.end()
+    })
   }
 
   private stageStudio(channel: ServerChannel): void {

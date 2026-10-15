@@ -4248,7 +4248,7 @@ export class Agents {
     } catch (cause) {
       // Cancellation before publication has no provider completion to replay.
       // Let Stop settle the exact renderer turn; preserve unrelated failures.
-      if (cause !== admission.cancelled) throw cause
+      if (!admission.cancelled || cause !== admission.cancelled) throw cause
     } finally {
       this.pendingNativeOperations.delete(starting)
       if (this.pendingStartAdmissions.get(input.sessionId) === admission)

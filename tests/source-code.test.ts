@@ -719,9 +719,12 @@ import { version } from '../../package.json'
     const { store } = await createStore()
     await patchedControl(store, 'Working version A')
     await patchedControl(store, 'Failed startup version B')
+    const failedRevision = store.get().active!.revision
     await store.disable('Runtime startup failed in version B')
     expect(store.get().enabled).toBe(false)
+    expect(store.getActivationFailure(failedRevision)).toBe('Runtime startup failed in version B')
     await patchedControl(store, 'Repaired version C')
+    expect(store.getActivationFailure(failedRevision)).toBeUndefined()
     expect((await executeControl(store)).props.children).toBe('Repaired version C')
     await store.rollback()
     expect((await executeControl(store)).props.children).toBe('Working version A')

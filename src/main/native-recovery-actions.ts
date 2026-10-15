@@ -795,6 +795,19 @@ export function makeStudioRecoveryActionDrivers(stores: {
     signal?: AbortSignal,
   ) => Promise<boolean>
 }): NativeRecoveryActionsOptions['drivers'] {
+  const observeReload = Effect.fnUntraced(function* (
+    request: NativeRecoveryActionRequest,
+    rawPrepared: Schema.Json | undefined,
+  ): Effect.fn.Return<NativeRecoveryActionReconciliation, NativeRecoveryActionError> {
+    const prepared = yield* decode(reloadPreparedSchema, rawPrepared, request.actionId)
+    const intent = yield* decode(reloadIntentSchema, request.intent, request.actionId)
+    const error = stores.sourceCode.getActivationFailure(intent.revision)
+    if (error) return { status: 'failed', error }
+    const ready = yield* adapter('reconcile-reload', (signal) =>
+      stores.reconcileReload(request, prepared, signal),
+    )
+    return { status: ready ? 'succeeded' : 'unknown' }
+  })
   return {
     'source-read': {
       execute: Effect.fnUntraced(function* (request) {
@@ -980,37 +993,22 @@ export function makeStudioRecoveryActionDrivers(stores: {
       execute: Effect.fnUntraced(function* (request, rawPrepared) {
         const prepared = yield* decode(reloadPreparedSchema, rawPrepared, request.actionId)
         const intent = yield* decode(reloadIntentSchema, request.intent, request.actionId)
+        const activationError = stores.sourceCode.getActivationFailure(intent.revision)
+        if (activationError)
+          return yield* failure('reload', request.actionId, 'rejected', activationError)
         const current = stores.sourceCode.get()
         if (!current.enabled || current.active?.revision !== intent.revision)
           return yield* failure(
             'reload',
             request.actionId,
-            'rejected',
+            'io',
             'The applied source revision is no longer active. Its original commit remains recoverable.',
           )
         yield* adapter('reload', (signal) => stores.reload(request, prepared, signal))
         return undefined
       }),
-      reconcile: Effect.fnUntraced(function* (request, rawPrepared) {
-        const prepared = yield* decode(reloadPreparedSchema, rawPrepared, request.actionId)
-        return yield* adapter('reconcile-reload', (signal) =>
-          stores.reconcileReload(request, prepared, signal),
-        ).pipe(
-          Effect.map((ready) => ({
-            status: ready ? ('succeeded' as const) : ('unknown' as const),
-          })),
-        )
-      }),
-      observe: Effect.fnUntraced(function* (request, rawPrepared) {
-        const prepared = yield* decode(reloadPreparedSchema, rawPrepared, request.actionId)
-        return yield* adapter('observe-reload', (signal) =>
-          stores.reconcileReload(request, prepared, signal),
-        ).pipe(
-          Effect.map((ready) => ({
-            status: ready ? ('succeeded' as const) : ('unknown' as const),
-          })),
-        )
-      }),
+      reconcile: observeReload,
+      observe: observeReload,
     },
   }
 }

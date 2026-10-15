@@ -846,8 +846,15 @@ export function useCustomizationStudio(options: StudioOptions) {
           'Life is reconciling the stopped Studio action; it will not start another mutation.',
         )
       if (action.status === 'failed') {
+        if (run.recovery?.phase === 'finished' && run.recovery.terminal) {
+          const terminal = run.recovery.terminal
+          await finish(id, terminal.stage, terminal.error)
+          return
+        }
         if (
-          ['apply-source', 'apply-settings', 'apply-extension'].includes(action.kind) &&
+          ['apply-source', 'apply-settings', 'apply-extension', 'reload-source'].includes(
+            action.kind,
+          ) &&
           (await repair(id, run, action.error || 'The previous Studio action failed.'))
         )
           return
@@ -937,6 +944,24 @@ export function useCustomizationStudio(options: StudioOptions) {
       if (action.kind !== 'start-provider') await finish(id, 'complete')
     } catch (error) {
       if (runs.current.get(id) !== run) return
+      // A failed reload is proven by the native source generation's startup error.
+      // An unready document or a manual rollback remains unknown and cannot authorize repair.
+      if (
+        run.recovery?.phase !== 'finished' &&
+        run.recovery?.action?.kind === 'reload-source' &&
+        run.recovery.action.status === 'failed'
+      ) {
+        try {
+          if (await repair(id, run, errorText(error))) return
+        } catch (failure) {
+          if (failure instanceof StudioRecoveryPending) {
+            pauseNativePlanner(id, errorText(failure))
+            return
+          }
+        }
+        await finish(id, 'failed', errorText(error))
+        return
+      }
       if (sourceCommitted) {
         pauseNativePlanner(
           id,

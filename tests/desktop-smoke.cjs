@@ -676,8 +676,17 @@ export function activityLabel(activity: ThreadActivity): string {
       'saved machine reconnect',
     )
     const picker = page.getByRole('dialog', { name: 'Select a project', exact: true })
-    if (await picker.isVisible())
-      await picker.getByRole('button', { name: 'Choose later', exact: true }).click()
+    if (await picker.isVisible()) {
+      try {
+        await picker
+          .getByRole('button', { name: 'Choose later', exact: true })
+          .click({ timeout: 3000 })
+      } catch (error) {
+        // Restoring the saved workspace can dismiss this optional picker during the click.
+        if (await picker.isVisible()) throw error
+      }
+      await picker.waitFor({ state: 'hidden' })
+    }
   }
   const context = {
     getPage: () => page,

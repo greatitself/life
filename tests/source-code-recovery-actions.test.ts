@@ -460,8 +460,9 @@ describe('source action commit identity', () => {
         run(actions.perform({ ...action('reload', intent, 'bad-reload-' + index), ...changed })),
       ).rejects.toThrow()
     await store.disable()
+    // An explicit user disable is not a failed native activation and cannot authorize repair.
     expect((await run(actions.perform(action('reload', intent, 'inactive-reload')))).status).toBe(
-      'failed',
+      'unknown',
     )
     expect(reloads).toBe(0)
   })
@@ -535,6 +536,48 @@ describe('source action commit identity', () => {
     expect((await run(actions.read(reload)))?.status).toBe('started')
     expect((await run(actions.perform(reload))).status).toBe('succeeded')
     expect(reloads).toBe(1)
+  })
+
+  it('reconciles a failed native startup without repeating the source commit or reload', async () => {
+    const { store, directory, patch } = await fixture()
+    let announce!: () => void
+    const scheduled = new Promise<void>((resolve) => {
+      announce = resolve
+    })
+    let reloads = 0
+    const { actions } = await nativeActions(store, directory, {
+      autoReady: false,
+      reload: async () => {
+        reloads++
+        announce()
+      },
+    })
+    const apply = action('source-apply', { patch })
+    const original = await run(actions.perform(apply))
+    const revision = store.get().revision
+    const reload = action('reload', { appliedActionId: apply.actionId, revision }, 'runtime-reload')
+    const controller = new AbortController()
+    const pending = Effect.runPromiseExit(actions.perform(reload), { signal: controller.signal })
+    await scheduled
+    controller.abort()
+    expect(Exit.isFailure(await pending)).toBe(true)
+    expect((await run(actions.reconcileOnly(reload))).status).toBe('unknown')
+    expect(store.getActivationFailure(revision)).toBeUndefined()
+    await store.disable('Exact native renderer startup failure')
+    expect(store.getActivationFailure(revision)).toBe('Exact native renderer startup failure')
+    expect(store.getActivationFailure(revision + 1)).toBeUndefined()
+    expect(await run(actions.reconcileOnly(reload))).toMatchObject({
+      status: 'failed',
+      error: 'Exact native renderer startup failure',
+    })
+    // Read-only observation leaves the interrupted record intact; the admitted owner settles it.
+    expect((await run(actions.read(reload)))?.status).toBe('started')
+    expect((await run(actions.perform(reload))).status).toBe('failed')
+    expect((await run(actions.perform(reload))).status).toBe('failed')
+    expect(await run(actions.perform(apply))).toEqual(original)
+    expect(reloads).toBe(1)
+    await store.rollback()
+    expect(store.getActivationFailure(revision)).toBeUndefined()
   })
 
   it('records real compiler rejection once and preserves source-read contexts with native ownership', async () => {

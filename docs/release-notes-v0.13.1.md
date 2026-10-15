@@ -27,3 +27,5 @@ Renderer replacement joins accepted native Stop, startup, permission, and owner-
 A failed provider opening can finish renderer handoff once its exact original native exit is durably confirmed. Missing, unconfirmed, or unrelated-machine exit evidence keeps the original ownership block in place.
 
 Cancelled Claude openings retain retirement ownership until native exit is confirmed. An opening cancelled before owner admission sends neither initialization nor a user prompt. A provider that has already confirmed exit no longer waits for a close receipt when no close envelope was issued.
+
+Studio now reconciles a native source generation’s recorded startup failure and uses its bounded repair flow. Explicit disable, rollback, unverified readiness, and stopped requests do not authorize a new repair.

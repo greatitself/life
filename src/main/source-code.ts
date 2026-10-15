@@ -617,6 +617,18 @@ export class SourceCodeStore {
     return this.snapshot(this.state, this.metadata, this.recovered)
   }
 
+  /** Only the current native generation's recorded startup failure authorizes repair. */
+  getActivationFailure(revision: number): string | undefined {
+    if (
+      !this.state.enabled &&
+      this.state.current === revision &&
+      this.state.failed.includes(revision) &&
+      this.metadata?.baseFingerprint === this.baselineFingerprint
+    )
+      return this.state.error
+    return undefined
+  }
+
   private snapshot(
     state: SavedState,
     metadata: Metadata | undefined,

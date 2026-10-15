@@ -308,6 +308,15 @@
   border-radius: 7px;
   background: var(--base);
 }
+.thread-settled-markdown {
+  display: contents;
+}
+.markdown > .thread-settled-markdown:first-child > :first-child {
+  margin-top: 0;
+}
+.markdown > .thread-settled-markdown:last-child > :last-child {
+  margin-bottom: 0;
+}
 .thread-plan-steps {
   display: grid;
   gap: 9px;

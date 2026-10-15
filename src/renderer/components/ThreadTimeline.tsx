@@ -36,10 +36,15 @@ const CompletedWork = memo(function CompletedWork({
   label: string
 }) {
   const [expanded, setExpanded] = useState(false)
+  const messageIds = useMemo(
+    () => messages.map((message) => encodeURIComponent(message.id)).join(' '),
+    [messages],
+  )
   return (
     <details
       className="thread-turn-disclosure"
       aria-label="Completed turn activity"
+      data-message-ids={messageIds}
       onToggle={(event) => setExpanded(event.currentTarget.open)}
     >
       <summary>

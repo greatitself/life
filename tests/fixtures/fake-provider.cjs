@@ -728,6 +728,60 @@ if (provider === 'claude' && metadataWorkspace) {
       process.stderr.write('Codex fixture crashed\n')
       process.exit(2)
     }
+    const nativeApprovalChoices = {
+      'native-approval-choices-network': [
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'reference.example', action: 'allow' },
+          },
+        },
+        'cancel',
+      ],
+      'native-approval-choices-session': ['acceptForSession', 'decline', 'cancel'],
+      'native-approval-choices-cancel': ['acceptForSession', 'cancel'],
+      'native-approval-choices-command-rule': [
+        { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm', 'run', 'build'] } },
+        'decline',
+      ],
+      'native-approval-choices-malformed': [
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'reference.example', action: 'grant-all' },
+          },
+        },
+        'acceptForSession',
+        'cancel',
+      ],
+    }
+    if (Object.hasOwn(nativeApprovalChoices, text)) {
+      const id = 9500 + sequence
+      turn.nativeApprovalChoices = nativeApprovalChoices[text]
+      pending.set(id, turn)
+      record({
+        kind: 'native-approval-choices-request',
+        requestId: id,
+        prompt: text,
+        availableDecisions: turn.nativeApprovalChoices,
+      })
+      send({
+        id,
+        method: 'item/commandExecution/requestApproval',
+        params: {
+          threadId,
+          turnId: turn.turnId,
+          itemId: 'native-choice-command-' + sequence,
+          approvalId: 'native-choice-callback-' + sequence,
+          command: 'npm run build',
+          reason: 'Exercise an explicitly offered native approval decision',
+          cwd: threads.get(threadId)?.cwd || process.cwd(),
+          availableDecisions: turn.nativeApprovalChoices,
+          ...(text === 'native-approval-choices-network'
+            ? { networkApprovalContext: { host: 'reference.example', protocol: 'https' } }
+            : {}),
+        },
+      })
+      return
+    }
     if (text === 'approval' || text === 'question') {
       const id = 9000 + sequence
       pending.set(id, turn)
@@ -1043,6 +1097,30 @@ if (provider === 'claude' && metadataWorkspace) {
       if (pending.has(message.id) && !message.method) {
         const turn = pending.get(message.id)
         pending.delete(message.id)
+        if (turn.nativeApprovalChoices) {
+          const offered = turn.nativeApprovalChoices.some(
+            (decision) => JSON.stringify(decision) === JSON.stringify(message.result?.decision),
+          )
+          record({
+            kind: 'native-approval-choices-response',
+            requestId: message.id,
+            prompt: turn.prompt,
+            result: message.result,
+            offered,
+          })
+          if (!offered) {
+            codexComplete(turn, 'Fixture rejected an unoffered native approval decision.')
+            return
+          }
+          if (message.result.decision === 'cancel') {
+            codexActive.delete(turn.threadId)
+            send({
+              method: 'turn/completed',
+              params: { threadId: turn.threadId, turn: { id: turn.turnId, status: 'interrupted' } },
+            })
+            return
+          }
+        }
         codexComplete(turn, JSON.stringify(message.result))
         return
       }

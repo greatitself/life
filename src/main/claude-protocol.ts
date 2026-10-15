@@ -8,6 +8,19 @@ type Wire = Record<string, unknown>
 const object = (value: unknown): Wire => (value && typeof value === 'object' ? (value as Wire) : {})
 const string = (value: unknown) => (typeof value === 'string' ? value : '')
 
+/** Login shells may print banners; malformed JSON frames make the stream unusable. */
+export function claudeProtocolError(line: string): Error | undefined {
+  if (line === 'Agent output exceeded the message limit')
+    return new Error(
+      'Claude Code returned a response larger than the protocol limit. Update the remote Claude Code installation and retry; your saved conversation is unchanged.',
+    )
+  if (/^\s*[\[{]/.test(line))
+    return new Error(
+      'Claude Code returned an invalid protocol message. Retry, or check the remote Claude Code installation and shell startup output.',
+    )
+  return undefined
+}
+
 /** Promptless metadata controls, with bounded requests and deterministic cleanup. */
 export function claudeMetadataControls(channel: ClientChannel) {
   const pending = new Map<
@@ -15,25 +28,34 @@ export function claudeMetadataControls(channel: ClientChannel) {
     { resolve: (value: Wire) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
   >()
   let stderr = ''
+  let failure: Error | undefined
   const fail = (error: Error) => {
+    if (failure) return
+    failure = error
     for (const request of pending.values()) {
       clearTimeout(request.timer)
       request.reject(error)
     }
     pending.clear()
   }
-  const lines = new JsonLines((message) => {
-    if (message.type !== 'control_response') return
-    const response = object(message.response)
-    const requestId = string(response.request_id)
-    const request = pending.get(requestId)
-    if (!request) return
-    pending.delete(requestId)
-    clearTimeout(request.timer)
-    if (response.subtype === 'error')
-      request.reject(new Error(string(response.error) || 'Claude metadata request failed'))
-    else request.resolve(object(response.response))
-  })
+  const lines = new JsonLines(
+    (message) => {
+      if (failure || message.type !== 'control_response') return
+      const response = object(message.response)
+      const requestId = string(response.request_id)
+      const request = pending.get(requestId)
+      if (!request) return
+      pending.delete(requestId)
+      clearTimeout(request.timer)
+      if (response.subtype === 'error')
+        request.reject(new Error(string(response.error) || 'Claude metadata request failed'))
+      else request.resolve(object(response.response))
+    },
+    (line) => {
+      const error = claudeProtocolError(line)
+      if (error) fail(error)
+    },
+  )
   const data = (chunk: Buffer) => lines.push(chunk)
   const errorData = (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-8192)
@@ -45,6 +67,7 @@ export function claudeMetadataControls(channel: ClientChannel) {
   channel.on('close', closed)
   return {
     request(request: Wire, timeout = 15000): Promise<Wire> {
+      if (failure) return Promise.reject(failure)
       if (channel.destroyed) return Promise.reject(new Error('Claude metadata connection closed'))
       const requestId = randomUUID()
       return new Promise((resolve, reject) => {
@@ -173,6 +196,13 @@ export class ClaudeMessageBlocks {
   private messages = new Map<string, Message>()
   private active = new Map<string, string>()
   private envelopes = new Set<string>()
+  private static readonly envelopeLimit = 4096
+
+  retireStream(parent: string) {
+    this.active.delete(parent)
+    for (const key of this.messages.keys())
+      if (key.startsWith(`${parent}\0`)) this.messages.delete(key)
+  }
 
   resetRoot() {
     this.active.delete('root')
@@ -263,6 +293,8 @@ export class ClaudeMessageBlocks {
       const key = `${stream}\0${uuid}`
       if (this.envelopes.has(key)) return []
       this.envelopes.add(key)
+      if (this.envelopes.size > ClaudeMessageBlocks.envelopeLimit)
+        this.envelopes.delete(this.envelopes.values().next().value!)
     }
     const message = this.message(stream, string(content.id) || undefined)
     const blocks = Array.isArray(content.content) ? content.content.map(object) : []

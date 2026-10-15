@@ -225,6 +225,29 @@ async function run() {
     assert.equal(current.reference.reasoningEffort, '')
     assert.equal(current.reference.serviceTier, '')
     record('Explicit reasoning and speed defaults clear values in both menu implementations')
+
+    await reference.getByRole('combobox', { name: /^Model:/ }).click()
+    await page.getByRole('option', { name: 'Claude default', exact: true }).click()
+    await settle()
+    await reference.getByRole('combobox', { name: /^Agent permission mode:/ }).click()
+    await page.getByRole('option', { name: 'Plan', exact: true }).click()
+    await settle()
+    current = await state()
+    assert.equal(current.reference.provider, 'claude')
+    assert.equal(current.reference.mode, 'plan')
+    assert.deepEqual(current.records.reference.at(-1), { mode: 'plan' })
+    await reference
+      .getByRole('combobox', { name: 'Agent permission mode: Plan', exact: true })
+      .waitFor()
+    await page.evaluate(() => window.selectorTest.remount())
+    await settle()
+    await reference
+      .getByRole('combobox', { name: 'Agent permission mode: Plan', exact: true })
+      .waitFor()
+    current = await state()
+    assert.equal(current.reference.mode, 'plan')
+    record('Claude Plan mode is selectable and stays selected after the controls remount')
+
     assert.deepEqual(errors, [])
     const proof = { ok: true, checks, browserErrors: errors, final: current }
     if (process.env.LIFE_RUN_SELECTORS_PROOF)

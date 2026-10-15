@@ -9,10 +9,13 @@ import {
   readStudioSessions,
   type StudioSession,
 } from '../src/renderer/studio-history'
-import { applyEvent } from '../src/renderer/state'
+import { applyEvent, readThreads } from '../src/renderer/state'
 
 const session = (id = 'studio-one', updatedAt = 10): StudioSession =>
   createStudioSession('codex', updatedAt, id)
+
+/** Private occurrence markers survive spreads but are not part of stored Studio JSON. */
+const json = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -97,7 +100,7 @@ describe('dedicated customization Studio history', () => {
       },
     ]
     const restored = parseStudioSessions(encodeStudioSessions([original]))[0]
-    expect(restored).toEqual(original)
+    expect(json(restored)).toEqual(original)
     expect(restored.request).toBe(original.request)
     expect(restored.thread.messages[2].text).toBe(original.thread.messages[2].text)
   })
@@ -179,14 +182,14 @@ describe('dedicated customization Studio history', () => {
       },
       message: 'One runtime extension will be created.',
     }
-    expect(parseStudioSessions(encodeStudioSessions([settings, source, extension]))).toEqual([
+    expect(json(parseStudioSessions(encodeStudioSessions([settings, source, extension])))).toEqual([
       settings,
       source,
       extension,
     ])
   })
 
-  it('drops malformed stored mutations and fails review without executing anything', () => {
+  it('excludes malformed stored mutations from executable review without executing anything', () => {
     const malformed = {
       ...session(),
       stage: 'review',
@@ -195,6 +198,7 @@ describe('dedicated customization Studio history', () => {
     const restored = normalizeStudioSessions([malformed])[0]
     expect(restored.stage).toBe('failed')
     expect(restored.proposal).toBeUndefined()
+    expect(JSON.parse(encodeStudioSessions([restored]))[0].proposal).toEqual(malformed.proposal)
     expect(
       normalizeStudioSessions([{ ...malformed, proposal: { kind: 'message', message: 'hi' } }])[0]
         .proposal,
@@ -206,10 +210,9 @@ describe('dedicated customization Studio history', () => {
     first.thread.title = 'A provider title'
     const second = session('second', 30)
     second.thread.title = 'Another provider title'
-    expect(normalizeStudioSessions([first, second, { ...second, request: 'Duplicate' }])).toEqual([
-      second,
-      first,
-    ])
+    expect(
+      json(normalizeStudioSessions([first, second, { ...second, request: 'Duplicate' }])),
+    ).toEqual([second, first])
     expect(
       normalizeStudioSessions([{ ...first, thread: { ...first.thread, id: 'wrong' } }]),
     ).toEqual([])
@@ -239,7 +242,7 @@ describe('dedicated customization Studio history', () => {
       },
     ])
     expect(restored).toHaveLength(1)
-    expect(restored[0].thread.messages).toEqual([validMessage])
+    expect(json(restored[0].thread.messages)).toEqual([validMessage])
     expect(parseStudioSessions('{malformed')).toEqual([])
     expect(parseStudioSessions('{}')).toEqual([])
     expect(parseStudioSessions('null')).toEqual([])
@@ -259,13 +262,13 @@ describe('dedicated customization Studio history', () => {
     const polluted = JSON.parse('{"id":"bad","__proto__":{"polluted":true}}')
     const circular = session('circular') as StudioSession & { self?: unknown }
     circular.self = circular
-    expect(normalizeStudioSessions([hostile, toJSON, polluted, circular, session()])).toEqual([
-      session(),
-    ])
+    expect(json(normalizeStudioSessions([hostile, toJSON, polluted, circular, session()]))).toEqual(
+      [session()],
+    )
     expect(invoked).not.toHaveBeenCalled()
     const hostileArray = [session()]
     Object.defineProperty(hostileArray, '1', { get: invoked })
-    expect(normalizeStudioSessions(hostileArray)).toEqual([session()])
+    expect(json(normalizeStudioSessions(hostileArray))).toEqual([session()])
     expect(invoked).not.toHaveBeenCalled()
     expect(() => encodeStudioSessions([toJSON])).toThrow('unsupported key')
     expect(invoked).not.toHaveBeenCalled()
@@ -275,7 +278,7 @@ describe('dedicated customization Studio history', () => {
   it('uses ambient storage when provided and works in a non-browser process', () => {
     const storage = { getItem: vi.fn(() => encodeStudioSessions([session()])) }
     vi.stubGlobal('localStorage', storage)
-    expect(readStudioSessions()).toEqual([session()])
+    expect(json(readStudioSessions())).toEqual([session()])
     expect(storage.getItem).toHaveBeenCalledExactlyOnceWith(STUDIO_HISTORY_KEY)
     vi.stubGlobal('localStorage', undefined)
     expect(readStudioSessions()).toEqual([])
@@ -379,6 +382,112 @@ describe('legacy interrupted customization migration', () => {
       (original.messages[0] as { details?: unknown }).details,
     )
   })
+
+  it.each(['codex', 'claude'] as const)(
+    'copies real recovered %s history with opaque rows, current streamed output and inert prototype keys',
+    (provider) => {
+      const request = ' \r\n/life change the sidebar.\tΩ 😀 \ud800  '
+      const partial = 'Exact partial output\r\nΩ '
+      const streamed = '\tcurrent suffix \udfff  '
+      const prototypeFields = JSON.parse(
+        '{"__proto__":{"studioMigrationPolluted":true},"constructor":{"exact":"Ω"},"prototype":[1],"toJSON":{"archival":"pure data"}}',
+      ) as Record<string, unknown>
+      const user = {
+        id: 'user-3',
+        role: 'user',
+        text: request,
+        input: request,
+        turn: 3,
+        futureMessageField: { exact: request },
+      }
+      const assistant = {
+        id: '3:answer',
+        role: 'assistant',
+        text: partial,
+        turn: 3,
+        createdAt: 1,
+        futureMessageField: { occurrence: 'answer', exact: partial },
+      }
+      const tool = {
+        id: '3:build',
+        role: 'tool',
+        text: 'Exact build output\r\n',
+        input: '  npm run build\r\n',
+        turn: 3,
+        status: 'running',
+        futureMessageField: { occurrence: 'tool' },
+      }
+      const opaque = { id: 'opaque', role: 'future-provider-role', payload: { exact: request } }
+      const raw = JSON.parse(
+        JSON.stringify({
+          ...legacyThread(),
+          ...prototypeFields,
+          provider,
+          remoteId: 'native-provider-session-Ω',
+          workspace: '/root/project Ω',
+          turnStatus: 'running',
+          futureThreadField: { exact: request, retained: true },
+          messages: [null, user, opaque, assistant, tool, 17],
+        }),
+      ) as Record<string, unknown> & { messages: unknown[] }
+      const recovered = readThreads([raw])[0]
+      const original = applyEvent(recovered, {
+        sessionId: recovered.id,
+        type: 'text',
+        itemId: 'answer',
+        text: streamed,
+      })
+      const originalView = JSON.stringify(original)
+      const pending = JSON.parse(legacyPending())
+      pending.start.provider = provider
+      pending.start.remoteId = 'native-provider-session-Ω'
+      pending.request = 'Old normalized request without the /life prefix'
+      const migrated = migrateLegacyStudioPending(
+        JSON.stringify(pending),
+        [original],
+        'life-studio:real-source',
+        123,
+      )
+
+      expect(migrated).toBeDefined()
+      expect(migrated!.session.thread).toMatchObject({
+        id: 'life-studio:real-source',
+        profileId: 'remote-profile',
+        provider,
+        remoteId: 'native-provider-session-Ω',
+        workspace: '/root/project Ω',
+        busy: false,
+        pending: [],
+      })
+      expect(migrated!.session.request).toBe(request)
+      expect(migrated!.pending.start.prompt).toBe(request)
+      expect(migrated!.pending.start.remoteId).toBe('native-provider-session-Ω')
+      expect(
+        migrated!.session.thread.messages.find((message) => message.id === '3:answer')?.text,
+      ).toBe(partial + streamed)
+      expect(
+        migrated!.session.thread.messages.find((message) => message.id === '3:build')?.status,
+      ).toBe('interrupted')
+      const copied = JSON.parse(encodeStudioSessions([migrated!.session]))[0].thread
+      expect(copied).toEqual({
+        ...raw,
+        id: 'life-studio:real-source',
+        purpose: 'customization',
+        title: 'Recovered customization',
+        busy: false,
+        pending: [],
+        queue: [],
+        updatedAt: 123,
+        messages: [null, user, opaque, { ...assistant, text: partial + streamed }, tool, 17],
+      })
+      expect(copied.messages).not.toBe(raw.messages)
+      expect(JSON.stringify(original)).toBe(originalView)
+      expect(raw.messages).toEqual([null, user, opaque, assistant, tool, 17])
+      expect(
+        (Object.prototype as { studioMigrationPolluted?: unknown }).studioMigrationPolluted,
+      ).toBeUndefined()
+    },
+  )
 
   it('does not recover ordinary project requests, research requests, mismatched turns or different providers', () => {
     const original = legacyThread()

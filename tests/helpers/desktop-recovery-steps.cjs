@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
 const { readFile, readdir, writeFile } = require('node:fs/promises')
 const { join } = require('node:path')
+const { readSavedThreads } = require('./desktop-history.cjs')
 
 /** Native recovery checks share the caller's live Electron/SSH fixture. */
 async function runRecoveryChecks(context) {
@@ -24,8 +25,7 @@ async function runRecoveryChecks(context) {
   const record = (label) => checks.push(label)
   const saveProof = (filename, proof) =>
     writeFile(join(artifacts, filename), JSON.stringify(proof, null, 2) + '\n')
-  const history = () =>
-    page().evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+  const history = () => readSavedThreads(page())
   const connection = () => page().evaluate(() => window.relay.connection.state())
   const readyToSend = () =>
     page().getByRole('button', { name: 'Send message', exact: true }).waitFor()
@@ -90,25 +90,17 @@ async function runRecoveryChecks(context) {
   await page()
     .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
     .waitFor()
-  await waitUntil(
-    async () =>
-      page().evaluate(() =>
-        JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').some(
-          (thread) =>
-            thread.id === localStorage.getItem('life.active-thread.v1') && thread.remoteId,
-        ),
-      ),
-    'busy conversation identity persists before native Retry',
+  await waitUntil(async () => {
+    const active = await page().evaluate(() => localStorage.getItem('life.active-thread.v1'))
+    return (await history()).some((thread) => thread.id === active && thread.remoteId)
+  }, 'busy conversation identity persists before native Retry')
+  const activeBeforeRetry = await page().evaluate(() =>
+    localStorage.getItem('life.active-thread.v1'),
   )
   const beforeRetry = {
     connection: await connection(),
     extensions: (await extensions()).extensions,
-    thread: await page().evaluate(() => {
-      const active = localStorage.getItem('life.active-thread.v1')
-      return JSON.parse(localStorage.getItem('relay.threads.v1') || '[]').find(
-        (thread) => thread.id === active,
-      )
-    }),
+    thread: (await history()).find((thread) => thread.id === activeBeforeRetry),
   }
   assert.ok(beforeRetry.thread?.remoteId)
   const retryWindow = application().waitForEvent('window', { timeout: 15000 })

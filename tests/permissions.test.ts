@@ -13,11 +13,11 @@ import type { PermissionMode } from '../src/shared/types'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('native provider permissions', () => {
-  it('migrates legacy choices without retaining Plan or broadening access', () => {
+  it('migrates legacy choices without broadening access and preserves native Claude Plan', () => {
     expect(providerPermissionMode('codex', 'review')).toBe('ask-for-approval')
     expect(providerPermissionMode('codex', 'edit')).toBe('ask-for-approval')
     expect(providerPermissionMode('codex', 'plan')).toBe('read-only')
-    expect(providerPermissionMode('claude', 'plan')).toBe('review')
+    expect(providerPermissionMode('claude', 'plan')).toBe('plan')
     expect(providerPermissionMode('claude', 'auto-review')).toBe('review')
     expect(providerPermissionMode('codex', 'auto')).toBe('ask-for-approval')
   })
@@ -29,6 +29,7 @@ describe('native provider permissions', () => {
     'full-access',
     'auto',
     'dontAsk',
+    'plan',
   ])('keeps %s through validation, settings, and history reload', (mode) => {
     expect(
       startSchema.parse({ sessionId: 'thread', provider: 'codex', prompt: 'Hi', mode }).mode,

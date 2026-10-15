@@ -20,7 +20,9 @@ export function providerPermissionMode(provider: Provider, mode: PermissionMode)
       ? mode
       : 'ask-for-approval'
   }
-  return ['review', 'edit', 'full-access', 'auto', 'dontAsk'].includes(mode) ? mode : 'review'
+  return ['review', 'edit', 'plan', 'full-access', 'auto', 'dontAsk'].includes(mode)
+    ? mode
+    : 'review'
 }
 
 export function codexPermissions(mode: PermissionMode, writableRoot: string) {

@@ -39,6 +39,7 @@ import {
 } from '../thread-presentation'
 import { LifeSourceCard } from './LifeSourceCard'
 import { MarkdownRenderCache } from '../markdown-render-cache'
+import { markdownCopiedIcon, markdownCopyIcon, renderSettledMarkdown } from '../settled-markdown'
 import {
   approvalRequestPresentation,
   prepareQuestionAnswers,
@@ -203,6 +204,58 @@ const markdownComponents = {
 }
 const markdownPlugins = [remarkGfm]
 const settledMarkdown = new MarkdownRenderCache<ReactNode>()
+const settledMarkdownHtml = new MarkdownRenderCache<{ __html: string } | undefined>()
+const SettledMarkdownBody = memo(function SettledMarkdownBody({ text }: { text: string }) {
+  const timers = useRef(new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>())
+  useEffect(
+    () => () => {
+      for (const timer of timers.current.values()) clearTimeout(timer)
+      timers.current.clear()
+    },
+    [],
+  )
+  const html = settledMarkdownHtml.render(text, () => renderSettledMarkdown(text))
+  if (!html)
+    return settledMarkdown.render(text, () =>
+      ReactMarkdown({
+        children: text,
+        remarkPlugins: markdownPlugins,
+        components: markdownComponents,
+      }),
+    )
+  return (
+    <div
+      className="thread-settled-markdown"
+      dangerouslySetInnerHTML={html}
+      onClick={(event) => {
+        const button =
+          event.target instanceof Element
+            ? event.target.closest<HTMLButtonElement>('[data-markdown-copy]')
+            : null
+        if (!button || !event.currentTarget.contains(button)) return
+        const code = button.closest('.thread-code-block')?.querySelector('pre')?.textContent
+        if (code === undefined || code === null) return
+        void navigator.clipboard.writeText(code).then(
+          () => {
+            if (!button.isConnected) return
+            button.innerHTML = markdownCopiedIcon
+            clearTimeout(timers.current.get(button))
+            timers.current.set(
+              button,
+              setTimeout(() => {
+                button.innerHTML = markdownCopyIcon
+                timers.current.delete(button)
+              }, 1800),
+            )
+          },
+          () => {
+            // Clipboard failures leave the exact code and copy control available.
+          },
+        )
+      }}
+    />
+  )
+})
 const MarkdownBody = memo(function MarkdownBody({
   text,
   settled,
@@ -210,6 +263,10 @@ const MarkdownBody = memo(function MarkdownBody({
   text: string
   settled: boolean
 }) {
+  // A body that was mounted live keeps its React nodes when it completes, so
+  // completion cannot replace an active text selection or focused code block.
+  const initiallySettled = useRef(settled).current
+  if (initiallySettled) return <SettledMarkdownBody text={text} />
   // react-markdown's synchronous renderer returns immutable element descriptions.
   // Mounted code-copy controls still receive independent React state in each message.
   const render = () =>
@@ -386,7 +443,11 @@ export function ApprovalCard({
   onRespond,
 }: {
   event: AgentEvent
-  onRespond: (accepted: boolean, answers?: Record<string, string[]>) => Promise<void>
+  onRespond: (
+    accepted: boolean,
+    answers?: Record<string, string[]>,
+    decisionId?: string,
+  ) => Promise<void>
 }) {
   const [answers, setAnswers] = useState<Record<string, string[]>>({})
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
@@ -427,7 +488,7 @@ export function ApprovalCard({
     disabled ||
     (event.type === 'question' && !validation.valid) ||
     (presentation.urlRequest && (!presentation.url || !urlCompleted))
-  const respond = async (accepted: boolean) => {
+  const respond = async (accepted: boolean, decisionId?: string) => {
     if (sending.current || responded.current || submitted || (accepted && cannotAccept)) return
     sending.current = true
     setLoading(true)
@@ -436,6 +497,7 @@ export function ApprovalCard({
       await onRespond(
         accepted,
         accepted && event.type === 'question' ? validation.answers : undefined,
+        decisionId,
       )
       if (currentRequest.current === requestKey) {
         responded.current = true
@@ -754,32 +816,61 @@ export function ApprovalCard({
           {error}
         </p>
       ) : null}
-      <div className="approval-actions">
-        <button
-          className="button secondary"
-          disabled={disabled}
-          onClick={() => void respond(false)}
-        >
-          Decline
-        </button>
-        <button
-          className="button primary"
-          disabled={cannotAccept}
-          onClick={() => void respond(true)}
-        >
-          {loading
-            ? 'Sending…'
-            : submitted
-              ? 'Response sent'
-              : event.type === 'question'
-                ? 'Send answers'
-                : presentation.urlRequest
-                  ? 'Confirm completed'
-                  : presentation.permissionsRequest
-                    ? 'Allow for this turn'
-                    : 'Allow once'}
-        </button>
-      </div>
+      {event.approvalChoicesUnsupported ? (
+        <p className="thread-approval-error" role="alert">
+          {event.approvalChoicesUnsupported}
+        </p>
+      ) : null}
+      {event.approvalChoices !== undefined ? (
+        <div className="thread-approval-choices" aria-label="Native approval choices">
+          {event.approvalChoices.map((choice, index) => {
+            const descriptionId = `${formId}-approval-choice-${index}`
+            return (
+              <div className="thread-approval-choice" key={choice.id}>
+                <button
+                  type="button"
+                  className={`button ${choice.outcome === 'approved' ? 'primary' : 'secondary'}`}
+                  disabled={disabled}
+                  aria-describedby={descriptionId}
+                  onClick={() => void respond(choice.outcome === 'approved', choice.id)}
+                >
+                  {choice.label}
+                </button>
+                <p id={descriptionId} className="thread-approval-context">
+                  {choice.description}
+                </p>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="approval-actions">
+          <button
+            className="button secondary"
+            disabled={disabled}
+            onClick={() => void respond(false)}
+          >
+            Decline
+          </button>
+          <button
+            className="button primary"
+            disabled={cannotAccept}
+            onClick={() => void respond(true)}
+          >
+            {loading
+              ? 'Sending…'
+              : submitted
+                ? 'Response sent'
+                : event.type === 'question'
+                  ? 'Send answers'
+                  : presentation.urlRequest
+                    ? 'Confirm completed'
+                    : presentation.permissionsRequest
+                      ? 'Allow for this turn'
+                      : 'Allow once'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

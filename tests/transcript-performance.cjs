@@ -8,6 +8,7 @@ const { tmpdir } = require('node:os')
 const { build } = require('esbuild')
 const { chromium } = require('playwright')
 const { execFileSync } = require('node:child_process')
+const { createHash } = require('node:crypto')
 
 async function run() {
   const label = process.argv[2] || 'current'
@@ -18,9 +19,17 @@ async function run() {
   let browser
   let server
   const errors = []
-  const baselineRevision = label.startsWith('before') ? '475a014' : undefined
+  const wholeMarkdownBaseline = process.argv.includes('--whole-markdown-baseline')
+  const uniqueMarkdown = process.argv.includes('--unique-markdown')
+  const markdownBaselineRevision = process.argv
+    .find((argument) => argument.startsWith('--markdown-baseline-ref='))
+    ?.slice('--markdown-baseline-ref='.length)
+  if (markdownBaselineRevision) assert.match(markdownBaselineRevision, /^[a-f0-9]{7,40}$/)
+  const baselineRevision =
+    markdownBaselineRevision ||
+    (label.startsWith('before') && !wholeMarkdownBaseline ? '475a014' : undefined)
   try {
-    await build({
+    const bundle = await build({
       stdin: {
         resolveDir: resolve(__dirname, '..'),
         sourcefile: 'transcript-performance-fixture.tsx',
@@ -36,11 +45,16 @@ async function run() {
           import './src/renderer/workspace-presentation.css'
           const markdown = '## Verified result\\n\\n| Check | Outcome |\\n| --- | --- |\\n| Context | Preserved |\\n| Output | Complete |\\n\\n' + ('A detailed finding with **emphasis**, a [source](https://example.com), and useful context.\\n\\n').repeat(12) + '\\x60\\x60\\x60ts\\nconst result = 42;\\n\\x60\\x60\\x60\\n'
           const raw = 'FULL-OUTPUT-BEGIN\\n' + 'Exact tool output with <angle> and line endings.\\r\\n'.repeat(7000) + 'FULL-OUTPUT-END\\n'
+          function historyMarkdown(id,turn) {
+            let paragraph=0
+            const result=markdown.replace('Verified result','Verified result '+id+' '+turn)
+            return ${uniqueMarkdown} ? result.replace(/A detailed finding/g,()=> 'A detailed finding '+id+' '+turn+' paragraph '+paragraph++) : result
+          }
           function history(id) {
             const messages = []
             for (let turn = 1; turn <= 250; turn++) {
               messages.push({ id:id+':'+turn+':user', role:'user', text:'Inspect turn '+turn, turn, createdAt:1, finishedAt:1000, finishStatus:'completed' })
-              messages.push({ id:id+':'+turn+':final', role:'assistant', phase:'final_answer', text:markdown.replace('Verified result','Verified result '+id+' '+turn), turn })
+              messages.push({ id:id+':'+turn+':final', role:'assistant', phase:'final_answer', text:historyMarkdown(id,turn), turn })
             }
             const turn = 251
             messages.push({ id:id+':active-user', role:'user', text:'Continue with the active tools and summaries.', turn, createdAt:Date.now() })
@@ -94,28 +108,84 @@ async function run() {
       loader: { '.woff2': 'dataurl', '.woff': 'dataurl' },
       define: { 'process.env.NODE_ENV': '"production"' },
       minify: true,
+      metafile: true,
       logLevel: 'silent',
       plugins: baselineRevision
         ? [
             {
               name: 'pinned-life-010-renderer',
               setup(plugin) {
-                plugin.onLoad({ filter: /\/src\/renderer\/.*\.(tsx?|css)$/ }, ({ path }) => ({
-                  contents: execFileSync(
-                    'git',
-                    [
-                      'show',
-                      baselineRevision + ':' + path.slice(resolve(__dirname, '..').length + 1),
-                    ],
-                    { cwd: resolve(__dirname, '..'), encoding: 'utf8' },
-                  ),
-                  loader: path.endsWith('.tsx') ? 'tsx' : path.endsWith('.css') ? 'css' : 'ts',
-                }))
+                plugin.onLoad(
+                  {
+                    filter: markdownBaselineRevision
+                      ? /\/src\/renderer\/components\/(MessageView\.tsx|thread-output\.css)$/
+                      : /\/src\/renderer\/.*\.(tsx?|css)$/,
+                  },
+                  ({ path }) => ({
+                    contents: execFileSync(
+                      'git',
+                      [
+                        'show',
+                        baselineRevision + ':' + path.slice(resolve(__dirname, '..').length + 1),
+                      ],
+                      { cwd: resolve(__dirname, '..'), encoding: 'utf8' },
+                    ),
+                    loader: path.endsWith('.tsx') ? 'tsx' : path.endsWith('.css') ? 'css' : 'ts',
+                  }),
+                )
               },
             },
           ]
-        : [],
+        : wholeMarkdownBaseline
+          ? [
+              {
+                name: 'whole-document-markdown-baseline',
+                setup(plugin) {
+                  plugin.onLoad({ filter: /\/src\/renderer\/markdown-block-cache\.ts$/ }, () => ({
+                    contents:
+                      "import { micromark } from 'micromark'; export const createMarkdownBlockCompiler = (options) => (text) => micromark(text, options)",
+                    loader: 'ts',
+                  }))
+                },
+              },
+            ]
+          : [],
     })
+    const rendererSources = Object.fromEntries(
+      await Promise.all(
+        Object.keys(bundle.metafile.inputs)
+          .filter((path) => path.startsWith('src/renderer/') && /\.(tsx?|css)$/.test(path))
+          .sort()
+          .map(async (path) => [
+            path,
+            createHash('sha256')
+              .update(await readFile(resolve(__dirname, '..', path)))
+              .digest('hex'),
+          ]),
+      ),
+    )
+    const source = {
+      revision: execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: resolve(__dirname, '..'),
+        encoding: 'utf8',
+      }).trim(),
+      renderer: baselineRevision || 'workspace',
+      fixtureSha256: createHash('sha256')
+        .update(await readFile(__filename))
+        .digest('hex'),
+      dependencyLockSha256: createHash('sha256')
+        .update(await readFile(resolve(__dirname, '../package-lock.json')))
+        .digest('hex'),
+      markdownCompiler: wholeMarkdownBaseline
+        ? 'whole-document-micromark'
+        : baselineRevision
+          ? 'pinned-renderer'
+          : 'adaptive-block-cache',
+      workspaceSourcesSha256: createHash('sha256')
+        .update(JSON.stringify(rendererSources))
+        .digest('hex'),
+      rendererSources,
+    }
     server = createServer(async (request, response) => {
       const name = ['fixture.js', 'fixture.css'].find((name) => request.url === '/' + name)
       response.setHeader(
@@ -302,6 +372,7 @@ async function run() {
     const proof = {
       label,
       baselineRevision,
+      source,
       fixture: {
         completedTurns: 250,
         activeToolOutputs: 80,
@@ -309,6 +380,7 @@ async function run() {
         largeReasoningSummaries: 20,
         cpuThrottle: 2,
         productionReact: true,
+        markdownParagraphs: uniqueMarkdown ? 'distinct per reply' : 'repeated',
       },
       initial,
       streaming,

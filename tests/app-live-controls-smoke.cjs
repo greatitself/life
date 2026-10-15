@@ -5,7 +5,7 @@ const { createServer } = require('node:http')
 const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 const presentation = process.argv.includes('--presentation')
 const historyHydration = process.argv.includes('--history-hydration')
@@ -987,6 +987,7 @@ async function run() {
           heldStateReads: 0,
           heldWrites: 0,
           historyLoads: 0,
+          historySaveAttempts: 0,
           historySaves: [],
           stops: [],
           providerUpdateReads: [],
@@ -1543,29 +1544,60 @@ async function run() {
           let releaseHistory
           let rejectHistory
           let historyFailure
-          const pendingHistory = new Promise((resolve, reject) => {
-            releaseHistory = resolve
-            rejectHistory = reject
-          })
+          let pendingHistory
+          const prepareHistory = () => {
+            pendingHistory = new Promise((resolve, reject) => {
+              releaseHistory = resolve
+              rejectHistory = reject
+            })
+          }
+          prepareHistory()
           window.relay.conversations = {
             load: () => {
               records.historyLoads++
-              return pendingHistory
+              return historyFailure ? Promise.reject(historyFailure) : pendingHistory
             },
             save: async (threads, savedAt) => {
+              records.historySaveAttempts++
               if (historyFailure) throw historyFailure
               records.historySaves.push({ threads: structuredClone(threads), savedAt })
             },
           }
-          window.controlsTest.releaseHistory = () =>
+          window.controlsTest.releaseHistory = (nativeOnly = false) =>
             releaseHistory({
               version: 1,
               savedAt: Date.now(),
-              threads: structuredClone(savedThreads),
+              threads: structuredClone([
+                ...savedThreads,
+                ...(nativeOnly
+                  ? [
+                      {
+                        ...thread('native-only', 'Durable disk-only conversation'),
+                        messages: [
+                          {
+                            id: 'disk-only-answer',
+                            role: 'assistant',
+                            text: 'Exact durable answer\n  preserved  ',
+                            turn: 1,
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
+              ]),
             })
+          window.controlsTest.rejectHistoryOnce = () => {
+            const reject = rejectHistory
+            prepareHistory()
+            reject(new Error('EIO: temporarily unreadable native history'))
+          }
           window.controlsTest.rejectHistory = () => {
             historyFailure = new Error('Unreadable original native history was preserved')
             rejectHistory(historyFailure)
+          }
+          window.controlsTest.resumeHistoryReading = () => {
+            historyFailure = undefined
+            prepareHistory()
           }
         }
         if (fluidity)
@@ -1647,11 +1679,57 @@ async function run() {
       )
       await page.reload()
       await page.getByText('Loading saved conversations…', { exact: true }).waitFor()
+      await page.evaluate(() => {
+        localStorage.removeItem('relay.threads.v1')
+        window.controlsTest.rejectHistoryOnce()
+      })
+      await page.waitForFunction(() => window.controlsTest.records.historyLoads === 2)
+      assert.equal(await page.locator('.app-body').getAttribute('inert'), '')
+      await page.evaluate(() => window.__lifeFlushConversationHistory())
+      assert.equal(await page.evaluate(() => window.controlsTest.records.historySaveAttempts), 0)
+      await page.evaluate(() => window.controlsTest.releaseHistory(true))
+      await page.getByRole('button', { name: /^Durable disk-only conversation, OpenAI/ }).waitFor()
+      await page.evaluate(() => window.__lifeFlushConversationHistory())
+      const recoveredSaves = await page.evaluate(() => window.controlsTest.records.historySaves)
+      assert.ok(recoveredSaves.length > 0)
+      assert.ok(
+        recoveredSaves.every((save) => save.threads.some((thread) => thread.id === 'native-only')),
+      )
+      assert.equal(
+        recoveredSaves[0].threads.find((thread) => thread.id === 'native-only').messages[0].text,
+        'Exact durable answer\n  preserved  ',
+      )
+      checks.push(
+        'A transient native read failure retries without saving empty history, then preserves recovered disk-only conversations',
+      )
+      await page.reload()
+      await page.getByText('Loading saved conversations…', { exact: true }).waitFor()
+      const initialStateReads = await page.evaluate(() => window.controlsTest.records.stateReads)
       await page.evaluate(() => window.controlsTest.rejectHistory())
       await page.getByRole('button', { name: /^Thread Alpha, OpenAI/ }).waitFor()
       assert.equal(await page.locator('.app-body').getAttribute('inert'), null)
+      assert.equal(await page.evaluate(() => window.controlsTest.records.historyLoads), 3)
+      assert.equal(
+        await page.evaluate(() => window.controlsTest.records.stateReads),
+        initialStateReads,
+      )
       await page.evaluate(() => window.__lifeFlushConversationHistory())
+      assert.equal(await page.evaluate(() => window.controlsTest.records.historySaveAttempts), 0)
       assert.equal(await page.evaluate(() => window.controlsTest.records.historySaves.length), 0)
+      await page
+        .getByRole('textbox', { name: 'Message your coding agent' })
+        .fill('Keep the disk history intact')
+      assert.equal(
+        await page.getByRole('button', { name: 'Send message', exact: true }).isEnabled(),
+        false,
+      )
+      await page.getByRole('button', { name: 'Thread actions', exact: true }).click()
+      await page.getByRole('menuitem', { name: 'Delete thread', exact: true }).click()
+      assert.equal(
+        await page.getByRole('dialog', { name: 'Delete thread', exact: true }).count(),
+        0,
+      )
+      await page.keyboard.press('Escape')
       assert.ok(
         (await page.evaluate(() => window.controlsTest.stored())).some(
           (thread) => thread.id === 'thread-a',
@@ -1659,6 +1737,26 @@ async function run() {
       )
       checks.push(
         'Failed native loading restores usable local cached history without accepting a replacement disk checkpoint',
+      )
+      await page.evaluate(() => window.controlsTest.resumeHistoryReading())
+      await page.getByRole('button', { name: 'Retry loading', exact: true }).click()
+      await page.getByText('Loading saved conversations…', { exact: true }).waitFor()
+      assert.equal(await page.locator('.app-body').getAttribute('inert'), '')
+      assert.equal(await page.evaluate(() => window.controlsTest.records.historySaveAttempts), 0)
+      await page.evaluate(() => window.controlsTest.releaseHistory(true))
+      await page.getByRole('button', { name: /^Durable disk-only conversation, OpenAI/ }).waitFor()
+      assert.equal(
+        await page.getByRole('button', { name: 'Retry loading', exact: true }).count(),
+        0,
+      )
+      await page.evaluate(() => window.__lifeFlushConversationHistory())
+      assert.ok(
+        (await page.evaluate(() => window.controlsTest.records.historySaves)).every((save) =>
+          save.threads.some((thread) => thread.id === 'native-only'),
+        ),
+      )
+      checks.push(
+        'Manual retry rereads native history before resuming changes and retains unknown durable threads',
       )
       assert.deepEqual(errors, [])
       console.log(

@@ -7,6 +7,7 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  Monitor,
 } from 'lucide-react'
 import type { ConnectionProfile, ConnectionState } from '../../shared/types'
 import { describeEnvironment, type EnvironmentScope } from '../environment'
@@ -40,6 +41,7 @@ export function ActiveEnvironment({
   const environment = describeEnvironment(connection, savedProfile, workspace, scope)
   const connected = environment.status === 'connected'
   const connecting = environment.status === 'connecting'
+  const local = environment.profile?.transport === 'local'
 
   function perform(action: (() => void) | undefined) {
     actionRequested.current = true
@@ -68,7 +70,11 @@ export function ActiveEnvironment({
             data-status={environment.status}
             aria-hidden="true"
           />
-          <Server size={14} aria-hidden="true" />
+          {local ? (
+            <Monitor size={14} aria-hidden="true" />
+          ) : (
+            <Server size={14} aria-hidden="true" />
+          )}
           <span className="environment-trigger-label">Current Active Environment</span>
           <span className="environment-trigger-machine">{environment.machineName}</span>
           <ChevronDown size={12} aria-hidden="true" />
@@ -89,11 +95,19 @@ export function ActiveEnvironment({
       >
         <section className="environment-machine-card" aria-label="Machine connection">
           <span className="environment-machine-icon">
-            <Server size={21} aria-hidden="true" />
+            {local ? (
+              <Monitor size={21} aria-hidden="true" />
+            ) : (
+              <Server size={21} aria-hidden="true" />
+            )}
           </span>
           <div className="environment-machine-description">
             <strong>{environment.machineName}</strong>
-            <span>{environment.authority || 'Connect a machine to begin'}</span>
+            <span>
+              {local
+                ? 'Runs on the computer running Life'
+                : environment.authority || 'Connect a machine to begin'}
+            </span>
           </div>
           <span className="environment-status-label" data-status={environment.status}>
             <span
@@ -129,7 +143,7 @@ export function ActiveEnvironment({
               <dd className="environment-detail-path">{environment.sshConfigPath}</dd>
             </div>
           ) : null}
-          {environment.profile ? (
+          {environment.profile && !local ? (
             <div>
               <dt>Authentication</dt>
               <dd>

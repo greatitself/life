@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import type { ConnectionState } from '../shared/types'
 import { researchOperations, type ResearchOperation } from '../shared/research-method'
 import type { Thread } from './state'
+import { conversationSourceAttachmentIds } from './conversation-source'
 import { errorText } from './api'
 import {
   attachmentMetadata,
@@ -27,6 +28,9 @@ export interface QueuedSubmission {
   threadId: string
   messageId: string
   files: DraftAttachment[]
+}
+function queuedMessageKey(threadId: string, messageId: string): string {
+  return JSON.stringify([threadId, messageId])
 }
 export function normalizeQueuedMessages(value: unknown): QueuedMessage[] {
   if (!Array.isArray(value)) return []
@@ -130,12 +134,15 @@ export function canAutoSendQueuedMessage(
 }
 export function threadAttachmentIds(thread: Thread): string[] {
   return [
-    ...thread.messages.flatMap((message) =>
-      (message.attachments || []).map((attachment) => attachment.id),
-    ),
-    ...(thread.queue || []).flatMap((message) =>
-      message.attachments.map((attachment) => attachment.id),
-    ),
+    ...new Set([
+      ...thread.messages.flatMap((message) =>
+        (message.attachments || []).map((attachment) => attachment.id),
+      ),
+      ...(thread.queue || []).flatMap((message) =>
+        message.attachments.map((attachment) => attachment.id),
+      ),
+      ...conversationSourceAttachmentIds(thread),
+    ]),
   ]
 }
 async function loadQueuedAttachmentFiles(message: QueuedMessage): Promise<DraftAttachment[]> {
@@ -194,7 +201,7 @@ export function useThreadQueue(options: QueueOptions) {
     )
   }, [])
   const restore = useCallback((threadId: string, message: QueuedMessage, failure: string) => {
-    if (!mounted.current || cancelled.current.has(message.id)) return
+    if (!mounted.current || cancelled.current.has(queuedMessageKey(threadId, message.id))) return
     context.current.onThreads((previous) =>
       previous.map((thread) => {
         if (thread.id !== threadId) return thread
@@ -277,27 +284,30 @@ export function useThreadQueue(options: QueueOptions) {
   )
   const remove = useCallback(
     (threadId: string, messageId: string) => {
-      cancelled.current.add(messageId)
       const snapshot = context.current.threads
-      const message = snapshot
-        .find((thread) => thread.id === threadId)
-        ?.queue?.find((item) => item.id === messageId)
-      const retained = new Set(
-        snapshot.flatMap((thread) => [
-          ...thread.messages.flatMap((item) =>
-            (item.attachments || []).map((attachment) => attachment.id),
-          ),
-          ...(thread.queue || [])
-            .filter((item) => item.id !== messageId)
-            .flatMap((item) => item.attachments.map((attachment) => attachment.id)),
-        ]),
+      const matches = snapshot.filter((thread) => thread.id === threadId)
+      if (matches.length !== 1) {
+        context.current.onError('These saved threads share an ID. Their queued messages were kept.')
+        return
+      }
+      const target = matches[0]
+      const message = target.queue?.find((item) => item.id === messageId)
+      if (!message) return
+      cancelled.current.add(queuedMessageKey(threadId, messageId))
+      const next = snapshot.map((thread) =>
+        thread === target
+          ? { ...thread, queue: (thread.queue || []).filter((item) => item.id !== messageId) }
+          : thread,
       )
+      const retained = new Set(next.flatMap(threadAttachmentIds))
       context.current.onThreads((previous) =>
-        previous.map((thread) =>
-          thread.id === threadId
-            ? { ...thread, queue: (thread.queue || []).filter((item) => item.id !== messageId) }
-            : thread,
-        ),
+        previous.filter((thread) => thread.id === threadId).length !== 1
+          ? previous
+          : previous.map((thread) =>
+              thread.id === threadId
+                ? { ...thread, queue: (thread.queue || []).filter((item) => item.id !== messageId) }
+                : thread,
+            ),
       )
       const removed = (message?.attachments || [])
         .map((item) => item.id)
@@ -315,7 +325,8 @@ export function useThreadQueue(options: QueueOptions) {
       const current = context.current
       const thread = current.threads.find((item) => item.id === threadId)
       const selected = thread?.queue?.find((item) => item.id === messageId)
-      if (!thread || !selected || cancelled.current.has(messageId)) return
+      if (!thread || !selected || cancelled.current.has(queuedMessageKey(threadId, messageId)))
+        return
       if (!queueConnectionMatches(thread, current.connection)) {
         current.onError('Select this thread’s machine and project to send its queued message.')
         return
@@ -325,7 +336,7 @@ export function useThreadQueue(options: QueueOptions) {
       setOperation({ threadId, id: messageId })
       try {
         const files = await loadQueuedAttachmentFiles(selected)
-        if (!mounted.current || cancelled.current.has(messageId)) return
+        if (!mounted.current || cancelled.current.has(queuedMessageKey(threadId, messageId))) return
         const latest = context.current
         const target = latest.threads.find((item) => item.id === threadId)
         if (!target?.queue?.some((item) => item.id === messageId)) return
@@ -407,7 +418,8 @@ export function useThreadQueue(options: QueueOptions) {
     void (async () => {
       try {
         const files = await loadQueuedAttachmentFiles(message)
-        if (!mounted.current || cancelled.current.has(message.id)) return
+        if (!mounted.current || cancelled.current.has(queuedMessageKey(candidate.id, message.id)))
+          return
         const latest = context.current
         const thread = latest.threads.find((item) => item.id === candidate.id)
         if (!thread?.queue?.some((item) => item.id === message.id)) return

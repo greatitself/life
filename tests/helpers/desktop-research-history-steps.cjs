@@ -2,9 +2,9 @@
 const assert = require('node:assert/strict')
 const { mkdir, readFile, rm, writeFile } = require('node:fs/promises')
 const { join } = require('node:path')
+const { readSavedThreads } = require('./desktop-history.cjs')
 
-const savedThreads = (page) =>
-  page.evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+const savedThreads = readSavedThreads
 
 function promptFrom(entry) {
   if (entry.kind === 'title-metadata') return undefined
@@ -98,6 +98,48 @@ async function runResearchChecks(context) {
   const problemBrief = 'Keep this problem, its artifacts, and its conversation in Research.'
 
   await research(context)
+  // This SSH-specific fixture chooses Research's independent environment explicitly.
+  const sshProfile = (await page.evaluate(() => window.relay.profiles.list())).find(
+    (profile) =>
+      profile.transport !== 'local' &&
+      profile.host === context.input.host &&
+      profile.port === context.input.port,
+  )
+  assert.ok(sshProfile, 'The saved private SSH fixture environment exists')
+  await page.getByRole('button', { name: 'Current Active Environment', exact: true }).click()
+  await page
+    .getByRole('dialog', { name: 'Current Active Environment', exact: true })
+    .getByRole('button', { name: /^(?:Switch|Connect) environment$/ })
+    .click()
+  const environment = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
+  await environment.waitFor()
+  await environment
+    .locator('.saved-profile')
+    .filter({ hasText: sshProfile.name })
+    .getByRole('button')
+    .first()
+    .click()
+  await environment.getByPlaceholder('Your SSH password').fill(context.input.password)
+  await environment.getByRole('button', { name: 'Connect machine', exact: true }).click()
+  await environment.waitFor({ state: 'hidden' })
+  const project = page.getByRole('dialog', { name: 'Select a project', exact: true })
+  await project.waitFor()
+  await project
+    .getByRole('textbox', { name: 'Project directory', exact: true })
+    .fill(connection.workspace)
+  await project.getByRole('button', { name: 'Open project', exact: true }).click()
+  await project.waitFor({ state: 'hidden' })
+  await context.waitUntil(
+    async () =>
+      (await page.evaluate(() => window.relay.connection.state())).profile?.id === sshProfile.id &&
+      (await page.evaluate(() => localStorage.getItem('life.research.selected-scope.v2'))) ===
+        JSON.stringify(['research', sshProfile.id, context.fixture.root]),
+    'Research explicitly owns the private SSH fixture environment',
+  )
+  assert.equal(
+    (await page.evaluate(() => window.relay.connection.state())).workspace,
+    connection.workspace,
+  )
   await page.getByRole('button', { name: 'New goal', exact: true }).click()
   let editor = page.getByRole('dialog', { name: 'New goal', exact: true })
   await editor.getByLabel('Title', { exact: true }).fill(title)

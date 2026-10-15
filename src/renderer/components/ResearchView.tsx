@@ -807,7 +807,9 @@ export function ResearchView({
                 <>
                   <strong>{selectedProfile.name}</strong>
                   <code>
-                    {selectedProfile.username}@{selectedProfile.host}
+                    {selectedProfile.transport === 'local'
+                      ? 'This computer'
+                      : `${selectedProfile.username}@${selectedProfile.host}`}
                   </code>
                   <code title={selectedProfile.workspace}>{selectedProfile.workspace}</code>
                 </>

@@ -56,6 +56,7 @@ function projectName(path: string | undefined): string | undefined {
 
 function authority(profile: ConnectionProfile | undefined): string {
   if (!profile) return 'No machine selected'
+  if (profile.transport === 'local') return 'This computer'
   const host = profile.host
   const withPort = profile.port !== 22
   const formattedHost = withPort && host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
@@ -78,7 +79,17 @@ function providerStatus(
   if (version === 'missing')
     return { provider, label, availability: 'missing', detail: 'Not installed' }
   if (version) return { provider, label, availability: 'available', detail: version }
-  return { provider, label, availability: 'unknown', detail: 'Availability not checked' }
+  return {
+    provider,
+    label,
+    availability: 'unknown',
+    detail:
+      connection.providerVersionsStatus === 'checking'
+        ? 'Checking installed providers…'
+        : connection.providerVersionsStatus === 'failed'
+          ? 'Availability check failed'
+          : 'Availability not checked',
+  }
 }
 
 /** Describe the selected environment without mistaking a saved folder for an active project. */
@@ -103,13 +114,16 @@ export function describeEnvironment(
     profile,
     status: connection.status,
     statusLabel: statusLabels[connection.status],
-    machineName: profile?.name.trim() || profile?.host || 'No environment selected',
+    machineName:
+      profile?.name.trim() ||
+      (profile?.transport === 'local' ? 'Local' : profile?.host) ||
+      'No environment selected',
     authority: authority(profile),
     workspace,
     projectName: projectName(workspace),
     scopeLabel: scopeLabels[scope],
-    sshAlias: profile?.sshConfig?.alias,
-    sshConfigPath: profile?.sshConfig?.path,
+    sshAlias: profile?.transport === 'local' ? undefined : profile?.sshConfig?.alias,
+    sshConfigPath: profile?.transport === 'local' ? undefined : profile?.sshConfig?.path,
     providerStatuses: [providerStatus('codex', connection), providerStatus('claude', connection)],
   }
 }

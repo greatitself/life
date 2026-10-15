@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Bot,
@@ -176,17 +176,6 @@ export function WorkspaceSurfaces(props: Props) {
   )
   const ready = connection.status === 'connected' && Boolean(connection.workspace)
   const showPicker = picker || !selected
-  const projectThreads = props.threads.filter(
-    (thread) =>
-      thread.profileId === connection.profile?.id && thread.workspace === connection.workspace,
-  )
-  const selectedThread = projectThreads.find((thread) => thread.id === props.activeThread?.id)
-  const calls =
-    selectedThread?.messages.filter(
-      (message) =>
-        message.role === 'tool' &&
-        /spawn|collab.*agent|(?:^|[\s_])(?:agent|task)(?:$|[\s_])/i.test(message.title || ''),
-    ) || []
   if (!enabled) return null
   return (
     <aside
@@ -313,55 +302,14 @@ export function WorkspaceSurfaces(props: Props) {
             aria-labelledby="surface-tab-agents"
             hidden={showPicker || selected !== 'agents'}
           >
-            <div className="surface-section-heading">
-              <Bot size={16} />
-              <strong>Agents</strong>
-              <span>{projectThreads.filter((thread) => thread.busy).length} running</span>
-            </div>
-            {!projectThreads.length ? (
-              <div className="surface-empty">
-                Agent threads for the selected project will appear here.
-              </div>
-            ) : (
-              projectThreads.map((thread) => (
-                <button
-                  className="surface-agent-row"
-                  key={thread.id}
-                  onClick={() => props.onSelectThread(thread)}
-                  aria-current={thread.id === props.activeThread?.id ? 'true' : undefined}
-                >
-                  <Bot size={17} />
-                  <span>
-                    <strong>{thread.title}</strong>
-                    <small>
-                      {thread.provider === 'codex' ? 'Codex' : 'Claude Code'} ·{' '}
-                      {thread.model || 'Agent default'}
-                    </small>
-                  </span>
-                  <span className="surface-status">
-                    {thread.pending.length ? 'Waiting for you' : thread.busy ? 'Running' : 'Idle'}
-                  </span>
-                </button>
-              ))
-            )}
-            <div className="surface-section-heading">
-              <strong>Reported agent calls</strong>
-              <span>{calls.length}</span>
-            </div>
-            {calls.length ? (
-              calls.map((call) => (
-                <details className="surface-agent-call" key={call.id}>
-                  <summary>
-                    {call.title} <span>{call.status || 'Reported'}</span>
-                  </summary>
-                  <pre>{call.text || 'No additional output reported.'}</pre>
-                </details>
-              ))
-            ) : (
-              <div className="surface-empty">
-                Agent calls reported in the selected thread will appear here.
-              </div>
-            )}
+            <AgentsSurface
+              active={!showPicker && selected === 'agents'}
+              threads={props.threads}
+              profileId={connection.profile?.id}
+              workspace={connection.workspace}
+              activeThreadId={props.activeThread?.id}
+              onSelectThread={props.onSelectThread}
+            />
           </div>
         ) : null}
       </div>
@@ -369,3 +317,105 @@ export function WorkspaceSurfaces(props: Props) {
     </aside>
   )
 }
+
+interface AgentsSurfaceProps {
+  active: boolean
+  threads: Thread[]
+  profileId?: string
+  workspace?: string
+  activeThreadId?: string
+  onSelectThread: (thread: Thread) => void
+}
+
+// Hidden panes retain their rendered details without scanning live thread history.
+const AgentsSurface = memo(
+  function AgentsSurface({
+    active,
+    threads,
+    profileId,
+    workspace,
+    activeThreadId,
+    onSelectThread,
+  }: AgentsSurfaceProps) {
+    const projectThreads = useMemo(
+      () =>
+        active
+          ? threads.filter(
+              (thread) => thread.profileId === profileId && thread.workspace === workspace,
+            )
+          : [],
+      [active, threads, profileId, workspace],
+    )
+    const selectedThread = projectThreads.find((thread) => thread.id === activeThreadId)
+    const calls = useMemo(
+      () =>
+        selectedThread?.messages.filter(
+          (message) =>
+            message.role === 'tool' &&
+            /spawn|collab.*agent|(?:^|[\s_])(?:agent|task)(?:$|[\s_])/i.test(message.title || ''),
+        ) || [],
+      [selectedThread?.messages],
+    )
+    return (
+      <>
+        <div className="surface-section-heading">
+          <Bot size={16} />
+          <strong>Agents</strong>
+          <span>{projectThreads.filter((thread) => thread.busy).length} running</span>
+        </div>
+        {!projectThreads.length ? (
+          <div className="surface-empty">
+            Agent threads for the selected project will appear here.
+          </div>
+        ) : (
+          projectThreads.map((thread) => (
+            <button
+              className="surface-agent-row"
+              key={thread.id}
+              onClick={() => onSelectThread(thread)}
+              aria-current={thread.id === activeThreadId ? 'true' : undefined}
+            >
+              <Bot size={17} />
+              <span>
+                <strong>{thread.title}</strong>
+                <small>
+                  {thread.provider === 'codex' ? 'Codex' : 'Claude Code'} ·{' '}
+                  {thread.model || 'Agent default'}
+                </small>
+              </span>
+              <span className="surface-status">
+                {thread.pending.length ? 'Waiting for you' : thread.busy ? 'Running' : 'Idle'}
+              </span>
+            </button>
+          ))
+        )}
+        <div className="surface-section-heading">
+          <strong>Reported agent calls</strong>
+          <span>{calls.length}</span>
+        </div>
+        {calls.length ? (
+          calls.map((call) => (
+            <details className="surface-agent-call" key={call.id}>
+              <summary>
+                {call.title} <span>{call.status || 'Reported'}</span>
+              </summary>
+              <pre>{call.text || 'No additional output reported.'}</pre>
+            </details>
+          ))
+        ) : (
+          <div className="surface-empty">
+            Agent calls reported in the selected thread will appear here.
+          </div>
+        )}
+      </>
+    )
+  },
+  (previous, next) =>
+    !next.active ||
+    (previous.active === next.active &&
+      previous.threads === next.threads &&
+      previous.profileId === next.profileId &&
+      previous.workspace === next.workspace &&
+      previous.activeThreadId === next.activeThreadId &&
+      previous.onSelectThread === next.onSelectThread),
+)

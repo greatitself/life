@@ -149,6 +149,13 @@
     grid-template-columns: 160px minmax(0, 1fr) 230px;
   }
 }
+@media (min-width: 851px) and (max-width: 1030px) {
+  :root .life-studio-dialog > .customization-studio {
+    grid-template-columns: 160px minmax(0, 1fr);
+    grid-template-rows: minmax(440px, 1fr) auto;
+    overflow: auto;
+  }
+}
 @media (max-width: 850px) {
   :root .life-studio-dialog > .customization-studio {
     grid-template-columns: minmax(0, 1fr);
@@ -158,9 +165,14 @@
   }
   :root .life-studio-dialog .studio-history {
     flex: 0 0 auto;
-    max-height: 180px;
+    max-height: none;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  :root .life-studio-dialog .studio-session-list {
+    flex: 0 0 auto;
+    min-height: 54px;
+    max-height: 160px;
   }
   :root .life-studio-dialog .studio-conversation {
     flex: 0 0 auto;

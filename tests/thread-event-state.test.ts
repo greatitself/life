@@ -589,6 +589,54 @@ describe('provider events remain visible and distinct in a thread', () => {
 })
 
 describe('provider approvals and questions remain in the transcript after resolution', () => {
+  it.each(['approved', 'declined', 'cancelled'] as const)(
+    'records the explicit native %s choice for both direct and provider-event responses',
+    (outcome) => {
+      const choice = {
+        id: 'native-choice',
+        label: 'Native decision',
+        description: 'Exact offered decision',
+        outcome,
+      }
+      const initial = stream(thread(), [
+        event('approval', { requestId: 'native-request', approvalChoices: [choice] }),
+      ])
+      const direct = resolveAgentRequest(
+        initial,
+        'native-request',
+        outcome !== 'approved',
+        undefined,
+        123,
+        choice,
+      )
+      const echoed = applyEvent(
+        initial,
+        event('request-resolved', {
+          requestId: 'native-request',
+          status: outcome,
+          details: { decisionId: choice.id },
+        }),
+      )
+      for (const resolved of [direct, echoed]) {
+        expect(resolved.pending).toEqual([])
+        expect(resolved.busy).toBe(true)
+        expect(
+          resolved.messages.find((message) => message.details?.requestId === 'native-request'),
+        ).toMatchObject({
+          status: outcome,
+          details: {
+            response: {
+              accepted: outcome === 'approved',
+              decisionId: choice.id,
+              outcome,
+              label: choice.label,
+            },
+          },
+        })
+        expect(resolved.messages[0].text).toBe(exactUserText)
+      }
+    },
+  )
   const questions = [
     {
       id: 'scope',

@@ -99,6 +99,17 @@ export class CustomizationStore {
     this.watcher?.close()
   }
 
+  /** Wait for settings operations already admitted, including rejected callers. */
+  async settled(): Promise<void> {
+    await this.operations.catch(() => {})
+  }
+
+  /** Stop admissions immediately, then let accepted settings writes finish. */
+  async closeAndSettle(): Promise<void> {
+    this.close()
+    await this.settled()
+  }
+
   private queue<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error('Life customization store is closed'))
     const current = this.operations.catch(() => {}).then(operation)

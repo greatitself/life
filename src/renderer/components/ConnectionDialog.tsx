@@ -12,6 +12,7 @@ import {
   ChevronRight,
   FileCog,
   RefreshCw,
+  Monitor,
 } from 'lucide-react'
 import type {
   ConnectInput,
@@ -44,6 +45,8 @@ export function ConnectionDialog({
   refreshProfiles,
   connection,
   initialProfileId,
+  onConnected,
+  beforeConnect,
 }: {
   open: boolean
   suspended?: boolean
@@ -52,8 +55,17 @@ export function ConnectionDialog({
   refreshProfiles: () => void
   connection: ConnectionState
   initialProfileId?: string
+  onConnected?: (state: ConnectionState) => void
+  beforeConnect?: () => Promise<void>
 }) {
-  const [input, setInput] = useState<ConnectInput>(blank)
+  const [input, setInput] = useState<ConnectInput>(() => {
+    const profile =
+      profiles.find((item) => item.id === initialProfileId) ||
+      profiles.find((item) => item.id === connection.profile?.id) ||
+      connection.profile ||
+      profiles.find((item) => item.transport === 'local')
+    return profile ? { ...profile, password: '', passphrase: '' } : blank()
+  })
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -61,7 +73,10 @@ export function ConnectionDialog({
   const [configList, setConfigList] = useState<SSHConfigList | null>(null)
   const [configHost, setConfigHost] = useState<SSHConfigHost | null>(null)
   const [configLoading, setConfigLoading] = useState(false)
+  const local = input.transport === 'local'
   const configGeneration = useRef(0)
+  const awaitingProfiles = useRef(false)
+  const saveInFlight = useRef(false)
   async function loadConfig(path = configPath) {
     if (!api) return
     const generation = ++configGeneration.current
@@ -82,17 +97,35 @@ export function ConnectionDialog({
     if (open) {
       setError('')
       setSaved(false)
-      const requestedProfile = profiles.find((profile) => profile.id === initialProfileId)
+      awaitingProfiles.current = profiles.length === 0
+      const requestedProfile =
+        profiles.find((profile) => profile.id === initialProfileId) ||
+        profiles.find((profile) => profile.id === connection.profile?.id) ||
+        connection.profile ||
+        profiles.find((profile) => profile.transport === 'local')
       if (requestedProfile) setInput({ ...requestedProfile, password: '', passphrase: '' })
-      void loadConfig(requestedProfile?.sshConfig?.path || input.sshConfig?.path || configPath)
+      if (profiles.length && requestedProfile?.transport !== 'local')
+        void loadConfig(requestedProfile?.sshConfig?.path || input.sshConfig?.path || configPath)
     } else {
       configGeneration.current++
       setInput((p) => ({ ...p, password: '', passphrase: '' }))
     }
   }, [open, initialProfileId])
   useEffect(() => {
+    if (!open || !awaitingProfiles.current || !profiles.length) return
+    awaitingProfiles.current = false
+    const profile =
+      profiles.find((item) => item.id === initialProfileId) ||
+      profiles.find((item) => item.id === connection.profile?.id) ||
+      connection.profile ||
+      profiles.find((item) => item.transport === 'local')
+    if (!profile) return
+    setInput({ ...profile, password: '', passphrase: '' })
+    if (profile.transport !== 'local') void loadConfig(profile.sshConfig?.path || configPath)
+  }, [open, profiles, initialProfileId, connection.profile?.id])
+  useEffect(() => {
     const source = input.sshConfig
-    if (!open || !source || !api) {
+    if (!open || local || !source || !api) {
       setConfigHost(null)
       return
     }
@@ -108,15 +141,38 @@ export function ConnectionDialog({
     return () => {
       disposed = true
     }
-  }, [open, input.sshConfig?.alias, input.sshConfig?.path])
+  }, [open, local, input.sshConfig?.alias, input.sshConfig?.path])
   const update = <K extends keyof ConnectInput>(key: K, value: ConnectInput[K]) => {
     setInput((p) => ({ ...p, [key]: value }))
     setError('')
     setSaved(false)
   }
   async function save(connect: boolean) {
+    if (saveInFlight.current) return
     setError('')
     setSaved(false)
+    if (local) {
+      if (!api) {
+        setError('The desktop connection service is unavailable. Restart Life to reconnect.')
+        return
+      }
+      saveInFlight.current = true
+      setSaving(true)
+      try {
+        await beforeConnect?.()
+        const state = await api.connection.connect(input)
+        if (state.status !== 'connected' || state.profile?.id !== input.id)
+          throw new Error(state.error || 'Local could not be opened. Try again.')
+        onConnected?.(state)
+        onOpenChange(false)
+      } catch (failure) {
+        setError(errorText(failure))
+      } finally {
+        saveInFlight.current = false
+        setSaving(false)
+      }
+      return
+    }
     const parsed = profileSchema.safeParse({
       ...input,
       name: input.name.trim() || input.host.trim(),
@@ -148,23 +204,29 @@ export function ConnectionDialog({
       setError('Open Life on your computer to save connections and connect over SSH.')
       return
     }
+    saveInFlight.current = true
     setSaving(true)
     try {
       await api.profiles.save(parsed.data)
       refreshProfiles()
       setSaved(true)
       if (connect) {
-        await api.connection.connect({
+        await beforeConnect?.()
+        const state = await api.connection.connect({
           ...parsed.data,
           password: input.password,
           passphrase: input.passphrase,
         })
+        if (state.status !== 'connected' || state.profile?.id !== parsed.data.id)
+          throw new Error(state.error || 'The machine could not be connected. Try again.')
+        onConnected?.(state)
         setInput((p) => ({ ...p, password: '', passphrase: '' }))
         onOpenChange(false)
       }
     } catch (e) {
       setError(errorText(e))
     } finally {
+      saveInFlight.current = false
       setSaving(false)
     }
   }
@@ -174,8 +236,8 @@ export function ConnectionDialog({
       onOpenChange={(v) => {
         if (!saving) onOpenChange(v)
       }}
-      title="Connect a machine"
-      description="Connect over SSH, then choose a project on your machine."
+      title="Choose an environment"
+      description="Use Local or connect another machine over SSH, then choose a project."
       className="connection-modal"
     >
       {!desktop ? (
@@ -186,360 +248,404 @@ export function ConnectionDialog({
       ) : null}
       {profiles.length ? (
         <div className="saved-profiles">
-          <div className="eyebrow">Saved machines</div>
+          <div className="eyebrow">Environments</div>
           <div className="profile-list">
             {profiles.map((p) => (
               <div className={`saved-profile ${input.id === p.id ? 'selected' : ''}`} key={p.id}>
                 <button
                   disabled={saving}
+                  aria-pressed={input.id === p.id}
                   onClick={() => {
+                    awaitingProfiles.current = false
                     setInput({ ...p, password: '', passphrase: '' })
                     setError('')
                     setSaved(false)
+                    if (p.transport !== 'local') void loadConfig(p.sshConfig?.path || configPath)
                   }}
                 >
-                  <Server size={17} />
+                  {p.transport === 'local' ? <Monitor size={17} /> : <Server size={17} />}
                   <span>
                     <strong>{p.name}</strong>
                     <small>
-                      {p.username}@{p.host}
+                      {p.transport === 'local' ? 'This computer' : `${p.username}@${p.host}`}
                     </small>
                   </span>
                   <ChevronRight size={15} />
                 </button>
-                <button
-                  className="icon-button"
-                  disabled={saving}
-                  aria-label={`Delete ${p.name}`}
-                  onClick={async () => {
-                    try {
-                      await api?.profiles.remove(p.id)
-                      refreshProfiles()
-                      if (input.id === p.id) setInput(blank())
-                    } catch (e) {
-                      setError(errorText(e))
-                    }
-                  }}
-                >
-                  <Trash2 size={14} />
-                </button>
+                {p.transport !== 'local' ? (
+                  <button
+                    className="icon-button"
+                    disabled={saving}
+                    aria-label={`Delete ${p.name}`}
+                    onClick={async () => {
+                      try {
+                        await api?.profiles.remove(p.id)
+                        refreshProfiles()
+                        if (input.id === p.id) setInput(blank())
+                      } catch (e) {
+                        setError(errorText(e))
+                      }
+                    }}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                ) : null}
               </div>
             ))}
             <button
               className="new-profile"
               disabled={saving}
               onClick={() => {
+                awaitingProfiles.current = false
                 setInput(blank())
                 setConfigHost(null)
                 setError('')
                 setSaved(false)
+                void loadConfig()
               }}
             >
-              <Plus size={16} /> New machine
+              <Plus size={16} /> Add SSH machine
             </button>
           </div>
         </div>
       ) : null}
-      <section className="ssh-config-section" aria-label="SSH config hosts">
-        <div className="eyebrow">
-          <FileCog size={14} /> SSH config
-        </div>
-        <div className="input-with-button">
-          <input
-            aria-label="SSH config file path"
-            placeholder="~/.ssh/config"
-            value={configPath}
-            disabled={saving || configLoading || !desktop}
-            onChange={(event) => setConfigPath(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                void loadConfig()
-              }
+      {local ? (
+        <>
+          <p className="form-hint">Runs on the computer running Life.</p>
+          {error ? (
+            <div className="form-error" role="alert">
+              {error}
+            </div>
+          ) : null}
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="button primary"
+              disabled={saving}
+              aria-busy={saving}
+              onClick={() => void save(true)}
+            >
+              {saving ? (
+                <LoaderCircle size={16} className="spinning" />
+              ) : (
+                <ArrowUpRight size={16} />
+              )}
+              {saving ? 'Opening Local…' : 'Use Local'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <section className="ssh-config-section" aria-label="SSH config hosts">
+            <div className="eyebrow">
+              <FileCog size={14} /> SSH config
+            </div>
+            <div className="input-with-button">
+              <input
+                aria-label="SSH config file path"
+                placeholder="~/.ssh/config"
+                value={configPath}
+                disabled={saving || configLoading || !desktop}
+                onChange={(event) => setConfigPath(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void loadConfig()
+                  }
+                }}
+              />
+              <button
+                type="button"
+                aria-label="Reload SSH config"
+                disabled={saving || configLoading || !desktop}
+                onClick={() => void loadConfig()}
+              >
+                {configLoading ? (
+                  <LoaderCircle size={16} className="spinning" />
+                ) : (
+                  <RefreshCw size={16} />
+                )}
+              </button>
+            </div>
+            <label className="ssh-config-host-label">
+              Host alias
+              <select
+                aria-label="SSH config host alias"
+                value={
+                  input.sshConfig && input.sshConfig.path === configList?.path
+                    ? input.sshConfig.alias
+                    : ''
+                }
+                disabled={saving || configLoading || !configList?.hosts.length}
+                onChange={(event) => {
+                  const host = configList?.hosts.find((item) => item.alias === event.target.value)
+                  if (!host || !configList) return
+                  setInput({
+                    ...blank(),
+                    name: host.alias,
+                    host: host.host,
+                    port: host.port,
+                    username: host.username,
+                    auth: host.availableIdentityFiles.length ? 'key' : 'agent',
+                    privateKeyPath: host.availableIdentityFiles[0] || '',
+                    sshConfig: { alias: host.alias, path: configList.path },
+                  })
+                  setConfigHost(host)
+                  setError('')
+                  setSaved(false)
+                }}
+              >
+                <option value="">
+                  {configLoading ? 'Reading SSH config…' : 'Choose a host from SSH config'}
+                </option>
+                {configList?.hosts.map((host) => (
+                  <option key={host.alias} value={host.alias}>
+                    {host.alias} · {host.username}@{host.host}:{host.port}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {configList?.error ? (
+              <p className="form-hint" role="status">
+                {configList.error}
+              </p>
+            ) : null}
+            {configList && !configLoading && !configList.error && !configList.hosts.length ? (
+              <p className="form-hint">
+                No concrete Host aliases found. Wildcard defaults still apply when resolving an
+                alias.
+              </p>
+            ) : null}
+            {input.sshConfig ? (
+              <>
+                <div className="ssh-config-source">
+                  <span>
+                    Linked to <strong>{input.sshConfig.alias}</strong>. Config is read again when
+                    connecting.
+                  </span>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={saving}
+                    onClick={() => {
+                      setInput((previous) => ({ ...previous, sshConfig: undefined }))
+                      setConfigHost(null)
+                      setSaved(false)
+                    }}
+                  >
+                    Use manual settings
+                  </button>
+                </div>
+                {configHost ? (
+                  <details className="ssh-config-options">
+                    <summary>
+                      Resolved config options ({Object.keys(configHost.options).length})
+                    </summary>
+                    <dl>
+                      <dt>HostName</dt>
+                      <dd>{configHost.host}</dd>
+                      <dt>User / Port</dt>
+                      <dd>
+                        {configHost.username} / {configHost.port}
+                      </dd>
+                      <dt>IdentityFile</dt>
+                      <dd>{configHost.identityFiles.join('\n') || 'None'}</dd>
+                      <dt>IdentityAgent</dt>
+                      <dd>{configHost.options.identityagent?.[0] || 'Default local SSH agent'}</dd>
+                      <dt>ProxyJump</dt>
+                      <dd>{configHost.proxyJump || 'None'}</dd>
+                      <dt>IdentitiesOnly</dt>
+                      <dd>{configHost.identitiesOnly ? 'Yes' : 'No'}</dd>
+                    </dl>
+                    <pre>
+                      {Object.entries(configHost.options)
+                        .map(([name, values]) =>
+                          values.map((value) => `${name} ${value}`).join('\n'),
+                        )
+                        .join('\n')}
+                    </pre>
+                  </details>
+                ) : null}
+                {configHost?.unsupportedOptions.length ? (
+                  <div className="form-error" role="alert">
+                    This alias needs unsupported options: {configHost.unsupportedOptions.join(', ')}
+                    . Choose another alias or use manual settings.
+                  </div>
+                ) : null}
+                {configHost?.proxyJump ? (
+                  <p className="form-hint">
+                    Jump hosts use your local OpenSSH keys/agent and known_hosts. First connect to
+                    the jump host in OpenSSH to trust its key.
+                  </p>
+                ) : null}
+                <p className="form-hint">
+                  Life verifies the target host with its saved fingerprints. OpenSSH multiplexing,
+                  known_hosts policy, and automatic key loading into the agent are not applied to
+                  the target.
+                </p>
+              </>
+            ) : null}
+          </section>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void save(true)
             }}
-          />
-          <button
-            type="button"
-            aria-label="Reload SSH config"
-            disabled={saving || configLoading || !desktop}
-            onClick={() => void loadConfig()}
           >
-            {configLoading ? (
-              <LoaderCircle size={16} className="spinning" />
-            ) : (
-              <RefreshCw size={16} />
-            )}
-          </button>
-        </div>
-        <label className="ssh-config-host-label">
-          Host alias
-          <select
-            aria-label="SSH config host alias"
-            value={
-              input.sshConfig && input.sshConfig.path === configList?.path
-                ? input.sshConfig.alias
-                : ''
-            }
-            disabled={saving || configLoading || !configList?.hosts.length}
-            onChange={(event) => {
-              const host = configList?.hosts.find((item) => item.alias === event.target.value)
-              if (!host || !configList) return
-              setInput({
-                ...blank(),
-                name: host.alias,
-                host: host.host,
-                port: host.port,
-                username: host.username,
-                auth: host.availableIdentityFiles.length ? 'key' : 'agent',
-                privateKeyPath: host.availableIdentityFiles[0] || '',
-                sshConfig: { alias: host.alias, path: configList.path },
-              })
-              setConfigHost(host)
-              setError('')
-              setSaved(false)
-            }}
-          >
-            <option value="">
-              {configLoading ? 'Reading SSH config…' : 'Choose a host from SSH config'}
-            </option>
-            {configList?.hosts.map((host) => (
-              <option key={host.alias} value={host.alias}>
-                {host.alias} · {host.username}@{host.host}:{host.port}
-              </option>
-            ))}
-          </select>
-        </label>
-        {configList?.error ? (
-          <p className="form-hint" role="status">
-            {configList.error}
-          </p>
-        ) : null}
-        {configList && !configLoading && !configList.error && !configList.hosts.length ? (
-          <p className="form-hint">
-            No concrete Host aliases found. Wildcard defaults still apply when resolving an alias.
-          </p>
-        ) : null}
-        {input.sshConfig ? (
-          <>
-            <div className="ssh-config-source">
-              <span>
-                Linked to <strong>{input.sshConfig.alias}</strong>. Config is read again when
-                connecting.
-              </span>
+            <fieldset className="form-grid" disabled={saving}>
+              <label className="full">
+                Machine name <span>optional</span>
+                <input
+                  placeholder="My development server"
+                  value={input.name}
+                  onChange={(e) => update('name', e.target.value)}
+                  autoComplete="off"
+                />
+              </label>
+              <label className="host-field">
+                Hostname or IP
+                <input
+                  placeholder="dev.example.com"
+                  value={input.host}
+                  readOnly={Boolean(input.sshConfig)}
+                  onChange={(e) => update('host', e.target.value)}
+                  required
+                  autoComplete="off"
+                />
+              </label>
+              <label className="port-field">
+                Port
+                <input
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={input.port}
+                  readOnly={Boolean(input.sshConfig)}
+                  onChange={(e) => update('port', Number(e.target.value))}
+                  required
+                />
+              </label>
+              <label className="full">
+                Username
+                <input
+                  placeholder="developer"
+                  value={input.username}
+                  readOnly={Boolean(input.sshConfig)}
+                  onChange={(e) => update('username', e.target.value)}
+                  required
+                  autoComplete="username"
+                />
+              </label>
+              <label className="full">
+                Authentication
+                <select
+                  value={input.auth}
+                  onChange={(e) => update('auth', e.target.value as ConnectInput['auth'])}
+                >
+                  <option value="key">SSH private key</option>
+                  <option value="agent">SSH agent</option>
+                  <option value="password">Password</option>
+                </select>
+              </label>
+              {input.auth === 'key' ? (
+                <>
+                  <div className="form-field full">
+                    <label htmlFor="ssh-private-key">Private key on this computer</label>
+                    <div className="input-with-button">
+                      <input
+                        id="ssh-private-key"
+                        placeholder="~/.ssh/id_ed25519"
+                        value={input.privateKeyPath}
+                        readOnly={Boolean(input.sshConfig)}
+                        onChange={(e) => update('privateKeyPath', e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        aria-label="Choose SSH key file"
+                        disabled={Boolean(input.sshConfig)}
+                        onClick={async () => {
+                          try {
+                            const key = await api?.chooseKey()
+                            if (key) update('privateKeyPath', key)
+                            else if (!api)
+                              setError('File selection is available in the desktop app.')
+                          } catch (e) {
+                            setError(errorText(e))
+                          }
+                        }}
+                      >
+                        <FolderKey size={17} />
+                      </button>
+                    </div>
+                    {input.sshConfig ? (
+                      <small>
+                        {configHost?.availableIdentityFiles.length || 0} existing configured keys
+                        will be tried in order.
+                      </small>
+                    ) : null}
+                  </div>
+                  <label className="full">
+                    Key passphrase <span>if required</span>
+                    <input
+                      type="password"
+                      placeholder="Passphrase for an encrypted key"
+                      value={input.passphrase}
+                      onChange={(e) => update('passphrase', e.target.value)}
+                      autoComplete="off"
+                    />
+                  </label>
+                </>
+              ) : input.auth === 'password' ? (
+                <label className="full">
+                  SSH password
+                  <input
+                    type="password"
+                    placeholder="Your SSH password"
+                    value={input.password}
+                    onChange={(e) => update('password', e.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
+              ) : (
+                <div className="form-hint full">
+                  <KeyRound size={15} /> Uses keys loaded into your local SSH agent.
+                </div>
+              )}
+            </fieldset>
+            <div className="form-hint">
+              <ShieldCheck size={15} /> Passwords and passphrases are never saved.
+            </div>
+            {error ? (
+              <div className="form-error" role="alert">
+                {error}
+              </div>
+            ) : null}
+            {saved && !error ? (
+              <div className="form-success" role="status">
+                Connection profile saved.
+              </div>
+            ) : null}
+            <div className="modal-actions">
               <button
                 type="button"
                 className="button secondary"
                 disabled={saving}
-                onClick={() => {
-                  setInput((previous) => ({ ...previous, sshConfig: undefined }))
-                  setConfigHost(null)
-                  setSaved(false)
-                }}
+                onClick={() => void save(false)}
               >
-                Use manual settings
+                Save profile
+              </button>
+              <button type="submit" className="button primary" disabled={saving} aria-busy={saving}>
+                {saving ? (
+                  <LoaderCircle size={16} className="spinning" />
+                ) : (
+                  <ArrowUpRight size={16} />
+                )}
+                {connection.status === 'connecting' ? 'Connecting…' : 'Connect machine'}
               </button>
             </div>
-            {configHost ? (
-              <details className="ssh-config-options">
-                <summary>
-                  Resolved config options ({Object.keys(configHost.options).length})
-                </summary>
-                <dl>
-                  <dt>HostName</dt>
-                  <dd>{configHost.host}</dd>
-                  <dt>User / Port</dt>
-                  <dd>
-                    {configHost.username} / {configHost.port}
-                  </dd>
-                  <dt>IdentityFile</dt>
-                  <dd>{configHost.identityFiles.join('\n') || 'None'}</dd>
-                  <dt>IdentityAgent</dt>
-                  <dd>{configHost.options.identityagent?.[0] || 'Default local SSH agent'}</dd>
-                  <dt>ProxyJump</dt>
-                  <dd>{configHost.proxyJump || 'None'}</dd>
-                  <dt>IdentitiesOnly</dt>
-                  <dd>{configHost.identitiesOnly ? 'Yes' : 'No'}</dd>
-                </dl>
-                <pre>
-                  {Object.entries(configHost.options)
-                    .map(([name, values]) => values.map((value) => `${name} ${value}`).join('\n'))
-                    .join('\n')}
-                </pre>
-              </details>
-            ) : null}
-            {configHost?.unsupportedOptions.length ? (
-              <div className="form-error" role="alert">
-                This alias needs unsupported options: {configHost.unsupportedOptions.join(', ')}.
-                Choose another alias or use manual settings.
-              </div>
-            ) : null}
-            {configHost?.proxyJump ? (
-              <p className="form-hint">
-                Jump hosts use your local OpenSSH keys/agent and known_hosts. First connect to the
-                jump host in OpenSSH to trust its key.
-              </p>
-            ) : null}
-            <p className="form-hint">
-              Life verifies the target host with its saved fingerprints. OpenSSH multiplexing,
-              known_hosts policy, and automatic key loading into the agent are not applied to the
-              target.
-            </p>
-          </>
-        ) : null}
-      </section>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          void save(true)
-        }}
-      >
-        <fieldset className="form-grid" disabled={saving}>
-          <label className="full">
-            Machine name <span>optional</span>
-            <input
-              placeholder="My development server"
-              value={input.name}
-              onChange={(e) => update('name', e.target.value)}
-              autoComplete="off"
-            />
-          </label>
-          <label className="host-field">
-            Hostname or IP
-            <input
-              placeholder="dev.example.com"
-              value={input.host}
-              readOnly={Boolean(input.sshConfig)}
-              onChange={(e) => update('host', e.target.value)}
-              required
-              autoComplete="off"
-            />
-          </label>
-          <label className="port-field">
-            Port
-            <input
-              type="number"
-              min="1"
-              max="65535"
-              value={input.port}
-              readOnly={Boolean(input.sshConfig)}
-              onChange={(e) => update('port', Number(e.target.value))}
-              required
-            />
-          </label>
-          <label className="full">
-            Username
-            <input
-              placeholder="developer"
-              value={input.username}
-              readOnly={Boolean(input.sshConfig)}
-              onChange={(e) => update('username', e.target.value)}
-              required
-              autoComplete="username"
-            />
-          </label>
-          <label className="full">
-            Authentication
-            <select
-              value={input.auth}
-              onChange={(e) => update('auth', e.target.value as ConnectInput['auth'])}
-            >
-              <option value="key">SSH private key</option>
-              <option value="agent">SSH agent</option>
-              <option value="password">Password</option>
-            </select>
-          </label>
-          {input.auth === 'key' ? (
-            <>
-              <div className="form-field full">
-                <label htmlFor="ssh-private-key">Private key on this computer</label>
-                <div className="input-with-button">
-                  <input
-                    id="ssh-private-key"
-                    placeholder="~/.ssh/id_ed25519"
-                    value={input.privateKeyPath}
-                    readOnly={Boolean(input.sshConfig)}
-                    onChange={(e) => update('privateKeyPath', e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    aria-label="Choose SSH key file"
-                    disabled={Boolean(input.sshConfig)}
-                    onClick={async () => {
-                      try {
-                        const key = await api?.chooseKey()
-                        if (key) update('privateKeyPath', key)
-                        else if (!api) setError('File selection is available in the desktop app.')
-                      } catch (e) {
-                        setError(errorText(e))
-                      }
-                    }}
-                  >
-                    <FolderKey size={17} />
-                  </button>
-                </div>
-                {input.sshConfig ? (
-                  <small>
-                    {configHost?.availableIdentityFiles.length || 0} existing configured keys will
-                    be tried in order.
-                  </small>
-                ) : null}
-              </div>
-              <label className="full">
-                Key passphrase <span>if required</span>
-                <input
-                  type="password"
-                  placeholder="Passphrase for an encrypted key"
-                  value={input.passphrase}
-                  onChange={(e) => update('passphrase', e.target.value)}
-                  autoComplete="off"
-                />
-              </label>
-            </>
-          ) : input.auth === 'password' ? (
-            <label className="full">
-              SSH password
-              <input
-                type="password"
-                placeholder="Your SSH password"
-                value={input.password}
-                onChange={(e) => update('password', e.target.value)}
-                autoComplete="off"
-              />
-            </label>
-          ) : (
-            <div className="form-hint full">
-              <KeyRound size={15} /> Uses keys loaded into your local SSH agent.
-            </div>
-          )}
-        </fieldset>
-        <div className="form-hint">
-          <ShieldCheck size={15} /> Passwords and passphrases are never saved.
-        </div>
-        {error ? (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        ) : null}
-        {saved && !error ? (
-          <div className="form-success" role="status">
-            Connection profile saved.
-          </div>
-        ) : null}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="button secondary"
-            disabled={saving}
-            onClick={() => void save(false)}
-          >
-            Save profile
-          </button>
-          <button type="submit" className="button primary" disabled={saving} aria-busy={saving}>
-            {saving ? <LoaderCircle size={16} className="spinning" /> : <ArrowUpRight size={16} />}
-            {connection.status === 'connecting' ? 'Connecting…' : 'Connect machine'}
-          </button>
-        </div>
-      </form>
+          </form>
+        </>
+      )}
     </Modal>
   )
 }

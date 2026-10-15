@@ -47,7 +47,8 @@ export function normalizeMessageMetadata(value: unknown): MessageMetadata {
   const metadata: MessageMetadata = {}
   if (item.phase === 'commentary' || item.phase === 'final_answer') metadata.phase = item.phase
   if (
-    ['reasoning', 'plan', 'subagent', 'status', 'attachment', 'event'].includes(String(item.kind))
+    typeof item.kind === 'string' &&
+    ['reasoning', 'plan', 'subagent', 'status', 'attachment', 'event'].includes(item.kind)
   )
     metadata.kind = item.kind as MessageMetadata['kind']
   for (const key of ['agentId', 'agentName', 'parentItemId', 'turnId', 'parentAgentId'] as const) {

@@ -1,6 +1,6 @@
 {
   "name": "life-desktop",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "A customizable research workspace for Codex and Claude Code over SSH",
   "main": "out/main/index.js",
   "private": true,
@@ -24,7 +24,12 @@
     "dist": "npm run build && electron-builder",
     "dist:dir": "npm run build && electron-builder --dir",
     "test:desktop": "node tests/desktop-smoke.cjs",
-    "test:recovery": "node tests/renderer-recovery-smoke.cjs"
+    "test:recovery": "node tests/renderer-recovery-smoke.cjs",
+    "test:checkpoints": "node tests/conversation-checkpoint-electron-smoke.cjs",
+    "test:loads": "node tests/conversation-load-electron-smoke.cjs",
+    "test:active-recovery": "node tests/active-recovery-run.cjs",
+    "test:active-reload": "node tests/active-recovery-run.cjs reload",
+    "test:performance": "node tests/agent-event-batch-performance.cjs && node tests/sidebar-history-performance.cjs current && node tests/conversation-history-performance.cjs && node tests/workspace-surfaces-performance.cjs && node tests/conversation-scroll-performance.cjs && node tests/transcript-performance.cjs current && node tests/native-checkpoint-performance.cjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.2.8",
@@ -36,17 +41,21 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "diff": "8.0.2",
+    "effect": "4.0.0-rc.118",
     "electron-updater": "^6.8.9",
     "esbuild": "0.25.12",
     "lucide-react": "^0.468.0",
     "mermaid": "^12.1.0",
+    "micromark": "4.0.3",
+    "micromark-extension-gfm": "3.0.0",
     "npm": "11.6.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "ssh2": "^1.16.0",
-    "zod": "^4.0.0"
+    "zod": "^4.0.0",
+    "node-pty": "1.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -141,7 +150,8 @@
     },
     "asarUnpack": [
       "node_modules/@esbuild/**/*",
-      "**/*.node"
+      "**/*.node",
+      "node_modules/node-pty/**/spawn-helper"
     ]
   },
   "overrides": {

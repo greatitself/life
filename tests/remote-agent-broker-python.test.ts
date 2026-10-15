@@ -26,6 +26,8 @@ type BrokerMessage = {
   code?: number | null
   signal?: string | null
   message?: string
+  writerLease?: { epoch: number; token: string }
+  writerUnavailable?: boolean
 }
 
 const fixtures: ProviderFixture[] = []
@@ -198,18 +200,36 @@ class ProviderFixture {
   }
 
   async dispose() {
-    let recovery: BrokerAttach | undefined
     try {
-      recovery = this.attach({ launch: false })
-      await recovery.until(
-        () => recovery!.messages.some((message) => ['ready', 'error'].includes(message.type)),
-        'Cleanup attach',
-        1500,
+      const owned = this.attaches.find(
+        (attach) =>
+          attach.child.exitCode == null &&
+          attach.child.signalCode == null &&
+          attach.messages.some((message) => message.type === 'ready' && message.writerLease),
       )
-      if (recovery.messages.some((message) => message.type === 'ready')) await recovery.close()
+      if (owned) await owned.close()
     } catch {
       // The assertions above report any failure; always reap the test attach processes.
     } finally {
+      const state = JSON.parse(
+        await readFile(path.join(this.root, 'state.json'), 'utf8').catch(() => '{}'),
+      ) as { pid?: number; brokerPid?: number }
+      // Only actual fixture daemons publish brokerPid; synthetic replay data may use this test's PID.
+      if (
+        state.brokerPid &&
+        state.brokerPid !== process.pid &&
+        state.pid &&
+        state.pid !== process.pid
+      ) {
+        try {
+          process.kill(-state.pid, 'SIGKILL')
+        } catch {}
+      }
+      if (state.brokerPid && state.brokerPid !== process.pid) {
+        try {
+          process.kill(state.brokerPid, 'SIGKILL')
+        } catch {}
+      }
       for (const attach of this.attaches) {
         if (attach.child.exitCode == null && attach.child.signalCode == null)
           attach.child.kill('SIGKILL')
@@ -552,8 +572,8 @@ describe.skipIf(process.platform === 'win32')('Python remote agent broker SSH co
       attach.messages.filter((message) => message.type === 'ack').map((m) => m.sequence),
     ).toEqual(expect.arrayContaining([1, 2]))
 
-    attach.write(1, 'duplicate first\n')
-    attach.write(2, 'duplicate second\n')
+    attach.write(1, 'first\n')
+    attach.write(2, 'second\n')
     attach.write(3, 'third\n')
     await attach.until(
       () => attach.output().includes('input:third\n'),
@@ -621,15 +641,18 @@ describe.skipIf(process.platform === 'win32')('Python remote agent broker SSH co
       second.until(() => second.output().includes('started\n'), 'Second concurrent attach output'),
     ])
     expect(await provider.lines('launches')).toHaveLength(1)
-    first.write(1, 'only once\n')
-    second.write(1, 'only once\n')
-    await first.until(
-      () => first.output().includes('input:only once\n'),
+    const owner = a.writerLease ? first : second
+    expect([a, b].filter((ready) => ready.writerLease)).toHaveLength(1)
+    expect([a, b].filter((ready) => ready.writerUnavailable)).toHaveLength(1)
+    owner.write(1, 'only once\n')
+    owner.write(1, 'only once\n')
+    await owner.until(
+      () => owner.output().includes('input:only once\n'),
       'Shared input acknowledgment',
     )
     await delay(80)
     expect(await provider.lines('inputs')).toEqual(['only once'])
-    await first.close()
+    await owner.close()
   }, 15000)
 
   it('ends provider stdin once and replays a clean exit after reconnecting', async () => {

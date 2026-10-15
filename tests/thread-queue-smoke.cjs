@@ -13,7 +13,8 @@ import React, { useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { useThreadQueue, normalizeQueuedMessages } from './src/renderer/thread-queue'
 import { applyEvent, readThreads } from './src/renderer/state'
-import { saveAttachmentFiles } from './src/renderer/attachments'
+import { getAttachmentFile, saveAttachmentFiles } from './src/renderer/attachments'
+import { projectConversationSourceHistory } from './src/renderer/conversation-source'
 const profile = { id:'machine', name:'Research server', host:'example', port:22,
   username:'researcher', auth:'agent', privateKeyPath:'', workspace:'/srv/project' }
 const connected = { status:'connected', profile, workspace:'/srv/project', home:'/srv/root' }
@@ -126,6 +127,16 @@ function Harness() {
     enqueueSelected:(text,files=[])=>queue.enqueue(threads[0],text,files,selectedOperation),
     selectOperation:setSelectedOperation,
     sendNow:id=>queue.sendNow('thread',id), remove:id=>queue.remove('thread',id),
+    sendFor:(threadId,messageId)=>queue.sendNow(threadId,messageId),
+    removeFor:(threadId,messageId)=>queue.remove(threadId,messageId),
+    setHistory:entries=>setThreads(readThreads(entries.map(entry=>seedThread(entry)))),
+    rawHistory:()=>projectConversationSourceHistory(threads),
+    saveFile:async id=>{
+      const file=new File(['Exact shared queue bytes: '+id],'sample.txt',{type:'text/plain'})
+      await saveAttachmentFiles([{id,name:file.name,mime:file.type,size:file.size,file}])
+      return {id,name:file.name,mime:file.type,size:file.size}
+    },
+    fileText:async id=>(await getAttachmentFile(id))?.text(),
     resolve:(kind,result='accept')=>{const finish=pending.get(kind);pending.delete(kind);finish?.(result)},
     holdAttachment:async id=>{
       const file=new File(['real IndexedDB attachment'],'sample.txt',{type:'text/plain'})
@@ -655,6 +666,160 @@ async function run() {
     assert.equal((await state()).records.sends.length, 0)
     assert.equal((await state()).threads[0].queue.length, 0)
     record('Removed queued messages cannot dispatch through stale controls')
+
+    await reset({ busy: false, turnStatus: 'unknown', queue: [] })
+    const shared = await page.evaluate(() => window.queueTest.saveFile('opaque-shared-queue'))
+    const privateFile = await page.evaluate(() => window.queueTest.saveFile('removed-queue-only'))
+    const sendFile = await page.evaluate(() => window.queueTest.saveFile('other-thread-send'))
+    const opaqueRecord = {
+      id: 'future-system',
+      role: 'future-role',
+      text: 'Opaque survivor message retains its exact raw attachment reference.\r\n',
+      attachments: [shared],
+      futureMessageField: { exact: '\tFuture metadata Ω\r\n' },
+    }
+    await page.evaluate(
+      ({ shared, privateFile, sendFile, opaqueRecord }) =>
+        window.queueTest.setHistory([
+          {
+            id: 'queue-owner-a',
+            busy: false,
+            turnStatus: 'unknown',
+            queue: [
+              {
+                id: 'first',
+                text: 'Remove only A/first.',
+                createdAt: 10,
+                paused: true,
+                attachments: [shared, privateFile],
+              },
+            ],
+          },
+          {
+            id: 'queue-owner-b',
+            busy: false,
+            turnStatus: 'unknown',
+            messages: [null, opaqueRecord, 'Opaque scalar record'],
+            queue: [
+              {
+                id: 'first',
+                text: '  Send exact B/first.\r\nΩ  ',
+                createdAt: 11,
+                paused: true,
+                attachments: [sendFile],
+              },
+            ],
+          },
+        ]),
+      { shared, privateFile, sendFile, opaqueRecord },
+    )
+    await settle()
+    assert.equal((await state()).threads[1].messages.length, 0)
+    await page.evaluate(() => window.queueTest.removeFor('queue-owner-a', 'first'))
+    await page.waitForFunction(
+      async () => (await window.queueTest.fileText('removed-queue-only')) === undefined,
+    )
+    await settle()
+    current = await state()
+    assert.equal(current.threads[0].queue.length, 0)
+    assert.equal(current.threads[1].queue.length, 1)
+    assert.equal(
+      await page.evaluate(() => window.queueTest.fileText('opaque-shared-queue')),
+      'Exact shared queue bytes: opaque-shared-queue',
+    )
+    assert.equal(
+      await page.evaluate(() => window.queueTest.fileText('other-thread-send')),
+      'Exact shared queue bytes: other-thread-send',
+    )
+    assert.deepEqual(
+      (await page.evaluate(() => window.queueTest.rawHistory())).find(
+        (thread) => thread.id === 'queue-owner-b',
+      ).messages,
+      [null, opaqueRecord, 'Opaque scalar record'],
+    )
+    record(
+      "Removing A/first collects its private blob while another thread's opaque raw record protects the shared IndexedDB bytes",
+    )
+
+    await page.evaluate(() => window.queueTest.sendFor('queue-owner-b', 'first'))
+    await settle()
+    current = await state()
+    assert.equal(current.records.sends.length, 1)
+    assert.equal(current.records.sends[0].threadId, 'queue-owner-b')
+    assert.equal(current.records.sends[0].messageId, 'first')
+    assert.equal(current.records.sends[0].text, '  Send exact B/first.\r\nΩ  ')
+    assert.deepEqual(current.records.sends[0].files, [
+      { id: sendFile.id, name: sendFile.name, size: sendFile.size },
+    ])
+    assert.equal(current.threads[0].queue.length, 0)
+    assert.equal(current.threads[1].queue.length, 0)
+    assert.equal(current.records.errors.length, 0)
+    assert.equal(
+      await page.evaluate(() => window.queueTest.fileText('opaque-shared-queue')),
+      'Exact shared queue bytes: opaque-shared-queue',
+    )
+    record(
+      'Cancelling A/first leaves B/first manually sendable with its exact prompt and real attachment file',
+    )
+
+    await reset({ busy: false, turnStatus: 'unknown', queue: [] })
+    await page.evaluate(
+      ({ shared, opaqueRecord }) =>
+        window.queueTest.setHistory([
+          {
+            id: 'duplicate-queue-owner',
+            title: 'First duplicate',
+            busy: false,
+            turnStatus: 'unknown',
+            messages: [null, opaqueRecord],
+            queue: [
+              {
+                id: 'first',
+                text: 'Keep first occurrence.',
+                createdAt: 10,
+                paused: true,
+                attachments: [shared],
+              },
+            ],
+          },
+          {
+            id: 'duplicate-queue-owner',
+            title: 'Second duplicate',
+            busy: false,
+            turnStatus: 'unknown',
+            messages: ['Keep opaque second occurrence'],
+            queue: [
+              {
+                id: 'first',
+                text: 'Keep second occurrence.',
+                createdAt: 11,
+                paused: true,
+                attachments: [shared],
+              },
+            ],
+          },
+        ]),
+      { shared, opaqueRecord },
+    )
+    await settle()
+    const duplicateBefore = await page.evaluate(() => window.queueTest.rawHistory())
+    await page.evaluate(() => window.queueTest.removeFor('duplicate-queue-owner', 'first'))
+    await settle()
+    current = await state()
+    assert.deepEqual(await page.evaluate(() => window.queueTest.rawHistory()), duplicateBefore)
+    assert.equal(current.threads.length, 2)
+    assert.equal(current.threads[0].queue.length, 1)
+    assert.equal(current.threads[1].queue.length, 1)
+    assert.equal(current.records.errors.length, 1)
+    assert.match(current.records.errors[0], /share an ID.*kept/)
+    assert.equal(current.records.sends.length + current.records.steering.length, 0)
+    assert.equal(
+      await page.evaluate(() => window.queueTest.fileText('opaque-shared-queue')),
+      'Exact shared queue bytes: opaque-shared-queue',
+    )
+    record(
+      'An ambiguous duplicate-thread-ID remove reports an error and retains both raw histories, queued prompts and attachment bytes',
+    )
 
     assert.deepEqual(errors, [], 'The real hook must not produce browser errors')
     const proof = {

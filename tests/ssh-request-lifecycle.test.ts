@@ -3,7 +3,8 @@ import { PassThrough } from 'node:stream'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Client, type ClientChannel, type ClientSFTPCallback, type SFTPWrapper } from 'ssh2'
-import { SSHConnection } from '../src/main/ssh'
+import { Cause, Effect, Exit } from 'effect'
+import { SSHCommandError, SSHConnection } from '../src/main/ssh'
 import { Store } from '../src/main/store'
 
 type Reply<T> = (error: Error | null, value: T) => void
@@ -64,6 +65,52 @@ function commandChannel() {
 }
 
 describe('bounded SSH and SFTP requests', () => {
+  it('keeps machine access when a provider version wrapper stalls and closes its command', async () => {
+    const { connection, sftp } = remote()
+    const input = {
+      ...connection.state.profile!,
+      auth: 'password' as const,
+      password: 'memory-only',
+    }
+    vi.spyOn(Client.prototype, 'connect').mockImplementation(function (this: Client) {
+      this.emit('ready')
+      return this
+    })
+    const versionChannel = commandChannel()
+    vi.spyOn(Client.prototype, 'exec').mockImplementation(function (
+      this: Client,
+      _command: string,
+      optionsOrCallback: unknown,
+      done?: Reply<ClientChannel>,
+    ) {
+      const reply = done ?? (optionsOrCallback as Reply<ClientChannel>)
+      reply(null, versionChannel)
+      return this
+    })
+    const execute = connection.exec.bind(connection)
+    vi.spyOn(connection, 'exec').mockImplementation((command, options) =>
+      command.includes('CODEX=') ? execute(command, options) : Promise.resolve('/home/test\n'),
+    )
+    vi.spyOn(Client.prototype, 'sftp').mockImplementation(function (this: Client, done) {
+      done(undefined, sftp as unknown as SFTPWrapper)
+      return this
+    })
+    const diagnostic = vi.fn()
+    connection.on('diagnostic', diagnostic)
+    const connecting = connection.connect(input)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(connection.state.status).toBe('connecting')
+    await vi.advanceTimersByTimeAsync(5000)
+    await expect(connecting).resolves.toMatchObject({
+      status: 'connected',
+      home: '/home/test',
+      codex: 'unknown',
+      claude: 'unknown',
+    })
+    expect(versionChannel.close).toHaveBeenCalledTimes(1)
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining('timed out after 5 seconds'))
+  })
+
   it.each(['realpath', 'stat', 'readdir'] as const)(
     'bounds automatic restoration stalled in %s and ignores its late result without delaying machine access',
     async (stage) => {
@@ -318,6 +365,111 @@ describe('bounded SSH and SFTP requests', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('closes a failed command channel immediately and releases its deadline', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    const rejected = expect(connection.exec('failed command')).rejects.toThrow('transport failed')
+    await vi.advanceTimersByTimeAsync(0)
+    channel.emit('error', new Error('transport failed'))
+    await rejected
+    expect(channel.close).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('exposes typed SSH failures through the native Effect API', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    const rejected = expect(connection.exec('failed typed command')).rejects.toBeInstanceOf(
+      SSHCommandError,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    channel.emit('error', new Error('typed transport failure'))
+    await rejected
+  })
+
+  it('releases its acquired channel and listeners when the Effect fiber is interrupted', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    const controller = new AbortController()
+    const result = Effect.runPromiseExit(connection.execEffect('interrupted command'), {
+      signal: controller.signal,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    const exit = await result
+    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+    expect(channel.close).toHaveBeenCalledTimes(1)
+    expect(channel.listenerCount('data')).toBe(0)
+    expect(channel.stderr.listenerCount('data')).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('disposes a channel acknowledged just before the acquiring Effect fiber is interrupted', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    const controller = new AbortController()
+    client.exec.mockImplementation((_command, _options, done) => {
+      done(null, channel)
+      controller.abort()
+    })
+    const exit = await Effect.runPromiseExit(connection.execEffect('interrupted acquisition'), {
+      signal: controller.signal,
+    })
+    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+    expect(channel.close).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('disposes a late channel after the acquiring Effect fiber has been interrupted', async () => {
+    const { connection, client } = remote()
+    let reply: Reply<ClientChannel> | undefined
+    client.exec.mockImplementation((_command, _options, done) => {
+      reply = done
+    })
+    const controller = new AbortController()
+    const result = Effect.runPromiseExit(connection.execEffect('interrupted acquisition'), {
+      signal: controller.signal,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    const exit = await result
+    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+    const channel = commandChannel()
+    reply!(null, channel)
+    expect(channel.close).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('closes the command and releases its deadline when streaming input throws', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    vi.spyOn(channel, 'end').mockImplementation(() => {
+      throw new Error('stdin failed')
+    })
+    await expect(connection.exec('failed stdin', { input: 'script' })).rejects.toThrow(
+      'stdin failed',
+    )
+    expect(channel.close).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('preserves UTF-8 stderr split across SSH packets', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    const rejected = expect(connection.exec('failed Unicode command')).rejects.toThrow('Failed 👋')
+    await vi.advanceTimersByTimeAsync(0)
+    const bytes = Buffer.from('Failed 👋')
+    channel.stderr.write(bytes.subarray(0, bytes.length - 2))
+    channel.stderr.write(bytes.subarray(bytes.length - 2))
+    channel.emit('close', 1)
+    await rejected
+  })
+
   it('cancels acquisition on abort, removes the abort listener, and discards a late channel', async () => {
     const { connection, client } = remote()
     const controller = new AbortController()
@@ -464,5 +616,41 @@ describe('bounded SSH and SFTP requests', () => {
     const write = vi.spyOn(channel, 'write')
     connection.writeTerminal('SHOULD_NOT_EXECUTE')
     expect(write).not.toHaveBeenCalled()
+  })
+
+  it('preserves split UTF-8 independently on terminal stdout and stderr', async () => {
+    const { connection, client } = remote()
+    const channel = commandChannel()
+    client.exec.mockImplementation((_command, _options, done) => done(null, channel))
+    const output: string[] = []
+    connection.on('terminal', (text) => output.push(text))
+    await connection.openTerminal()
+    const stdout = Buffer.from('你好 👋')
+    const stderr = Buffer.from('Ошибка 🛑')
+    channel.write(stdout.subarray(0, stdout.length - 2))
+    channel.stderr.write(stderr.subarray(0, stderr.length - 2))
+    channel.write(stdout.subarray(stdout.length - 2))
+    channel.stderr.write(stderr.subarray(stderr.length - 2))
+    expect(output).toEqual(['你好 ', 'Ошибка ', '👋', '🛑'])
+    expect(output.join('')).not.toContain('�')
+  })
+
+  it('ignores output from a closed terminal after another project opens its own terminal', async () => {
+    const { connection, client } = remote()
+    const previous = commandChannel()
+    const next = commandChannel()
+    client.exec.mockImplementationOnce((_command, _options, done) => done(null, previous))
+    client.exec.mockImplementationOnce((_command, _options, done) => done(null, next))
+    const output: string[] = []
+    connection.on('terminal', (text) => output.push(text))
+    await connection.openTerminal()
+    await connection.selectWorkspace('/next-project')
+    await connection.openTerminal()
+    output.length = 0
+    previous.write('old stdout')
+    previous.stderr.write('old stderr')
+    previous.emit('close')
+    next.write('new project')
+    expect(output).toEqual(['new project'])
   })
 })

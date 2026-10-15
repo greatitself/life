@@ -1,0 +1,188 @@
+{
+  "format": "life-tracked-active-recovery-fixture",
+  "version": 1,
+  "observerVersion": 2,
+  "portableWireVersion": 1,
+  "scope": "Actual private Electron/SSH or Local native-protocol stand-ins. No authenticated upstream provider, inference, historical installed dependency, or performance claim.",
+  "defaultStages": [
+    {
+      "stage": "matrix",
+      "cases": 39
+    },
+    {
+      "stage": "source-commit",
+      "cases": 2
+    },
+    {
+      "stage": "reload",
+      "cases": 3
+    },
+    {
+      "stage": "source-artifacts-matrix",
+      "readOnly": true
+    },
+    {
+      "stage": "source-artifacts-commit",
+      "readOnly": true
+    }
+  ],
+  "localAcceptanceStages": [
+    {
+      "stage": "local-codex-stream",
+      "case": "codex-stream-crash",
+      "cases": 1
+    },
+    {
+      "stage": "local-claude-approval",
+      "case": "claude-pending-approval-crash",
+      "cases": 1
+    }
+  ],
+  "inputs": [
+    {
+      "path": "tests/active-recovery-run.cjs",
+      "bytes": 14180,
+      "sha256": "da2afe7dafec781a08eafca6b9f6768f522e728e0a7258479e52b01ddecf7082"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/portable-wire.cjs",
+      "bytes": 12410,
+      "sha256": "c828db1ab510b8067720edbd4796e2951364a175273d44bf094dcae364651b25"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/main-observer.cjs",
+      "bytes": 5140,
+      "sha256": "489b003a2ba22da88362c7663eba36aa65e24ca42479d0d20428ed5cf48852be"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/contract.cjs",
+      "bytes": 9518,
+      "sha256": "65e527399f72727a4bfd774c4ab76bc4ba699ab53beaa5f4d32b4041c3caee55"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/fixture-observer.cjs",
+      "bytes": 7075,
+      "sha256": "fe3e2b34acdc1bec9505ca2fe28b4ad04d91dbe5adf95980138b5bc2d8911b79"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/source-artifacts.cjs",
+      "bytes": 5043,
+      "sha256": "1a5a50bcdb8f03212e6e5e625bf1280a258b035408c7263ee1c303511708b4ca"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/local-bootstrap.cjs",
+      "bytes": 22027,
+      "sha256": "7b28cfc166bf25939e8a3c396eb38aa925999bf17f534f3b8eecff5d1e46d26c"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/runner-contract.cjs",
+      "bytes": 18278,
+      "sha256": "c5cd2822e223aefac6296c36eb382babdcc5dde4d3e79fcca0d76444bca6645d"
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/local-proof.cjs",
+      "bytes": 22015,
+      "sha256": "749685c3f0bd8ba0b084bf74b54adf901d3202dd0d65d12c906489dcb5bc6527"
+    },
+    {
+      "path": "tests/active-recovery-observer.test.ts",
+      "bytes": 19485,
+      "sha256": "70903fcf89c3683f8e4e3f22e0f6b967ba29201c644039717278109dbf146fa0"
+    },
+    {
+      "path": "tests/active-recovery-bootstrap.test.ts",
+      "bytes": 17588,
+      "sha256": "0a413125df830e9d3b70ec17327b4b083c8ff14deffc6ea349c13136ab1737a8"
+    },
+    {
+      "path": "tests/active-recovery-runner.test.ts",
+      "bytes": 13705,
+      "sha256": "69f9191548c02634b1ea431aa2b0b5322a7f0bd802de5ba24b8ff055a3423a61"
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "bytes": 54864,
+      "sha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "bytes": 37433,
+      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-provider.cjs",
+      "bytes": 43671,
+      "sha256": "bec9cf3b2649c9a79c25e28564957623c027366b0a78e7caa8c0322d6cfdc983"
+    },
+    {
+      "path": "tests/helpers/ssh-fixture.ts",
+      "bytes": 12920,
+      "sha256": "d1648f4c52e5ab818c6c270f40b9c4d65c4702000fcd027474b98c74b229b194"
+    },
+    {
+      "path": "tests/helpers/desktop-history.cjs",
+      "bytes": 423,
+      "sha256": "48c1f98263dc463cd5c3b8f7981367d23e03f785c4681ba6f9084b560330b21f"
+    },
+    {
+      "path": "tests/active-session-reload-smoke.cjs",
+      "bytes": 25191,
+      "sha256": "73271d85416d16fd549b0c5f1ce897f9e710ea4f944da1eefb9f05b115861b1f"
+    },
+    {
+      "path": "tests/helpers/active-session-reload-provider.cjs",
+      "bytes": 4086,
+      "sha256": "e182896bd3bb7c1b92e5d77ed360d7b531957f8efe44e34a315c17cec079238f"
+    }
+  ],
+  "preservedOriginalInputs": [
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "bytes": 54864,
+      "sha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "bytes": 37433,
+      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-provider.cjs",
+      "bytes": 43671,
+      "sha256": "bec9cf3b2649c9a79c25e28564957623c027366b0a78e7caa8c0322d6cfdc983"
+    },
+    {
+      "path": "tests/helpers/ssh-fixture.ts",
+      "bytes": 12920,
+      "sha256": "d1648f4c52e5ab818c6c270f40b9c4d65c4702000fcd027474b98c74b229b194"
+    },
+    {
+      "path": "tests/helpers/desktop-history.cjs",
+      "bytes": 423,
+      "sha256": "48c1f98263dc463cd5c3b8f7981367d23e03f785c4681ba6f9084b560330b21f"
+    },
+    {
+      "path": "tests/active-session-reload-smoke.cjs",
+      "bytes": 25191,
+      "sha256": "73271d85416d16fd549b0c5f1ce897f9e710ea4f944da1eefb9f05b115861b1f"
+    },
+    {
+      "path": "tests/helpers/active-session-reload-provider.cjs",
+      "bytes": 4086,
+      "sha256": "e182896bd3bb7c1b92e5d77ed360d7b531957f8efe44e34a315c17cec079238f"
+    }
+  ],
+  "historicalFixtureLock": {
+    "sha256": "68ca05d545296f2c05f9bff7d959afda44b11f51511b0b410d3c339a2197a4bc",
+    "appliesTo": "Retained historical baseline; final current release lock is independently pinned by runtime source/dependency identity and is not replaced."
+  },
+  "portableObserverProvenance": {
+    "approvedVersion": 2,
+    "sourceManifestSha256": "f8a910138449e3b294e3b1af49312d43565d4e35dbb6b0fcc587097575859713",
+    "offlineCrossRuntimeCasesEach": 64,
+    "transparentBoundaryCases": 27
+  },
+  "nativeAuthority": "Observe only genuine agent:recover invocations/results and unchanged onAgent events. Use original real Allow click and original numbered native response bytes; never synthesize events or call recover for witness creation.",
+  "localMapping": "Production logical brokerRoot/config root is retained unchanged; a deterministic fixture shell maps only physical storage to the owned private root, retaining the same native command/localRuntime and original provider/broker PID/startTicks across restart.",
+  "cleanup": "Retain original process identities, raw private state/session/native and remote journals/input digests before owned fixture teardown; verify private processes/display released. Abrupt external interruption retains observed leases for scoped follow-up cleanup."
+}

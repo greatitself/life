@@ -2,9 +2,9 @@
 const assert = require('node:assert/strict')
 const { readFile, readdir, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
+const { readSavedThreads } = require('./desktop-history.cjs')
 
-const threads = (page) =>
-  page.evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+const threads = readSavedThreads
 
 function promptFrom(entry) {
   if (entry.kind === 'title-metadata') return undefined

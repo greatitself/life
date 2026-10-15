@@ -2,6 +2,7 @@ import { TextDecoder } from 'node:util'
 import type { AgentAttachment } from '../shared/types'
 import { shellQuote } from '../shared/validation'
 import type { SSHConnection } from './ssh'
+import { localOwnedNodeCommand } from './local-owned-runtime'
 
 type Wire = Record<string, unknown>
 
@@ -202,7 +203,7 @@ function nativeAttachment(attachment: AgentAttachment, bytes: Buffer): Wire {
 
 /** Read explicitly selected files for native Claude image/document content. */
 export async function claudeUserContent(
-  ssh: Pick<SSHConnection, 'exec'>,
+  ssh: Pick<SSHConnection, 'exec'> & Partial<Pick<SSHConnection, 'state'>>,
   prompt: string,
   attachments?: AgentAttachment[],
   signal?: AbortSignal,
@@ -211,7 +212,11 @@ export async function claudeUserContent(
   if (signal?.aborted) throw new Error('Attachment transfer cancelled.')
   const content: Wire[] = [{ type: 'text', text: prompt }]
   if (!selected.length) return content
-  const output = await ssh.exec(readAttachmentsCommand, {
+  const command =
+    ssh.state?.profile?.transport === 'local'
+      ? localOwnedNodeCommand(readAttachments)
+      : readAttachmentsCommand
+  const output = await ssh.exec(command, {
     input: JSON.stringify({ paths: selected.map((attachment) => attachment.remotePath) }),
     signal,
     maxOutputBytes: Math.ceil((maximumTotalBytes * 4) / 3) + 65536,

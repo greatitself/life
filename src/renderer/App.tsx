@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type SetStateAction,
+} from 'react'
 import {
   ArrowDown,
   ArrowRight,
@@ -49,18 +58,25 @@ import type {
   StartInput,
 } from '../shared/types'
 import { api, desktop, errorText, streamlinedWorkspace } from './api'
+import { connectionMachineIdentity } from '../shared/connection-identity'
 import { flushSync } from 'react-dom'
-import { AgentEventBatch } from './agent-event-batch'
+import { AgentEventBatch, coalesceAgentEvents } from './agent-event-batch'
 import { providerPermissionMode } from '../shared/permissions'
 import './workspace-presentation.css'
 import {
   applyEvent,
+  acceptsAgentEvent,
+  admitAgentEvents,
+  applyNativeRecoveryOwner,
+  nativeRecoveryBlocksMutation,
+  restoreNativeMainOwner,
   resolveAgentRequest,
   finishThreadTurn,
   bindLegacyThreadWorkspace,
   normalizeModelChoices,
   readThreads,
   type Thread,
+  type Message,
 } from './state'
 import { fallbackModelCatalog, withProviderDefault } from './model-catalog'
 import { ProviderIcon } from './components/Icons'
@@ -88,7 +104,14 @@ import { ActiveProject } from './components/ActiveProject'
 import { CustomizationStudio } from './components/CustomizationStudio'
 import { hostHistoryThread, appendHostHistory } from './host-history'
 import type { HostHistoryPage } from '../shared/agent-history'
-import type { ConversationHistorySnapshot } from '../shared/conversations'
+import { ConversationHistoryHydration } from './conversation-hydration'
+import { loadConversationHistory } from './conversation-load'
+import { nativeCheckpointConversationThreads } from './conversation-load-protocol'
+import {
+  getConversationSourceRaw,
+  hasConversationSource,
+  projectConversationSource,
+} from './conversation-source'
 import { useBuiltinFeatures } from './builtin-extensions'
 import { SidebarThread } from './components/SidebarThread'
 import { ThreadActionsMenu } from './components/ThreadActionsMenu'
@@ -169,6 +192,21 @@ import {
   reconcileConversationHistory,
   useConversationPersistence,
 } from './conversation-persistence'
+import {
+  carryNativeProjectionAuthoredTransition,
+  carryNativeProjectionAttachmentUpdate,
+  carryNativeProjectionMembership,
+  registerNativeProjectionLoadedBaseline,
+  registerNativeProjectionMainCacheBaseline,
+  registerNativeProjectionMembershipTransition,
+  registerNativeProjectionCacheMembership,
+} from './native-projection-admissions'
+import { mainNativeRecoveryRequest } from './native-recovery-consumers'
+import { getNativeConversationLoad } from './conversation-load-provenance'
+import {
+  attestCachedConversationHistoryRecovery,
+  getEffectiveCachedConversationHistorySavedAt,
+} from './main-cache-recovery'
 import './components/research-machine.css'
 import './components/research-interface.css'
 import './components/thread-management-ui.css'
@@ -273,7 +311,17 @@ export function App() {
   profilesCurrent.current = profiles
   const [profilesLoaded, setProfilesLoaded] = useState(false)
   const [connection, setConnection] = useState<ConnectionState>({ status: 'disconnected' })
-  const [threads, setThreads] = useState<Thread[]>(() => (api?.conversations ? [] : readThreads()))
+  const [threads, setHydratedThreads] = useState<Thread[]>(() =>
+    api?.conversations ? [] : readThreads(),
+  )
+  const setThreads = useCallback<Dispatch<SetStateAction<Thread[]>>>((update) => {
+    setHydratedThreads((previous) =>
+      carryNativeProjectionMembership(
+        previous,
+        typeof update === 'function' ? update(previous) : update,
+      ),
+    )
+  }, [])
   const threadsCurrent = useRef(threads)
   threadsCurrent.current = threads
   const [toast, setToast] = useState('')
@@ -283,7 +331,7 @@ export function App() {
     reopenId?: string
   }>()
   const [renamingThread, setRenamingThread] = useState<string>()
-  const [deletingThread, setDeletingThread] = useState<string>()
+  const [deletingThread, setDeletingThread] = useState<Thread>()
   const [threadTitleDraft, setThreadTitleDraft] = useState('')
   const builtin = useBuiltinFeatures()
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -332,14 +380,64 @@ export function App() {
   const recoveryReviewed = useRef(false)
   const [recoveryReady, setRecoveryReady] = useState(!api?.window.initialRecovery)
   const [historyReady, setHistoryReady] = useState(!api?.conversations)
-  const historyLoad = useRef<Promise<ConversationHistorySnapshot | null> | undefined>(undefined)
-  const startupReady = recoveryReady && historyReady
+  const [nativeHistoryReady, setNativeHistoryReady] = useState(!api?.conversations)
+  type RecoverySupport = {
+    mode: 'durable' | 'unsupported-clean' | 'blocked'
+    message?: string
+  }
+  const legacyRecoverySupport: RecoverySupport = {
+    mode: api?.agent.recover ? 'durable' : 'unsupported-clean',
+  }
+  const recoverySupportRequest = useRef<Promise<RecoverySupport> | undefined>(undefined)
+  const [nativeRecoverySupport, setNativeRecoverySupport] = useState<RecoverySupport | undefined>(
+    api?.agent.recoverySupport ? undefined : legacyRecoverySupport,
+  )
+  const nativeRecoverySupportCurrent = useRef(nativeRecoverySupport)
+  nativeRecoverySupportCurrent.current = nativeRecoverySupport
+  const getRecoverySupport = () =>
+    (recoverySupportRequest.current ||= api?.agent.recoverySupport
+      ? api.agent.recoverySupport().catch((error): RecoverySupport => ({
+          mode: 'blocked',
+          message: `Native recovery support could not be verified. ${errorText(error)}`,
+        }))
+      : Promise.resolve(legacyRecoverySupport))
+  const [nativeRecoveryReady, setNativeRecoveryReady] = useState(
+    !api?.agent.recoverySupport && !api?.agent.recover,
+  )
+  const [nativeRecoveryRetry, setNativeRecoveryRetry] = useState(0)
+  const nativeRecoveryHydrated = useRef(false)
+  const nativeRecoveryBuffered = useRef<AgentEvent[]>([])
+  const nativeEventDelivery = useRef<((event: AgentEvent) => void) | undefined>(undefined)
+  const [historyLoadError, setHistoryLoadError] = useState('')
+  const [historyRetry, setHistoryRetry] = useState(0)
+  const historyLoad = useRef<ConversationHistoryHydration | undefined>(undefined)
+  const historyWritable =
+    historyReady &&
+    nativeHistoryReady &&
+    Boolean(nativeRecoverySupport && nativeRecoverySupport.mode !== 'blocked')
+  nativeRecoveryHydrated.current = historyWritable && nativeRecoveryReady
+  const startupReady = recoveryReady && historyWritable && nativeRecoveryReady
   const conversationPersistence = useConversationPersistence(
     threads,
     api?.conversations?.save,
     setToast,
-    historyReady,
+    historyWritable && nativeRecoveryReady,
+    api?.conversations?.checkpoint,
+    api?.conversations?.supportsMessageFields === true,
+    api?.conversations?.supportsMessageAppends === true,
+    nativeRecoverySupport?.mode === 'durable' ? api?.agent.prepareRecoveryCache : undefined,
   )
+  const canMutateHistory = useCallback(() => {
+    if (historyWritable) return true
+    if (nativeRecoverySupport?.mode === 'blocked')
+      setToast(
+        nativeRecoverySupport.message ||
+          'Native recovery is unavailable. Saved conversations remain available to read and export.',
+      )
+    else if (historyLoadError)
+      setToast('Conversation changes are paused until disk history can be read. Use Retry loading.')
+    return false
+  }, [historyWritable, historyLoadError, nativeRecoverySupport])
   const [provider, setProvider] = useState<Provider>(config.defaultProvider)
   const [model, setModel] = useState(config.defaultModel)
   const [reasoningEffort, setReasoningEffort] = useState('')
@@ -418,7 +516,7 @@ export function App() {
     [threads, researchLinkedThreadsKey],
   )
   useEffect(() => {
-    if (!historyReady) return
+    if (!historyWritable) return
     setThreads((previous) => {
       const next = previous.map((thread) => {
         const context = workbench.contextForThread(thread.id)
@@ -432,7 +530,7 @@ export function App() {
       })
       return next.some((thread, index) => thread !== previous[index]) ? next : previous
     })
-  }, [workbench.scopeKey, workbench.goals, historyReady])
+  }, [workbench.scopeKey, workbench.goals, historyWritable])
   const legacyResearchDirectories = useMemo(
     () => researchLegacyDirectories(threads, workbench.linkedThreadIds),
     [threads, researchLinkedThreadsKey],
@@ -474,9 +572,10 @@ export function App() {
     refreshKey,
     threads.length,
     setThreads,
-    historyReady && builtin.enabled('thread-git-metadata'),
+    historyWritable && builtin.enabled('thread-git-metadata'),
   )
   useEffect(() => {
+    if (!historyWritable) return
     const sleeping = threads.filter((thread) => typeof thread.snoozedUntil === 'number')
     if (!sleeping.length) return
     const wakeAt = Math.min(...sleeping.map((thread) => thread.snoozedUntil!))
@@ -494,7 +593,7 @@ export function App() {
       Math.min(2147483647, Math.max(0, wakeAt - Date.now())),
     )
     return () => window.clearTimeout(timer)
-  }, [threads])
+  }, [threads, historyWritable])
   const [threadMenu, setThreadMenu] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<{ id?: string } | undefined>(undefined)
@@ -508,7 +607,7 @@ export function App() {
   useEffect(() => {
     const markVisibleRead = () => {
       if (
-        !historyReady ||
+        !historyWritable ||
         !activeId ||
         document.visibilityState === 'hidden' ||
         (view === 'investigation' && !researchAgentOpen)
@@ -537,7 +636,7 @@ export function App() {
       document.removeEventListener('visibilitychange', markVisibleRead)
       window.removeEventListener('focus', markVisibleRead)
     }
-  }, [historyReady, activeId, active?.completedAt, active?.attentionAt, view, researchAgentOpen])
+  }, [historyWritable, activeId, active?.completedAt, active?.attentionAt, view, researchAgentOpen])
   useEffect(() => {
     if (!threadUndo) return
     const timer = window.setTimeout(() => setThreadUndo(undefined), 5000)
@@ -571,11 +670,12 @@ export function App() {
   const currentServiceTier = active ? (active.serviceTier ?? '') : serviceTier
   const currentMode = providerPermissionMode(currentProvider, active?.mode || mode)
   const connected = connection.status === 'connected'
+  const localEnvironment = connection.profile?.transport === 'local'
   const projectReady = connected && Boolean(connection.workspace)
   const draftUploads = useDraftUploads(
     attachments,
     connection,
-    historyReady &&
+    historyWritable &&
       builtin.enabled('thread-attachments') &&
       (view === 'investigation' ? connected && Boolean(researchUploadWorkspace) : projectReady) &&
       (!active || active.profileId === 'life-local' || queueConnectionMatches(active, connection)),
@@ -594,6 +694,9 @@ export function App() {
     isBlocked: (threadId) =>
       Boolean(
         !startupReady ||
+        nativeRecoveryBlocksMutation(
+          threadsCurrent.current.find((thread) => thread.id === threadId),
+        ) ||
         !builtin.enabled('message-queue') ||
         (threadsCurrent.current.find((thread) => thread.id === threadId)?.purpose === 'research' &&
           !builtin.enabled('research-workbench')) ||
@@ -614,7 +717,9 @@ export function App() {
         (waitingMessage && !waitingMessage.paused && !waitingMessage.error)),
     )
   const queueControlsReady =
-    historyReady &&
+    historyWritable &&
+    nativeRecoveryReady &&
+    !nativeRecoveryBlocksMutation(active) &&
     Boolean(active && queueConnectionMatches(active, connection)) &&
     !restoringThreadId.current &&
     !threadContext.current.busy &&
@@ -760,6 +865,25 @@ export function App() {
   }
 
   useEffect(() => {
+    if (!api?.agent.recoverySupport) return
+    let disposed = false
+    void getRecoverySupport().then((support) => {
+      if (disposed) return
+      setNativeRecoverySupport(support)
+      if (support.mode !== 'durable') nativeRecoveryBuffered.current = []
+      if (support.mode === 'unsupported-clean') setNativeRecoveryReady(true)
+      if (support.mode === 'blocked')
+        setToast(
+          support.message ||
+            'Native recovery is unavailable. Saved conversations remain available to read and export.',
+        )
+    })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
+  useEffect(() => {
     if (!api?.window.initialRecovery) return
     let disposed = false
     // StrictMode mounts effects twice; consume the native intent only once.
@@ -781,40 +905,108 @@ export function App() {
 
   useEffect(() => {
     if (!api?.conversations) return
-    let disposed = false
-    // Consume a single native read during StrictMode replay. Saves and context
-    // restoration stay gated until existing disk history has been considered.
-    historyLoad.current ||= api.conversations.load()
+    const nativeConversations = api.conversations
+    const controller = new AbortController()
+    // Failed reads never authorize replacing unknown durable membership with
+    // cached or empty history. The retry controller shares StrictMode reads.
+    historyLoad.current ||= new ConversationHistoryHydration((signal) =>
+      loadConversationHistory(nativeConversations, signal),
+    )
     void historyLoad.current
-      .then((saved) => {
-        if (disposed) return
+      .load(controller.signal)
+      .then(async (saved) => {
+        if (controller.signal.aborted) return
         const cached = readCachedConversationHistory()
-        conversationPersistence.advanceClock(Math.max(saved?.savedAt || 0, cached.savedAt || 0))
-        setThreads(
-          reconcileConversationHistory(saved, cached).map((thread) =>
-            bindLegacyThreadWorkspace(thread, appContext.current.connection),
+        if (!nativeRecoverySupportCurrent.current) {
+          // A capability query can remain pending after the disk read. Publish
+          // its passive view for reading/export while authored writes stay gated.
+          setHydratedThreads(
+            reconcileConversationHistory(saved, cached).map((thread) =>
+              bindLegacyThreadWorkspace(thread, appContext.current.connection),
+            ),
+          )
+          setHistoryReady(true)
+        }
+        const recoverySupport = await getRecoverySupport()
+        if (controller.signal.aborted) return
+        const nativeLoad = saved ? getNativeConversationLoad(saved) : undefined
+        if (recoverySupport.mode === 'durable' && nativeLoad && api?.agent.attestLoadedHistory) {
+          const admissions = await api.agent.attestLoadedHistory({ hash: nativeLoad.hash })
+          if (controller.signal.aborted) return
+          for (const row of nativeLoad.rows)
+            for (const admission of admissions)
+              if (row.id === admission.sessionId)
+                registerNativeProjectionLoadedBaseline(row, admission)
+        }
+        if (recoverySupport.mode === 'durable' && api?.agent.attestRecoveryCache) {
+          const cacheLoad = await attestCachedConversationHistoryRecovery(
+            cached,
+            api.agent.attestRecoveryCache,
+          )
+          if (controller.signal.aborted) return
+          if (cacheLoad) {
+            for (const row of cacheLoad.rows)
+              for (const admission of cacheLoad.projectionAdmissions)
+                if (row.id === admission.sessionId)
+                  registerNativeProjectionMainCacheBaseline(row, admission)
+            await registerNativeProjectionCacheMembership(
+              cached.threads,
+              cacheLoad.membershipAdmissions || [],
+              cached,
+            )
+          }
+        }
+        if (controller.signal.aborted) return
+        const reconciled = reconcileConversationHistory(saved, cached)
+        conversationPersistence.advanceClock(
+          Math.max(saved?.savedAt || 0, getEffectiveCachedConversationHistorySavedAt(cached) || 0),
+        )
+        if (saved) {
+          const nativeBaseline = nativeCheckpointConversationThreads(saved)
+          if (nativeBaseline)
+            conversationPersistence.adoptNativeCheckpoint(nativeBaseline, saved.savedAt, true)
+        }
+        setHydratedThreads(
+          carryNativeProjectionMembership(
+            reconciled,
+            reconciled.map((thread) =>
+              bindLegacyThreadWorkspace(thread, appContext.current.connection),
+            ),
           ),
         )
+        setHistoryLoadError('')
+        setToast((current) =>
+          current.startsWith('Could not load the disk history.') ||
+          current ===
+            'Conversation changes are paused until disk history can be read. Use Retry loading.'
+            ? ''
+            : current,
+        )
+        setNativeHistoryReady(true)
         setHistoryReady(true)
       })
       .catch((error) => {
-        if (disposed) return
+        if (controller.signal.aborted) return
         const cached = readCachedConversationHistory()
         conversationPersistence.advanceClock(cached.savedAt || 0)
-        setThreads(
+        setHydratedThreads(
           cached.threads.map((thread) =>
             bindLegacyThreadWorkspace(thread, appContext.current.connection),
           ),
         )
-        setToast(
-          `Could not load the disk history. Its original file is preserved. ${errorText(error)}`,
-        )
+        const message = `Could not load the disk history. Its original file is preserved. ${errorText(error)}`
+        setHistoryLoadError(message)
+        setToast(message)
         setHistoryReady(true)
       })
     return () => {
-      disposed = true
+      controller.abort()
     }
-  }, [conversationPersistence.advanceClock])
+  }, [
+    conversationPersistence.advanceClock,
+    conversationPersistence.adoptNativeCheckpoint,
+    historyRetry,
+  ])
 
   useEffect(() => {
     try {
@@ -900,6 +1092,7 @@ export function App() {
     const updateConnection = (state: ConnectionState) => {
       if (
         state.profile?.id !== appContext.current.connection.profile?.id ||
+        state.profile?.transport !== appContext.current.connection.profile?.transport ||
         state.profile?.host !== appContext.current.connection.profile?.host ||
         state.profile?.port !== appContext.current.connection.profile?.port ||
         state.profile?.username !== appContext.current.connection.profile?.username ||
@@ -918,6 +1111,16 @@ export function App() {
     const eventBatch = new AgentEventBatch((events) => {
       const byThread = new Map<string, AgentEvent[]>()
       for (const event of events) {
+        if (
+          event.nativeRecovery &&
+          ((event.type === 'status' && event.status === 'resumed') ||
+            (event.nativeRecovery.deliveryToken &&
+              ['running', 'idle'].includes(event.nativeRecovery.ownerStatus || '')))
+        ) {
+          const target = threadsCurrent.current.find((thread) => thread.id === event.sessionId)
+          if (target && nativeRecoveryBlocksMutation(target) && acceptsAgentEvent(target, event))
+            setNativeRecoveryRetry((revision) => revision + 1)
+        }
         if (event.type === 'account-usage' && !event.sessionId) {
           const snapshot = event.details as ProviderUsageSnapshot | undefined
           const connected = appContext.current.connection
@@ -926,8 +1129,7 @@ export function App() {
             snapshot &&
             profile &&
             connected.status === 'connected' &&
-            snapshot.machineIdentity ===
-              JSON.stringify([profile.host, profile.port, profile.username])
+            snapshot.machineIdentity === connectionMachineIdentity(profile)
           )
             setAccountSnapshots((previous) =>
               (previous[snapshot.provider]?.fetchedAt ?? -Infinity) > snapshot.fetchedAt
@@ -939,7 +1141,16 @@ export function App() {
         const current = byThread.get(event.sessionId) || []
         current.push(event)
         byThread.set(event.sessionId, current)
+        const currentThread = threadsCurrent.current.find((thread) => thread.id === event.sessionId)
         if (
+          acceptsAgentEvent(
+            threadsCurrent.current.find((thread) => thread.id === event.sessionId) ||
+              ({ id: '' } as Thread),
+            event,
+          ) &&
+          (!event.nativeRecovery ||
+            event.nativeRecovery.localTurn === undefined ||
+            event.nativeRecovery.localTurn === currentThread?.turn) &&
           !event.agentId &&
           (event.type === 'complete' ||
             (event.type === 'error' &&
@@ -956,13 +1167,28 @@ export function App() {
         setThreads((previous) =>
           previous.map((thread) => {
             const updates = byThread.get(thread.id)
-            return updates ? updates.reduce(applyEvent, thread) : thread
+            return updates
+              ? coalesceAgentEvents(admitAgentEvents(thread, updates)).reduce(applyEvent, thread)
+              : thread
           }),
         )
       if (events.some((event) => event.type === 'complete' && !event.agentId))
         setRefreshKey((key) => key + 1)
     })
-    const offAgent = api.onAgent((event) => eventBatch.push(event))
+    nativeEventDelivery.current = (event) => eventBatch.push(event)
+    const offAgent = api.onAgent((event) => {
+      if (
+        event.nativeRecovery &&
+        nativeRecoverySupportCurrent.current &&
+        nativeRecoverySupportCurrent.current.mode !== 'durable'
+      )
+        return
+      if (event.nativeRecovery && !nativeRecoveryHydrated.current) {
+        nativeRecoveryBuffered.current.push(event)
+        return
+      }
+      eventBatch.push(event)
+    })
     // History's unload listener runs after this subscription effect. Publish
     // the final received deltas before it reads the current conversation.
     const flushEvents = () => flushSync(() => eventBatch.flush())
@@ -972,6 +1198,7 @@ export function App() {
       offConnection()
       offHost()
       offAgent()
+      nativeEventDelivery.current = undefined
       window.removeEventListener('beforeunload', flushEvents)
       window.removeEventListener('life:history-checkpoint', flushEvents)
       eventBatch.dispose()
@@ -979,27 +1206,85 @@ export function App() {
   }, [refreshProfiles])
 
   useEffect(() => {
-    const unload = () => {
+    if (!historyWritable || nativeRecoverySupport?.mode !== 'durable' || !api?.agent.recover) return
+    let disposed = false
+    setNativeRecoveryReady(false)
+    nativeRecoveryHydrated.current = false
+    void api.agent
+      .recover(mainNativeRecoveryRequest(threadsCurrent.current))
+      .then(({ owners }) => {
+        if (disposed) return
+        setThreads((previous) =>
+          owners.reduce((recovered, owner) => {
+            if (owner.originalInput?.clientRecovery) return restoreNativeMainOwner(recovered, owner)
+            if (recovered.filter((thread) => thread.id === owner.sessionId).length !== 1)
+              return recovered
+            return recovered.map((thread) =>
+              thread.id === owner.sessionId ? applyNativeRecoveryOwner(thread, owner) : thread,
+            )
+          }, previous),
+        )
+        const uncertain = owners.find((owner) => owner.status === 'unknown')
+        if (uncertain)
+          setToast(
+            uncertain.message ||
+              'Life could not verify the original native owner. This conversation is preserved; sending and permission responses stay paused.',
+          )
+        setNativeRecoveryReady(true)
+        nativeRecoveryHydrated.current = true
+        const buffered = nativeRecoveryBuffered.current
+        nativeRecoveryBuffered.current = []
+        for (const event of buffered) nativeEventDelivery.current?.(event)
+      })
+      .catch((error) => {
+        if (!disposed) setToast(`Native recovery could not be reconciled. ${errorText(error)}`)
+      })
+    return () => {
+      disposed = true
+    }
+  }, [
+    historyWritable,
+    historyRetry,
+    nativeRecoveryRetry,
+    nativeRecoverySupport?.mode,
+    connection.status,
+    connection.profile?.id,
+  ])
+
+  useEffect(() => {
+    const retire = () => {
       sourceReloading.current = true
+    }
+    const unload = () => {
+      // Electron can prevent this attempted navigation and keep the document
+      // alive. Flush received work without blocking its subsequent messages.
       void conversationPersistence.flush()
     }
     const checkpointWindow = window as Window & {
-      __lifeFlushConversationHistory?: () => Promise<void>
+      __lifeFlushConversationHistory?: (retireDocument?: boolean) => Promise<void>
+      __lifeFlushStudioHistory?: () => Promise<void>
     }
-    const flushHistory = () => {
+    const flushHistory = (retireDocument = false) => {
       // Native close/reload can await this checkpoint before replacing the
       // document. The stream listener flushes queued deltas synchronously first.
+      if (retireDocument === true) retire()
       window.dispatchEvent(new Event('life:history-checkpoint'))
-      return conversationPersistence.flush().then(() => undefined)
+      return Promise.all([
+        conversationPersistence.flush(),
+        draftState.flush(),
+        checkpointWindow.__lifeFlushStudioHistory?.(),
+      ]).then(() => undefined)
     }
     checkpointWindow.__lifeFlushConversationHistory = flushHistory
     window.addEventListener('beforeunload', unload)
+    window.addEventListener('pagehide', retire)
     return () => {
       window.removeEventListener('beforeunload', unload)
+      window.removeEventListener('pagehide', retire)
       if (checkpointWindow.__lifeFlushConversationHistory === flushHistory)
         delete checkpointWindow.__lifeFlushConversationHistory
     }
-  }, [conversationPersistence.flush])
+  }, [conversationPersistence.flush, draftState.flush])
   useEffect(() => {
     const catalogKey = `${connection.profile?.id || ''}:${connection.workspace || ''}:${currentProvider}`
     const cached = modelCatalogs.current.get(catalogKey)
@@ -1064,7 +1349,7 @@ export function App() {
   }, [draft, view, activeId])
 
   const newThread = useCallback(() => {
-    if (!historyReady) return
+    if (!canMutateHistory()) return
     const selected = threadsCurrent.current.find((thread) => thread.id === activeIdCurrent.current)
     if (selected) {
       setProvider(selected.provider)
@@ -1106,7 +1391,7 @@ export function App() {
     setStickToBottom(true)
     textarea.current?.focus()
   }, [
-    historyReady,
+    canMutateHistory,
     draftState.hasContent,
     draftState.move,
     connection,
@@ -1152,6 +1437,7 @@ export function App() {
         }
         if (key === 'n') {
           e.preventDefault()
+          if (!canMutateHistory()) return
           if (view === 'investigation') workbench.newProblem()
           else newThread()
         }
@@ -1206,6 +1492,7 @@ export function App() {
   }, [
     newThread,
     historyReady,
+    canMutateHistory,
     hostKey,
     connectOpen,
     projectOpen,
@@ -1227,7 +1514,7 @@ export function App() {
     threadUndo,
   ])
   function attachFiles(files: File[]) {
-    if (!historyReady) return
+    if (!canMutateHistory()) return
     if (!files.length || !builtin.enabled('thread-attachments')) return
     if (attachmentTransfer.current || queue.preparing) {
       setToast(
@@ -1253,6 +1540,12 @@ export function App() {
     let active = threadsCurrent.current.find(
       (thread) => thread.id === (queued?.threadId || activeIdCurrent.current),
     )
+    if (nativeRecoveryBlocksMutation(active)) {
+      setToast(
+        'Life is verifying the original native owner. Your draft is kept until this conversation can safely continue.',
+      )
+      return
+    }
     const researchThreadContext =
       active?.purpose === 'research' ? workbench.contextForThread(active.id) : undefined
     const researchScope = researchThreadContext?.scope || workbench.scope
@@ -1416,6 +1709,13 @@ export function App() {
       setAttachmentProgress({ id, percent: 0 })
     }
     const turn = thread.turn + 1
+    let userMessage: Message = {
+      id: userMessageId,
+      role: 'user',
+      text: prompt,
+      turn,
+      createdAt: Date.now(),
+    }
     const next: Thread = {
       ...thread,
       mode: providerPermissionMode(thread.provider, thread.mode),
@@ -1442,23 +1742,27 @@ export function App() {
       settledAt: undefined,
       archivedAt: undefined,
       updatedAt: Date.now(),
-      messages: [
-        ...thread.messages,
-        { id: userMessageId, role: 'user', text: prompt, turn, createdAt: Date.now() },
-      ],
+      messages: [...thread.messages, userMessage],
     }
     setThreads((previous) => {
       const current = previous.find((item) => item.id === id)
       return [
-        {
-          ...next,
-          model: current?.model ?? next.model,
-          reasoningEffort: current?.reasoningEffort ?? next.reasoningEffort,
-          serviceTier: current?.serviceTier ?? next.serviceTier,
-          queue: queued
-            ? (current?.queue || []).filter((item) => item.id !== queued.messageId)
-            : current?.queue,
-        },
+        carryNativeProjectionAuthoredTransition(
+          current || thread,
+          {
+            ...next,
+            nativeRecovery: current?.nativeRecovery ?? next.nativeRecovery,
+            nativeRecoveryOwner: current?.nativeRecoveryOwner ?? next.nativeRecoveryOwner,
+            messages: [...(current?.messages ?? thread.messages), userMessage],
+            model: current?.model ?? next.model,
+            reasoningEffort: current?.reasoningEffort ?? next.reasoningEffort,
+            serviceTier: current?.serviceTier ?? next.serviceTier,
+            queue: queued
+              ? (current?.queue || []).filter((item) => item.id !== queued.messageId)
+              : current?.queue,
+          },
+          userMessageId,
+        ),
         ...previous.filter((item) => item.id !== id),
       ]
     })
@@ -1492,20 +1796,25 @@ export function App() {
         setThreads((previous) =>
           previous.map((item) =>
             item.id === id && item.turn === turn
-              ? {
-                  ...item,
-                  messages: item.messages.map((message) =>
-                    message.id === userMessageId
-                      ? { ...message, attachments: selectedAttachments.map(attachmentMetadata) }
-                      : message,
-                  ),
-                }
+              ? carryNativeProjectionAttachmentUpdate(
+                  item,
+                  {
+                    ...item,
+                    messages: item.messages.map((message) =>
+                      message.id === userMessageId
+                        ? { ...message, attachments: selectedAttachments.map(attachmentMetadata) }
+                        : message,
+                    ),
+                  },
+                  userMessageId,
+                )
               : item,
           ),
         )
       }
       const input: StartInput = {
         sessionId: id,
+        localTurn: turn,
         provider: thread.provider,
         remoteId: thread.remoteId,
         workspace: next.workspace || connection.workspace,
@@ -1528,15 +1837,22 @@ export function App() {
         input.attachments = uploaded
           .filter((file) => file.remotePath)
           .map((file) => ({ remotePath: file.remotePath!, name: file.name, mimeType: file.mime }))
+        userMessage = { ...userMessage, attachments: uploaded }
         setThreads((previous) =>
           previous.map((item) =>
             item.id === id && item.turn === turn
-              ? {
-                  ...item,
-                  messages: item.messages.map((message) =>
-                    message.id === userMessageId ? { ...message, attachments: uploaded } : message,
-                  ),
-                }
+              ? carryNativeProjectionAttachmentUpdate(
+                  item,
+                  {
+                    ...item,
+                    messages: item.messages.map((message) =>
+                      message.id === userMessageId
+                        ? { ...message, attachments: uploaded }
+                        : message,
+                    ),
+                  },
+                  userMessageId,
+                )
               : item,
           ),
         )
@@ -1557,6 +1873,32 @@ export function App() {
       input.model = latestChoices?.model ?? input.model
       input.reasoningEffort = latestChoices?.reasoningEffort ?? input.reasoningEffort
       input.serviceTier = latestChoices?.serviceTier ?? input.serviceTier
+      if (nativeRecoverySupportCurrent.current?.mode === 'durable')
+        input.clientRecovery = {
+          kind: 'main',
+          userMessage,
+          threadSeed: {
+            id,
+            profileId: next.profileId,
+            workspace: input.workspace,
+            provider: next.provider,
+            title: next.title,
+            ...(next.purpose ? { purpose: next.purpose } : {}),
+            ...(next.researchContext ? { researchContext: next.researchContext } : {}),
+            ...(next.createdAt !== undefined ? { createdAt: next.createdAt } : {}),
+            updatedAt: next.updatedAt,
+            turn,
+            messages: [],
+            busy: false,
+            pending: [],
+            model: input.model || '',
+            mode: input.mode,
+            ...(input.reasoningEffort !== undefined
+              ? { reasoningEffort: input.reasoningEffort }
+              : {}),
+            ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
+          },
+        }
       runningChoices.current.set(id, {
         model: input.model || '',
         reasoningEffort: input.reasoningEffort || '',
@@ -1595,6 +1937,7 @@ export function App() {
     }
   }
   async function submitSteering(thread: Thread, prompt: string, files: DraftAttachment[]) {
+    if (!nativeRecoveryReady || nativeRecoveryBlocksMutation(thread)) return
     if (!api || !startupReady || submitting.current || attachmentTransfer.current) return
     const turn = thread.turn
     const submission = { id: thread.id }
@@ -1709,7 +2052,8 @@ export function App() {
     }
   }
   async function stop() {
-    if (!active || !api) return
+    if (!active || !api || !canMutateHistory()) return
+    if (!nativeRecoveryReady || nativeRecoveryBlocksMutation(active)) return
     queue.pause(active.id)
     if (attachmentTransfer.current?.id === active.id) {
       attachmentTransfer.current.controller.abort()
@@ -1719,7 +2063,7 @@ export function App() {
       await api.agent.stop(active.id)
       setThreads((previous) =>
         previous.map((thread) =>
-          thread.id === active.id && thread.turn === active.turn && active.busy
+          thread.id === active.id && thread.turn === active.turn && thread.busy
             ? applyEvent(thread, { sessionId: thread.id, type: 'complete', status: 'interrupted' })
             : thread,
         ),
@@ -1737,7 +2081,7 @@ export function App() {
     reasoningEffort?: string
     serviceTier?: string
   }) => {
-    if (!historyReady) return
+    if (!canMutateHistory()) return
     const request = ++settingsRequest.current
     const settingsThreadId = active?.id
     const settingsView = view
@@ -1776,22 +2120,32 @@ export function App() {
       if (next.serviceTier !== undefined) setServiceTier(next.serviceTier)
     }
   }
-  async function respond(event: AgentEvent, accepted: boolean, answers?: Record<string, string[]>) {
+  async function respond(
+    event: AgentEvent,
+    accepted: boolean,
+    answers?: Record<string, string[]>,
+    decisionId?: string,
+  ) {
+    if (!historyWritable)
+      throw new Error('Read the saved disk history before answering this request.')
     if (!api || !event.requestId) throw new Error('This request is no longer available.')
     const target = threadsCurrent.current.find((thread) => thread.id === event.sessionId)
+    if (!nativeRecoveryReady || nativeRecoveryBlocksMutation(target))
+      throw new Error('Life must verify the original native owner before answering this request.')
     if (!target?.pending.some((request) => request.requestId === event.requestId))
       throw new Error('This request is no longer pending.')
-    await api.agent.respond(event.sessionId, event.requestId, accepted, answers)
+    await api.agent.respond(event.sessionId, event.requestId, accepted, answers, decisionId)
+    const choice = event.approvalChoices?.find((choice) => choice.id === decisionId)
     setThreads((previous) =>
       previous.map((thread) =>
         thread.id === event.sessionId
-          ? resolveAgentRequest(thread, event.requestId!, accepted, answers)
+          ? resolveAgentRequest(thread, event.requestId!, accepted, answers, Date.now(), choice)
           : thread,
       ),
     )
   }
   function importHostHistory(page: HostHistoryPage) {
-    if (!historyReady) return
+    if (!canMutateHistory()) return
     if (!connection.profile) return
     const existing = threadsCurrent.current.find(
       (thread) =>
@@ -1842,6 +2196,7 @@ export function App() {
     selectThread(imported)
   }
   async function loadMoreHostHistory() {
+    if (!canMutateHistory()) return
     if (!active?.importedHistory?.nextCursor || !api?.hostHistory || historyLoading) return
     if (connection.profile?.id !== active.profileId || !connected) {
       setConnectOpen(true)
@@ -1878,6 +2233,7 @@ export function App() {
       selectThread(previous)
       return
     }
+    if (!canMutateHistory()) return
     const thread: Thread = {
       id: crypto.randomUUID(),
       profileId: project.profileId,
@@ -1910,7 +2266,21 @@ export function App() {
     if (thread.profileId === 'life-local') cancelThreadContext()
     else if (profilesLoaded) void restoreThreadContext(thread)
   }
-  function exportThread(thread: Thread) {
+  function exportThread(thread: Thread, format?: number | string) {
+    if (format === 'recovery') {
+      const text = JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        threads: [projectConversationSource(thread)],
+      })
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'life-thread-recovery.json'
+      link.click()
+      URL.revokeObjectURL(url)
+      return
+    }
     const text = thread.messages
       .map((message) => {
         const role =
@@ -1932,6 +2302,7 @@ export function App() {
     URL.revokeObjectURL(url)
   }
   function undoThreadAction() {
+    if (!canMutateHistory()) return
     const undo = threadUndo
     if (!undo) return
     const current = threadsCurrent.current
@@ -1948,9 +2319,30 @@ export function App() {
         : 'The thread has newer activity or edits. Its current arrangement was kept.',
     )
   }
+  function threadOccurrence(thread: Thread, candidates: Thread[]): Thread | undefined {
+    const exact = candidates.find((item) => item === thread)
+    if (exact) return exact
+    if (hasConversationSource(thread)) {
+      const raw = getConversationSourceRaw(thread)
+      const source = candidates.find(
+        (item) => hasConversationSource(item) && getConversationSourceRaw(item) === raw,
+      )
+      return source
+    }
+    const matching = candidates.filter((item) => item.id === thread.id)
+    return matching.length === 1 ? matching[0] : undefined
+  }
   function handleThreadAction(thread: Thread, action: ThreadAction, value?: number | string) {
-    const current = threadsCurrent.current.find((item) => item.id === thread.id)
+    const current = threadOccurrence(thread, threadsCurrent.current)
     if (!current || !historyReady) return
+    if (action !== 'copy' && action !== 'export' && !canMutateHistory()) return
+    if (
+      !['copy', 'export', 'delete'].includes(action) &&
+      threadsCurrent.current.filter((item) => item.id === current.id).length > 1
+    ) {
+      setToast('These saved threads share an ID. Export recovery JSON before organizing them.')
+      return
+    }
     if (
       ['archive', 'delete', 'settle', 'snooze'].includes(action) &&
       submitting.current?.id === current.id
@@ -1966,7 +2358,7 @@ export function App() {
       return
     }
     if (action === 'export') {
-      exportThread(current)
+      exportThread(current, value)
       return
     }
     if (action === 'settings') {
@@ -1975,7 +2367,7 @@ export function App() {
       return
     }
     if (action === 'delete') {
-      if (threadCanArchive(current)) setDeletingThread(current.id)
+      if (threadCanArchive(current)) setDeletingThread(current)
       setThreadMenu(false)
       return
     }
@@ -2043,9 +2435,12 @@ export function App() {
       })
   }
   async function deleteSavedThread() {
-    const target = threadsCurrent.current.find((thread) => thread.id === deletingThread)
-    if (!target || !historyReady || !threadCanArchive(target)) return
-    const researchLinked = workbench.linkedThreadIds.has(target.id)
+    const target = deletingThread && threadOccurrence(deletingThread, threadsCurrent.current)
+    if (!target || !canMutateHistory() || !threadCanArchive(target)) return
+    const sharedId = threadsCurrent.current.some(
+      (thread) => thread !== target && thread.id === target.id,
+    )
+    const researchLinked = !sharedId && workbench.linkedThreadIds.has(target.id)
     const restoreResearchLinks = researchLinked
       ? workbench.unlinkThreadWithRollback(target.id)
       : undefined
@@ -2056,8 +2451,19 @@ export function App() {
       ...draft.attachments.map((file) => file.id),
       ...draft.unavailableAttachments.map((file) => file.id),
     ])
-    const next = threadsCurrent.current.filter((thread) => thread.id !== target.id)
-    setThreads((previous) => previous.filter((thread) => thread.id !== target.id))
+    const next = registerNativeProjectionMembershipTransition(
+      threadsCurrent.current,
+      threadsCurrent.current.filter((thread) => thread !== target),
+    )
+    setThreads((previous) => {
+      const selected = threadOccurrence(target, previous)
+      return selected
+        ? registerNativeProjectionMembershipTransition(
+            previous,
+            previous.filter((thread) => thread !== selected),
+          )
+        : previous
+    })
     setDeletingThread(undefined)
     if (activeIdCurrent.current === target.id && view !== 'investigation') newThread()
     let historyDeleted = false
@@ -2066,7 +2472,7 @@ export function App() {
       if (!saved) {
         const linksRestored = restoreResearchLinks?.() ?? true
         setThreads((previous) =>
-          previous.some((thread) => thread.id === target.id) ? previous : [target, ...previous],
+          threadOccurrence(target, previous) ? previous : [target, ...previous],
         )
         setToast(
           linksRestored
@@ -2076,7 +2482,8 @@ export function App() {
         return
       }
       historyDeleted = true
-      draftState.clear('agents:' + target.id)
+      if (!threadsCurrent.current.some((thread) => thread.id === target.id))
+        draftState.clear('agents:' + target.id)
       const retained = new Set([
         ...threadsCurrent.current.flatMap(threadAttachmentIds),
         ...draftState.retainedAttachmentIds(),
@@ -2087,7 +2494,7 @@ export function App() {
       if (!historyDeleted) {
         restoreResearchLinks?.()
         setThreads((previous) =>
-          previous.some((thread) => thread.id === target.id) ? previous : [target, ...previous],
+          threadOccurrence(target, previous) ? previous : [target, ...previous],
         )
       }
       setToast(errorText(error))
@@ -2264,6 +2671,23 @@ export function App() {
             Loading saved conversations…
           </div>
         ) : null}
+        {historyLoadError ? (
+          <div className="extension-recovery-bar" role="status">
+            <span>
+              {historyLoadError} Showing the local cache. Conversation changes are paused until disk
+              history can be read.
+            </span>
+            <button
+              onClick={() => {
+                setHistoryReady(false)
+                setHistoryLoadError('')
+                setHistoryRetry((attempt) => attempt + 1)
+              }}
+            >
+              Retry loading
+            </button>
+          </div>
+        ) : null}
         {replacement ? (
           <div className="extension-replacement">
             <div className="extension-recovery-bar">
@@ -2332,7 +2756,7 @@ export function App() {
                   onAction={handleThreadAction}
                   draftThreadIds={draftState.draftThreadIds}
                   onArrange={(thread, patch) => {
-                    if (!historyReady) return
+                    if (!canMutateHistory()) return
                     setThreads((previous) =>
                       previous.map((item) =>
                         item.id === thread.id ? { ...item, ...patch } : item,
@@ -2449,7 +2873,7 @@ export function App() {
                     <button
                       className="icon-button"
                       aria-label="Connections"
-                      title="SSH connections"
+                      title="Local and SSH environments"
                       onClick={() => setConnectOpen(true)}
                     >
                       <Server size={16} />
@@ -2467,14 +2891,16 @@ export function App() {
                         ) : null}
                       </button>
                     ) : null}
-                    <button
-                      className="icon-button extension-sidebar-entry"
-                      aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
-                      title={`Port forwarding: ${config.autoPortForward ? 'automatic' : 'off'}`}
-                      onClick={() => setPortsOpen(true)}
-                    >
-                      <Cable size={16} />
-                    </button>
+                    {!localEnvironment ? (
+                      <button
+                        className="icon-button extension-sidebar-entry"
+                        aria-label={`Ports ${config.autoPortForward ? 'Auto' : 'Off'}`}
+                        title={`Port forwarding: ${config.autoPortForward ? 'automatic' : 'off'}`}
+                        onClick={() => setPortsOpen(true)}
+                      >
+                        <Cable size={16} />
+                      </button>
+                    ) : null}
                     {!streamlinedWorkspace ? (
                       <button
                         className="icon-button extension-sidebar-entry"
@@ -2714,7 +3140,9 @@ export function App() {
                           : connection.status === 'connecting'
                             ? 'Connecting'
                             : connected
-                              ? 'SSH connected'
+                              ? localEnvironment
+                                ? 'Local connected'
+                                : 'SSH connected'
                               : 'Offline'}
                       </span>
                       {view === 'investigation' ? (
@@ -2807,6 +3235,7 @@ export function App() {
                       <ThreadMessageNavigator
                         key={active.id}
                         messages={navigableMessages}
+                        searchMessages={active.messages}
                         conversation={conversation}
                         onJump={() => setStickToBottom(false)}
                       />
@@ -2872,7 +3301,9 @@ export function App() {
                             <ApprovalCard
                               key={event.requestId}
                               event={event}
-                              onRespond={(accepted, answers) => respond(event, accepted, answers)}
+                              onRespond={(accepted, answers, decisionId) =>
+                                respond(event, accepted, answers, decisionId)
+                              }
                             />
                           ))}
                           {busy && !active.pending.length ? (
@@ -2899,7 +3330,9 @@ export function App() {
                               canSendNow={queueControlsReady}
                               actionId={queue.actionId}
                               onSendNow={(id) => void queue.sendNow(active.id, id)}
-                              onRemove={(id) => queue.remove(active.id, id)}
+                              onRemove={(id) => {
+                                if (canMutateHistory()) queue.remove(active.id, id)
+                              }}
                             />
                           ) : null}
                         </div>
@@ -2978,9 +3411,11 @@ export function App() {
                           attachments={attachments}
                           uploadStates={draftUploads.states}
                           onRetry={draftUploads.retry}
-                          disabled={!historyReady || queue.preparing || Boolean(attachmentProgress)}
+                          disabled={
+                            !historyWritable || queue.preparing || Boolean(attachmentProgress)
+                          }
                           onRemove={(id) => {
-                            if (!historyReady) return
+                            if (!canMutateHistory()) return
                             cancelAttachmentUpload(id)
                             setAttachments((current) => current.filter((item) => item.id !== id))
                             if (
@@ -3085,8 +3520,8 @@ export function App() {
                             reasoningEffort={currentReasoningEffort}
                             serviceTier={currentServiceTier}
                             mode={currentMode}
-                            modeDisabled={false}
-                            providerDisabled={Boolean(active)}
+                            modeDisabled={!historyWritable}
+                            providerDisabled={!historyWritable || Boolean(active)}
                             onChange={updateSettings}
                             onProviderChange={(nextProvider, nextModel) => {
                               setProvider(nextProvider)
@@ -3113,7 +3548,9 @@ export function App() {
 
                             {view !== 'investigation' ? (
                               <AttachmentPicker
-                                disabled={queue.preparing || Boolean(attachmentProgress)}
+                                disabled={
+                                  !historyWritable || queue.preparing || Boolean(attachmentProgress)
+                                }
                                 onFiles={attachFiles}
                               />
                             ) : null}
@@ -3159,6 +3596,8 @@ export function App() {
                                         : 'Connect to send'
                               }
                               disabled={
+                                !startupReady ||
+                                nativeRecoveryBlocksMutation(active) ||
                                 (streamlinedWorkspace && busy && !queueControlsReady) ||
                                 queue.preparing ||
                                 Boolean(attachmentProgress) ||
@@ -3219,14 +3658,16 @@ export function App() {
                             className="composer-machine-status"
                             title={
                               connected
-                                ? `${connection.profile?.username}@${connection.profile?.host}`
+                                ? localEnvironment
+                                  ? 'Runs on the computer running Life'
+                                  : `${connection.profile?.username}@${connection.profile?.host}`
                                 : undefined
                             }
                           >
                             {connected ? (
                               <>
-                                <Cloud size={14} />
-                                <span>{connection.profile?.host}</span>
+                                {localEnvironment ? <Computer size={14} /> : <Cloud size={14} />}
+                                <span>{localEnvironment ? 'Local' : connection.profile?.host}</span>
                               </>
                             ) : (
                               'No machine connected'
@@ -3324,13 +3765,7 @@ export function App() {
           activeThreadId={activeId}
           activeProfileId={connection.profile?.id}
           activeMachineIdentity={
-            connection.profile
-              ? JSON.stringify([
-                  connection.profile.host,
-                  connection.profile.port,
-                  connection.profile.username,
-                ])
-              : undefined
+            connection.profile ? connectionMachineIdentity(connection.profile) : undefined
           }
           connected={connected}
           onReadUsage={api?.agent.usage}
@@ -3368,7 +3803,7 @@ export function App() {
           }}
         />
         <PortForwardDialog
-          open={portsOpen}
+          open={portsOpen && !localEnvironment}
           onOpenChange={setPortsOpen}
           enabled={config.autoPortForward}
           onEnabledChange={(enabled) => preferences.apply({ autoPortForward: enabled })}
@@ -3395,6 +3830,32 @@ export function App() {
           profiles={profiles}
           refreshProfiles={refreshProfiles}
           connection={connection}
+          beforeConnect={async () => {
+            cancelThreadContext()
+            await threadContext.current.settled()
+          }}
+          onConnected={(state) => {
+            appContext.current.connection = state
+            setConnection(state)
+            const selectedWorkspaceThread = threadsCurrent.current.find(
+              (thread) => thread.id === workspaceActiveId,
+            )
+            if (
+              selectedWorkspaceThread &&
+              selectedWorkspaceThread.profileId !== state.profile?.id
+            ) {
+              // A successful environment choice retires only the old selection
+              // intent. Its conversation and owned draft remain in history even
+              // if the project picker is closed before choosing a folder.
+              if (viewCurrent.current !== 'investigation') activeIdCurrent.current = undefined
+              setWorkspaceActiveId(undefined)
+              setThreadMenu(false)
+              setStickToBottom(true)
+            }
+            setRequestedProfileId(undefined)
+            setSuggestedProject(undefined)
+            setProjectOpen(true)
+          }}
         />
         <ProjectDialog
           open={projectOpen && connected && !connectOpen && !hostKey}
@@ -3526,11 +3987,12 @@ export function App() {
         >
           <div className="help-section">
             <h3>
-              <Server size={16} /> Set up your remote machine
+              <Computer size={16} /> Set up your environment
             </h3>
             <p>
-              Life connects to a Linux or macOS machine over SSH. Choose an existing project
-              directory, then install and sign in to either agent on that machine.
+              Local runs agents on the computer running Life. You can also connect a Linux or macOS
+              machine over SSH. Choose an existing project directory, then install and sign in to
+              either agent on that computer.
             </p>
             <div className="help-command">
               <span>Codex</span>
@@ -3596,6 +4058,7 @@ export function App() {
             className="thread-name-form"
             onSubmit={(event) => {
               event.preventDefault()
+              if (!canMutateHistory()) return
               const title = threadTitleDraft.trim()
               if (!title || !renamingThread) return
               setThreads((previous) =>
@@ -3641,7 +4104,8 @@ export function App() {
               type="button"
               className="button primary"
               disabled={
-                !threads.some((thread) => thread.id === deletingThread && threadCanArchive(thread))
+                !deletingThread ||
+                !threadCanArchive(threadOccurrence(deletingThread, threads) ?? deletingThread)
               }
               onClick={() => void deleteSavedThread()}
             >

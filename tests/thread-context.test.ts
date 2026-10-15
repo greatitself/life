@@ -23,6 +23,25 @@ const connected = (workspace = '/srv/other'): ConnectionState => ({
   profile,
   workspace,
 })
+const localProfile: ConnectionProfile & { transport: 'local' } = {
+  ...profile,
+  id: 'local:90d3e8ec-894d-42db-9b04-a9ae7be06146',
+  name: 'Local',
+  transport: 'local',
+  host: '',
+  username: '',
+  privateKeyPath: '',
+  // SSH fields do not select Local's authentication behavior.
+  auth: 'password',
+  workspace: '/home/researcher/other',
+}
+const localThread = {
+  ...thread,
+  id: 'local-thread',
+  profileId: localProfile.id,
+  workspace: '/home/researcher/project',
+  remoteId: 'local-provider-conversation',
+}
 function fixture(initial: ConnectionState = connected()) {
   let current = initial
   const client = {
@@ -46,6 +65,103 @@ function deferred<T>() {
 }
 
 describe('restoring a thread’s saved machine and project', () => {
+  it('restores a genuine Local environment without requesting SSH credentials', async () => {
+    const { client } = fixture({ status: 'disconnected' })
+    expect(
+      await new ThreadContextController().restore(localThread, [localProfile], client),
+    ).toMatchObject({
+      kind: 'ready',
+      connection: { profile: { id: localProfile.id }, workspace: localThread.workspace },
+    })
+    expect(client.connect).toHaveBeenCalledExactlyOnceWith(localProfile)
+    expect(client.selectWorkspace).toHaveBeenCalledExactlyOnceWith(localThread.workspace)
+    expect(localThread.remoteId).toBe('local-provider-conversation')
+  })
+
+  it('does not reinterpret a missing Local owner as the currently connected machine', async () => {
+    const { client } = fixture(connected(localThread.workspace))
+    expect(
+      await new ThreadContextController().restore(localThread, [profile], client),
+    ).toMatchObject({ kind: 'unavailable' })
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+    expect(localThread.profileId).toBe(localProfile.id)
+    expect(localThread.remoteId).toBe('local-provider-conversation')
+  })
+
+  it('reports a Local startup failure without asking for an SSH password or passphrase', async () => {
+    const { client } = fixture({ status: 'disconnected' })
+    client.connect.mockRejectedValueOnce(new Error('Local process service unavailable'))
+    expect(
+      await new ThreadContextController().restore(localThread, [localProfile], client),
+    ).toEqual({ kind: 'unavailable', error: 'Local process service unavailable' })
+    expect(client.connect).toHaveBeenCalledExactlyOnceWith(localProfile)
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+  })
+
+  it('reports a Local service that remained disconnected without opening credentials', async () => {
+    const { client } = fixture({ status: 'disconnected' })
+    client.connect.mockResolvedValueOnce({
+      status: 'disconnected',
+      profile: localProfile,
+      error: 'Local environment initialization failed',
+    })
+    expect(
+      await new ThreadContextController().restore(localThread, [localProfile], client),
+    ).toEqual({ kind: 'unavailable', error: 'Local environment initialization failed' })
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+  })
+
+  it('does not grant Local behavior to an SSH profile solely because its ID resembles Local', async () => {
+    const { transport: _transport, ...sshProfile } = localProfile
+    const { client } = fixture({ status: 'disconnected' })
+    expect(await new ThreadContextController().restore(localThread, [sshProfile], client)).toEqual({
+      kind: 'credentials',
+      profileId: sshProfile.id,
+    })
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+  })
+
+  it('switches from SSH to Local before selecting the saved Local workspace', async () => {
+    const { client, state } = fixture(connected(localThread.workspace))
+    const order: string[] = []
+    const connect = client.connect.getMockImplementation()!
+    const selectWorkspace = client.selectWorkspace.getMockImplementation()!
+    client.connect.mockImplementation(async (input) => {
+      order.push('local-environment')
+      return connect(input)
+    })
+    client.selectWorkspace.mockImplementation(async (workspace) => {
+      order.push('local-project')
+      return selectWorkspace(workspace)
+    })
+    expect(
+      await new ThreadContextController().restore(localThread, [profile, localProfile], client),
+    ).toMatchObject({
+      kind: 'ready',
+      connection: { profile: { id: localProfile.id }, workspace: localThread.workspace },
+    })
+    expect(order).toEqual(['local-environment', 'local-project'])
+    expect(state().profile?.id).toBe(localProfile.id)
+    expect(localThread.remoteId).toBe('local-provider-conversation')
+    expect(localProfile.workspace).toBe('/home/researcher/other')
+  })
+
+  it('refuses unresolved Local provider history before changing the selected environment', async () => {
+    const { client } = fixture()
+    expect(
+      await new ThreadContextController().restore(
+        { ...localThread, workspace: undefined },
+        [profile, localProfile],
+        client,
+      ),
+    ).toMatchObject({ kind: 'unavailable' })
+    expect(client.state).not.toHaveBeenCalled()
+    expect(client.connect).not.toHaveBeenCalled()
+    expect(client.selectWorkspace).not.toHaveBeenCalled()
+  })
+
   it('opens Research on the saved machine without selecting its directory as an Agents project', async () => {
     const { client } = fixture()
     const research = {

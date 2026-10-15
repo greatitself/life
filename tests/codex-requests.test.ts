@@ -5,6 +5,7 @@ import { Agents, codexModelOption } from '../src/main/agents'
 import type { SSHConnection } from '../src/main/ssh'
 import type { AgentEvent } from '../src/shared/types'
 import {
+  codexApprovalChoices,
   codexApprovalPresentation,
   codexElicitationQuestions,
   codexRequestResponse,
@@ -90,6 +91,31 @@ describe('Codex native request responses', () => {
     })
     expect(questions.find((question) => question.id === 'tags')).toMatchObject({ multiple: true })
     expect(JSON.stringify(questions)).not.toContain('do not use')
+  })
+
+  it('accepts the native nullable required list without requiring or defaulting optional fields', () => {
+    // Codex 0.162.1's generated McpElicitationSchema permits required: null.
+    const optionalForm = {
+      mode: 'form',
+      requestedSchema: {
+        type: 'object',
+        properties: { note: { type: 'string', title: null, description: null, default: 'unused' } },
+        required: null,
+      },
+    }
+    expect(codexElicitationQuestions(optionalForm)).toEqual([
+      expect.objectContaining({ id: 'note', required: false }),
+    ])
+    expect(codexRequestResponse('mcpServer/elicitation/request', optionalForm, true)).toEqual({
+      action: 'accept',
+      content: {},
+      _meta: null,
+    })
+    expect(
+      codexRequestResponse('mcpServer/elicitation/request', optionalForm, true, {
+        note: ['  user answer  '],
+      }).content,
+    ).toEqual({ note: '  user answer  ' })
   })
 
   it.each([
@@ -221,6 +247,140 @@ describe('Codex native request responses', () => {
     })
   })
 
+  it('presents the ordered native choices with their actual scope and maps explicit selections exactly', () => {
+    const execpolicy = {
+      acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm', 'run', 'build'] },
+    }
+    const networkAllow = {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: { host: 'reference.example', action: 'allow' },
+      },
+    }
+    const networkDeny = {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: { host: 'reference.example', action: 'deny' },
+      },
+    }
+    const availableDecisions = [
+      'accept',
+      'acceptForSession',
+      execpolicy,
+      networkAllow,
+      networkDeny,
+      'decline',
+      'cancel',
+    ]
+    const params = { availableDecisions }
+    const choices = codexApprovalChoices(
+      'item/commandExecution/requestApproval',
+      params,
+    ).approvalChoices!
+    expect(choices.map(({ id, label, outcome }) => ({ id, label, outcome }))).toEqual([
+      { id: 'codex-approval:0', label: 'Allow once', outcome: 'approved' },
+      { id: 'codex-approval:1', label: 'Allow for this session', outcome: 'approved' },
+      { id: 'codex-approval:2', label: 'Allow and save command rule', outcome: 'approved' },
+      { id: 'codex-approval:3', label: 'Always allow reference.example', outcome: 'approved' },
+      { id: 'codex-approval:4', label: 'Always deny reference.example', outcome: 'declined' },
+      { id: 'codex-approval:5', label: 'Decline', outcome: 'declined' },
+      { id: 'codex-approval:6', label: 'Cancel this turn', outcome: 'cancelled' },
+    ])
+    expect(choices[1].description).toContain('session approval cache')
+    expect(choices[2].description).toContain(JSON.stringify(['npm', 'run', 'build']))
+    expect(choices[3].description).toContain('persistent')
+    expect(choices[6].description).toContain('interrupts')
+    choices.forEach((choice, index) => {
+      expect(
+        codexRequestResponse('item/commandExecution/requestApproval', params, true, {}, choice.id),
+      ).toEqual({ decision: availableDecisions[index] })
+    })
+  })
+
+  it('keeps offered choice indexes and surfaces unsupported decisions without granting them', () => {
+    const params = {
+      availableDecisions: [
+        { acceptWithExecpolicyAmendment: { execpolicy_amendment: 'not-an-array' } },
+        'acceptForSession',
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'example.test', action: 'allow', extraGrant: true },
+          },
+        },
+        'cancel',
+      ],
+    }
+    expect(codexApprovalChoices('item/commandExecution/requestApproval', params)).toMatchObject({
+      approvalChoices: [{ id: 'codex-approval:1' }, { id: 'codex-approval:3' }],
+      approvalChoicesUnsupported: expect.stringContaining('2 unsupported approval choices'),
+    })
+    for (const decisionId of [
+      'codex-approval:0',
+      'codex-approval:2',
+      'codex-approval:4',
+      'accept',
+      'codex-approval:01',
+    ])
+      expect(() =>
+        codexRequestResponse('item/commandExecution/requestApproval', params, true, {}, decisionId),
+      ).toThrow(/choice|choices/)
+  })
+
+  it('honors empty or malformed advertised lists and keeps the null/absent legacy response', () => {
+    for (const availableDecisions of [[], 'accept', { decision: 'accept' }]) {
+      const params = { availableDecisions }
+      expect(codexApprovalChoices('item/commandExecution/requestApproval', params)).toMatchObject({
+        approvalChoices: [],
+        approvalChoicesUnsupported: expect.any(String),
+      })
+      for (const accepted of [true, false])
+        expect(() =>
+          codexRequestResponse('item/commandExecution/requestApproval', params, accepted),
+        ).toThrow()
+    }
+    for (const availableDecisions of [undefined, null]) {
+      expect(
+        codexApprovalChoices('item/commandExecution/requestApproval', { availableDecisions }),
+      ).toEqual({})
+      expect(
+        codexRequestResponse(
+          'item/commandExecution/requestApproval',
+          { availableDecisions },
+          false,
+        ),
+      ).toEqual({ decision: 'decline' })
+    }
+    expect(() =>
+      codexRequestResponse(
+        'item/commandExecution/requestApproval',
+        {
+          availableDecisions: ['cancel'],
+        },
+        false,
+      ),
+    ).toThrow(/does not offer decline/)
+  })
+
+  it('rejects choice IDs for permissions, input, elicitation, and legacy requests', () => {
+    for (const method of [
+      'item/permissions/requestApproval',
+      'mcpServer/elicitation/request',
+      'item/tool/requestUserInput',
+      'item/commandExecution/requestApproval',
+    ])
+      expect(() => codexRequestResponse(method, {}, true, {}, 'codex-approval:0')).toThrow(
+        /does not offer native approval choices/,
+      )
+  })
+
+  it('does not fabricate an approval response for an unknown native request method', () => {
+    expect(() =>
+      codexRequestResponse(
+        'item/commandExecution/future/requestApproval',
+        { availableDecisions: ['acceptForSession'] },
+        true,
+      ),
+    ).toThrow(/does not support/)
+  })
+
   it('displays the action, reason, working directory and requested permission scope', () => {
     const presentation = codexApprovalPresentation('item/commandExecution/requestApproval', {
       command: 'curl example.test',
@@ -329,6 +489,127 @@ async function fixture() {
 }
 
 describe('Codex server request lifecycle', () => {
+  it('rejects unknown native approval methods instead of offering a fabricated fallback', async () => {
+    const { channel, events, request } = await fixture()
+    request('item/commandExecution/future/requestApproval', {
+      availableDecisions: ['acceptForSession'],
+    })
+    expect(events.some((event) => event.type === 'approval')).toBe(false)
+    expect(channel.sent.findLast((message) => message.id === 'request-1')).toMatchObject({
+      error: { code: -32601 },
+    })
+    expect(channel.sent.findLast((message) => message.id === 'request-1')).not.toHaveProperty(
+      'result',
+    )
+  })
+  it('approves a network-only native choice without adding or changing its advertised policy', async () => {
+    const { agents, channel, events, request, pending } = await fixture()
+    const nativeDecision = {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: { host: 'reference.example', action: 'allow' },
+      },
+    }
+    request('item/commandExecution/requestApproval', {
+      availableDecisions: [nativeDecision, 'cancel'],
+      networkApprovalContext: { host: 'reference.example', protocol: 'https' },
+    })
+    expect(pending().approvalChoices?.map((choice) => choice.label)).toEqual([
+      'Always allow reference.example',
+      'Cancel this turn',
+    ])
+    await agents.respond('local', pending().requestId!, true, undefined, 'codex-approval:0')
+    expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toEqual({
+      decision: nativeDecision,
+    })
+    expect(events.findLast((event) => event.type === 'request-resolved')).toMatchObject({
+      status: 'approved',
+      details: { decisionId: 'codex-approval:0' },
+    })
+  })
+
+  it.each([
+    ['acceptForSession', 'approved'],
+    ['cancel', 'cancelled'],
+    ['decline', 'declined'],
+    [
+      {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: { host: 'example.test', action: 'deny' },
+        },
+      },
+      'declined',
+    ],
+  ])('resolves the selected native %j with its own outcome %s', async (decision, outcome) => {
+    const { agents, channel, events, request, pending } = await fixture()
+    request('item/commandExecution/requestApproval', { availableDecisions: [decision] })
+    await agents.respond('local', pending().requestId!, true, undefined, 'codex-approval:0')
+    expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toEqual({
+      decision,
+    })
+    expect(events.findLast((event) => event.type === 'request-resolved')?.status).toBe(outcome)
+  })
+
+  it('keeps a rejected choice pending and sends nothing until an exact offered choice is selected', async () => {
+    const { agents, channel, events, request, pending } = await fixture()
+    request('item/commandExecution/requestApproval', {
+      availableDecisions: [
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'example.test', action: 'grant-all' },
+          },
+        },
+        'acceptForSession',
+        'decline',
+      ],
+    })
+    const requestId = pending().requestId!
+    for (const decisionId of ['codex-approval:0', 'codex-approval:99', 'acceptForSession'])
+      await expect(agents.respond('local', requestId, true, undefined, decisionId)).rejects.toThrow(
+        /choice|choices/,
+      )
+    expect(channel.sent.some((message) => message.id === 'request-1')).toBe(false)
+    expect(events.some((event) => event.type === 'request-resolved')).toBe(false)
+    await agents.respond('local', requestId, false, undefined, 'codex-approval:2')
+    expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toEqual({
+      decision: 'decline',
+    })
+    await expect(
+      agents.respond('local', requestId, false, undefined, 'codex-approval:2'),
+    ).rejects.toThrow(/no longer pending/)
+  })
+
+  it('stops a native request that offers no decline without granting or saving a policy', async () => {
+    const { agents, channel, events, request, pending } = await fixture()
+    request('item/commandExecution/requestApproval', {
+      availableDecisions: [
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'example.test', action: 'allow' },
+          },
+        },
+      ],
+    })
+    const requestId = pending().requestId!
+    await agents.stop('local')
+    expect(channel.sent.some((message) => message.id === 'request-1')).toBe(false)
+    expect(channel.sent.some((message) => message.method === 'turn/interrupt')).toBe(true)
+    expect(events.findLast((event) => event.type === 'request-resolved')).toMatchObject({
+      requestId,
+      status: 'cancelled',
+    })
+  })
+
+  it('uses an advertised cancel when stopping a native request', async () => {
+    const { agents, channel, request } = await fixture()
+    request('item/commandExecution/requestApproval', {
+      availableDecisions: ['acceptForSession', 'cancel'],
+    })
+    await agents.stop('local')
+    expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toEqual({
+      decision: 'cancel',
+    })
+  })
+
   it('routes native permission requests and replies with the requested turn-scoped subset', async () => {
     const { agents, channel, request, pending } = await fixture()
     request('item/permissions/requestApproval', {
@@ -389,6 +670,40 @@ describe('Codex server request lifecycle', () => {
     expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toMatchObject({
       action: 'accept',
       content: { name: 'Ada', count: 2, enabled: true, choice: 'a' },
+    })
+  })
+
+  it('keeps a native optional-only MCP form pending until the user answers it', async () => {
+    const { agents, channel, request, pending, events } = await fixture()
+    request('mcpServer/elicitation/request', {
+      mode: 'form',
+      serverName: 'reference',
+      message: 'An optional note',
+      requestedSchema: {
+        type: 'object',
+        properties: { note: { type: 'string' } },
+        required: null,
+      },
+    })
+    expect(pending()).toMatchObject({
+      type: 'question',
+      questions: [expect.objectContaining({ id: 'note', required: false })],
+    })
+    expect(channel.sent.some((message) => message.id === 'request-1')).toBe(false)
+    expect(
+      events.some(
+        (event) =>
+          event.details &&
+          typeof event.details === 'object' &&
+          'declined' in event.details &&
+          event.details.declined,
+      ),
+    ).toBe(false)
+    await agents.respond('local', pending().requestId!, true, {})
+    expect(channel.sent.findLast((message) => message.id === 'request-1')?.result).toEqual({
+      action: 'accept',
+      content: {},
+      _meta: null,
     })
   })
 

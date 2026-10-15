@@ -5,7 +5,7 @@ const { createServer } = require('node:http')
 const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 const { appMockSource } = require('./helpers/app-workflow-fixture.cjs')
 

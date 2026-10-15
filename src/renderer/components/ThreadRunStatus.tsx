@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Thread } from '../state'
 import { threadTurnStartedAt } from '../thread-presentation'
 
@@ -14,7 +14,7 @@ function elapsed(milliseconds: number): string {
 }
 export function ThreadRunStatus({ thread }: { thread: Thread }) {
   const [now, setNow] = useState(Date.now)
-  const started = threadTurnStartedAt(thread)
+  const started = useMemo(() => threadTurnStartedAt(thread), [thread.messages, thread.turn])
   useEffect(() => {
     if (!thread.busy || !started) return
     setNow(Date.now())

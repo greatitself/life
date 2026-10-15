@@ -10,8 +10,13 @@ const subscribe = <T>(channel: string, callback: (data: T) => void) => {
 const api: RelayAPI = {
   platform: process.platform,
   conversations: {
+    supportsMessageFields: true,
+    supportsMessageAppends: true,
     load: () => ipcRenderer.invoke('conversations:load'),
-    save: (threads, savedAt) => ipcRenderer.invoke('conversations:save', threads, savedAt),
+    loadEncoded: () => ipcRenderer.invoke('conversations:loadEncoded'),
+    save: (threads, savedAt, projectionAdmissions) =>
+      ipcRenderer.invoke('conversations:save', threads, savedAt, projectionAdmissions),
+    checkpoint: (input) => ipcRenderer.invoke('conversations:checkpoint', input),
   },
   hostHistory: {
     list: (input) => ipcRenderer.invoke('agent-history:list', input),
@@ -104,13 +109,23 @@ const api: RelayAPI = {
     trust: (id, accepted) => ipcRenderer.invoke('connection:trust', id, accepted),
   },
   agent: {
+    recoverySupport: () => ipcRenderer.invoke('agent:recovery-support'),
     start: (input) => ipcRenderer.invoke('agent:start', input),
+    recover: (input) => ipcRenderer.invoke('agent:recover', input),
+    reserveRecoveryOwner: (input) => ipcRenderer.invoke('agent:reserve-recovery-owner', input),
+    attestLoadedHistory: (input) => ipcRenderer.invoke('agent:attest-loaded-history', input),
+    prepareRecoveryCache: (input) => ipcRenderer.invoke('agent:prepare-recovery-cache', input),
+    attestRecoveryCache: (input) => ipcRenderer.invoke('agent:attest-recovery-cache', input),
+    updateRecoveryOwner: (input) => ipcRenderer.invoke('agent:update-recovery-owner', input),
+    acknowledgeRecoveryHistory: (input) =>
+      ipcRenderer.invoke('agent:acknowledge-recovery-history', input),
+    performRecoveryAction: (input) => ipcRenderer.invoke('agent:perform-recovery-action', input),
     steer: (input) => ipcRenderer.invoke('agent:steer', input),
     configure: (input) => ipcRenderer.invoke('agent:configure', input),
     stop: (id) => ipcRenderer.invoke('agent:stop', id),
     dispose: (id) => ipcRenderer.invoke('agent:dispose', id),
-    respond: (id, requestId, accepted, answers) =>
-      ipcRenderer.invoke('agent:respond', id, requestId, accepted, answers),
+    respond: (id, requestId, accepted, answers, decisionId) =>
+      ipcRenderer.invoke('agent:respond', id, requestId, accepted, answers, decisionId),
     models: (provider) => ipcRenderer.invoke('agent:models', provider),
     usage: (provider) => ipcRenderer.invoke('agent:usage', provider),
   },

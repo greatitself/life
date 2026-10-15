@@ -4,6 +4,7 @@ import { deflateSync } from 'node:zlib'
 import { lifeStudioContextSchema, type LifeStudioContext } from '../shared/life-studio'
 import { shellQuote } from '../shared/validation'
 import type { SSHConnection } from './ssh'
+import { localOwnedNodeCommand } from './local-owned-runtime'
 
 type StudioConnection = Pick<SSHConnection, 'state' | 'exec'>
 
@@ -250,7 +251,7 @@ const nodeProgram = `eval(require('node:zlib').inflateSync(Buffer.from('${deflat
 const pythonProgram = `import base64,zlib;exec(zlib.decompress(base64.b64decode('${deflateSync(stageContextPythonProgram).toString('base64')}')))`
 const stageContextCommand = `if command -v node >/dev/null 2>&1; then node -e ${shellQuote(nodeProgram)}; elif command -v python3 >/dev/null 2>&1; then python3 -c ${shellQuote(pythonProgram)}; else printf '%s\\n' ${shellQuote('Life Studio requires Node.js or Python 3 on the connected environment.')} >&2; exit 127; fi`
 
-/** Stage app instructions without a project; the remote machine needs Node.js or Python 3. */
+/** Stage app instructions without a project, using the bundled runtime for Local. */
 export async function stageStudioContext(
   ssh: StudioConnection,
   sessionId: string,
@@ -271,7 +272,8 @@ export async function stageStudioContext(
       profile?.id !== identity?.id ||
       profile?.host !== identity?.host ||
       profile?.username !== identity?.username ||
-      profile?.port !== identity?.port
+      profile?.port !== identity?.port ||
+      profile?.transport !== identity?.transport
     )
       throw new Error('Connect to the Life Studio environment first')
   }
@@ -292,7 +294,11 @@ export async function stageStudioContext(
   const input = JSON.stringify({ home, session, context: parsed })
   if (Buffer.byteLength(input) > 20_000_000)
     throw new Error('Life Studio context exceeds its input limit')
-  const output = await ssh.exec(stageContextCommand, {
+  const command =
+    initial.profile?.transport === 'local'
+      ? localOwnedNodeCommand(nodeProgram)
+      : stageContextCommand
+  const output = await ssh.exec(command, {
     signal,
     input,
     timeoutMs: 30_000,

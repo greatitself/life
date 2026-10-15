@@ -1,16 +1,18 @@
 # Life
 
-Life is an Electron desktop research workspace for **Codex and Claude Code**, with SSH connections, an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
+Life is an Electron desktop research workspace for **Codex and Claude Code**, with a default Local environment and SSH connections, an agent interface inspired by [T3 Code](https://github.com/pingdotgg/t3code), a separate Research workspace, and **Life Studio** for prompt-driven application customization.
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Desktop installers are included in the [v0.12.0 release](https://github.com/greatitself/life/releases/tag/v0.12.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned.
+Desktop installer download target: [v0.13.0 release](https://github.com/greatitself/life/releases/tag/v0.13.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned. Publication is pending completion of the release verification pipeline.
 
 ## Upgrade your installed Life
 
 If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the existing installation and preserves profiles, pinned SSH fingerprints, and conversation history. Keep the same installation location. You do not need to uninstall Life.
 
-From **0.2.2**, open **Updates** to check, download, and restart into subsequent releases, including **0.12.0**. Windows and Linux AppImage support in-app updates. From 0.11.0, updates prepare in the background by default; turn off **Download updates automatically** to choose when to download. Restart remains your choice. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.11.1** for this release, and reports the complete installation/upgrade time while requiring installation identity, saved data, payload verification, and cleanup checks to pass. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+From **0.2.2**, open **Updates** to check, download, and restart into subsequent published releases. Windows and Linux AppImage support in-app updates. From 0.11.0, updates prepare in the background by default; turn off **Download updates automatically** to choose when to download. Restart remains your choice. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.12.0** for the 0.13.0 release, and reports the complete installation/upgrade time while requiring installation identity, saved data, payload verification, and cleanup checks to pass. Local source revisions and extension files remain in Life’s data directory when the installer updates.
+
+Life 0.13 adds native Local execution with a real terminal, moves asynchronous services to Effect, and strengthens large-history loading, streaming checkpoints, and conversation ownership. Its active-recovery candidate records the original provider process and session, numbered input delivery, and native permission ownership rather than launching replacement work. Native Local execution requires a POSIX shell; Windows continues to support SSH environments. The [0.13.0 release notes](docs/release-notes-v0.13.0.md) retain the pending final recovery, performance, and Windows compatibility gates.
 
 Life 0.12 brings pinned threads, stable manual ordering, unread completion indicators, compact settled/snoozed/archive sections, reversible thread arrangement, and recovered composer drafts with their attachments. Completed responses keep their full activity available to expand, with file changes shown when reported. The [0.12.0 release notes](docs/release-notes-v0.12.0.md) describe the thread behavior adapted from the inspected T3 Code reference.
 
@@ -70,6 +72,16 @@ Bundles contain extension code and dependency metadata, without Life’s saved c
 
 Signing is deferred until publisher credentials are available. Current Windows and macOS installers remain unsigned, and platform trust warnings may still appear. See [signing setup](docs/signing.md) for trusted Windows signing, macOS Developer ID signing and notarization, and Linux distribution details. Signing does not guarantee immediate Windows SmartScreen reputation.
 
+## Use the Local environment
+
+On Linux and macOS, a fresh Life profile opens **Local** automatically. Local uses the computer running Electron: its installed Codex and Claude Code CLIs, existing account configuration, files, Git, and interactive terminal. It needs no SSH server, keys, password, or host fingerprint. Choose a project from the environment header; a remembered Local project is restored on subsequent launches.
+
+Life checks installed provider versions in the background. Files and the terminal remain available while that check runs or fails. Install and sign in to the desired CLI using the terminal. Life-owned staging, attachments, history readers, and provider brokers use Electron's bundled Node runtime; they do not require a separate Node or Python installation for Local.
+
+**Connections** always includes Local alongside your saved SSH machines. An explicitly selected SSH machine keeps its selection after restart and requests credentials when required. Local has its own persistent identity, so a conversation or permission request cannot be mistaken for an SSH connection to localhost. Native Local execution currently requires a POSIX shell; Windows continues to support SSH environments.
+
+When accessing Life through noVNC, Local runs on the development host running Electron. Choose an SSH environment to use another computer. The browser does not execute your laptop's CLIs or read its files.
+
 ## Connect a research machine
 
 1. Click **Connect a machine** or **Connect** on the map.
@@ -87,7 +99,7 @@ Jump hosts use OpenSSH with key/agent authentication and must already be trusted
 
 Profiles save connection details, key **paths**, and the last selected project. Passwords, passphrases, and key contents are never saved. A changed pinned target fingerprint fails the connection. One SSH connection is active at a time; multiple agent threads can use it. Connecting does not require a project folder, and automatic forwarding starts before project selection. Selecting a saved thread restores its original project on the current machine. Saved key, agent and SSH-config profiles can reconnect automatically; missing passwords or passphrases still require the connection dialog. Rapid navigation is serialized so an older request cannot send a prompt to the wrong project.
 
-Unexpected SSH interruption leaves a running provider in a detached remote broker. Life retries the same machine using credentials held only in memory, then catches up from its output journal without resending the prompt. The remote host needs Node.js, `nodejs`, or Python 3 for this broker; no additional npm or pip package is needed. Explicit disconnect stops automatic reconnecting. Host shutdown, a terminated provider, or restarting the Life process is different from an SSH interruption; Life does not silently restart work. See [connection continuity](docs/conversations-and-research.md#connection-continuity).
+Unexpected SSH interruption leaves a running provider in a detached remote broker. Life retries the same machine using credentials held only in memory, then catches up from its output journal without resending the prompt. The remote host needs Node.js, `nodejs`, or Python 3 for this broker; no additional npm or pip package is needed. Explicit disconnect stops automatic reconnecting. The active-recovery candidate also records ownership needed to reattach the original surviving broker after a Life restart. A broker acceptance or pipe-delivery receipt does not prove that the provider processed a command; native replies provide separate evidence. Missing brokers, host shutdown, terminated providers, unsupported contracts, and foreign or uncertain ownership cannot authorize replacement work or an approval. Restored queues stay paused, and prompts and approvals are not automatically replayed. See [connection continuity](docs/conversations-and-research.md#connection-continuity) and [native active-session recovery](docs/native-active-recovery.md).
 
 Project browsing, selection and remote execution have deadlines and settle when the connection closes. Codex resumes request thread metadata without downloading its entire remote history; Life keeps the displayed conversation locally. Invalid or oversized provider frames report a transport error rather than silently turning into a login timeout. Large activity diffs use bounded previews with complete output available separately, and late React errors show a recoverable interface instead of an empty window. Native recovery remains available even when a renderer stops responding. Emergency extension recovery opens one review dialog and keeps SSH disconnected; saved threads remain available for normal selection afterward.
 
@@ -111,15 +123,23 @@ curl -fsSL https://claude.ai/install.sh | bash
 claude auth login
 ```
 
-Life starts the installed CLI through SSH, using its remote account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard local CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
+Life starts the installed CLI in the selected Local or SSH environment, using that machine's account and configuration. Codex uses its [app-server protocol](https://developers.openai.com/codex/app-server/); Claude uses its [streaming CLI](https://code.claude.com/docs/en/headless). The login shell must find the CLIs; Life also checks standard CLI installation paths. Use the terminal for setup, then reconnect to refresh detection.
 
 Life discovers models from the connected Codex or Claude Code CLI. Reasoning-effort and speed controls follow the selected model's advertised capabilities; supported choices are saved per thread. They remain editable during a response and use provider controls without stopping the turn or inserting a message. Codex versions with live settings support apply changes at the next model step; older versions use the next turn. Claude model and effort changes apply at subsequent model requests, while its Fast mode changes on the next turn. The desktop controls update immediately without routine settings notices. Changing models clears unsupported choices to the provider default, and Life never selects a paid fast tier automatically. Availability depends on the CLI version, account, and managed policy.
 
-The access menu uses each provider's native terminology and omits Plan: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
+The access menu uses each provider's native terminology: Codex offers **Ask for approval**, **Read-only**, **Approve for me**, and **Full access**; Claude Code offers **Manual**, **Accept edits**, **Plan**, **Auto**, **Don't ask**, and **Bypass permissions**. Advanced source or extension features can pass validated Codex thread/turn options or Claude settings/arguments through the `providerOptions` input to `agent.start`. Life retains control of its session, project directory, streaming format, and approval plumbing.
 
 Remote text previews are limited to 1 MB and confined to the connected project, including resolved symbolic links. Git shows tracked changes against `HEAD` and lists untracked files. Agents and Research histories checkpoint atomically to `conversations.json` in Life's user-data directory, including during continuous streaming and before native close or reload. Existing browser history migrates automatically; a full browser cache cannot block disk saves. Restored queues stay paused, and original provider records remain unchanged. Project maps and separate Studio histories retain their local storage. See [saved conversations and recovery](docs/conversations-and-research.md#saved-conversations-and-recovery).
 
 ## Run and build
+
+The 0.13.0 release candidate uses Effect for native services, scoped SSH commands,
+Codex requests, persistence, provider metadata, and typed failures. See the
+[Effect architecture](docs/effect-architecture.md) and
+[renderer performance checks](docs/renderer-performance.md) for migration scope,
+verification, and measurement limits.
+
+The current isolated Linux Codex streaming-restart fixture passed; Claude approval recovery remains unresolved (`PENDING_CLAUDE_APPROVAL_RECOVERY`). Final merged native counts (`PENDING_FINAL_MERGED_NATIVE_COUNTS`), matched performance (`PENDING_MATCHED_PERFORMANCE`), and Windows directory-durability/native-recovery compatibility (`PENDING_WINDOWS_NATIVE_RECOVERY_COMPATIBILITY`) remain pending. Historical performance measurements keep their original frozen-graph scope. Publication remains pending completion of those final gates.
 
 Use Node.js **22.12 or newer**:
 
@@ -127,6 +147,10 @@ Use Node.js **22.12 or newer**:
 npm ci
 npm run dev
 ```
+
+For a feedback session against an already built native host, run
+`npm run dev -- --rendererOnly`. Interface changes use Vite hot reload; native updates
+use a controlled restart. See [live feedback](docs/live-feedback.md) for the workflow.
 
 ```bash
 npm run build
@@ -144,6 +168,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:desktop
+npm run test:performance
 npm run format:check
 ```
 

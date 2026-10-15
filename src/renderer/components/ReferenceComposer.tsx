@@ -79,6 +79,12 @@ const nativePermissionChoices = (provider: Provider): PermissionChoice[] =>
           icon: PenLine,
         },
         {
+          id: 'plan',
+          name: 'Plan',
+          description: 'Explore the project and prepare a plan before making changes.',
+          icon: ClipboardList,
+        },
+        {
           id: 'auto',
           name: 'Auto',
           description:

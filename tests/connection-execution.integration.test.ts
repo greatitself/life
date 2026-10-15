@@ -1,8 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, readFile, rm, symlink } from 'node:fs/promises'
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { executeConnectionCommand } from '../src/main/connection-execution'
+import { Cause, Effect, Exit } from 'effect'
+import {
+  executeConnectionCommand,
+  executeConnectionCommandEffect,
+} from '../src/main/connection-execution'
 import { SSHConnection } from '../src/main/ssh'
 import { Store } from '../src/main/store'
 import type { ConnectionExecutionInput, HostKeyRequest } from '../src/shared/types'
@@ -166,6 +170,8 @@ describe('connected project command execution over real SSH', () => {
     { command: 'printf unreachable', timeoutMs: Number.POSITIVE_INFINITY },
     { command: 'printf unreachable', workspace: '' },
     { command: 'printf unreachable', workspace: '/invalid\0directory' },
+    { command: 'printf unreachable', workspace: '/invalid\ndirectory' },
+    { command: 'printf unreachable', unrecognized: true },
   ])('validates commands and limits before remote execution %#', async (input) => {
     await connect()
     const commandCount = fixture.commands.length
@@ -256,6 +262,53 @@ describe('connected project command execution over real SSH', () => {
     expect(Date.now() - beforeDisconnect).toBeLessThan(2000)
     await waitFor(() => !processExists(pid))
     expect(connection.state.status).toBe('disconnected')
+    expect(connection.listenerCount('workspace-changing')).toBe(0)
+    expect(connection.listenerCount('disconnected')).toBe(0)
+  })
+
+  it('interrupts only the owned SSH command and releases its listeners before returning', async () => {
+    await connect()
+    const filename = '.effect-interrupted-command-pid-' + sequence
+    const controller = new AbortController()
+    const interrupted = Effect.runPromiseExit(
+      executeConnectionCommandEffect(connection, {
+        command: `printf '%s' "$$" > ${filename}; exec sleep 30`,
+      }),
+      { signal: controller.signal },
+    )
+    const pid = await commandPid(filename)
+    const release = filename + '-release'
+    const concurrent = executeConnectionCommand(connection, {
+      command: `while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; printf independent-command`,
+    })
+    await waitFor(() => connection.listenerCount('disconnected') === 2)
+    controller.abort()
+    const exit = await interrupted
+    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+    expect(connection.listenerCount('workspace-changing')).toBe(1)
+    expect(connection.listenerCount('disconnected')).toBe(1)
+    await waitFor(() => !processExists(pid))
+    await writeFile(join(fixture.workspace, release), '')
+    await expect(concurrent).resolves.toBe('independent-command')
+    expect(connection.state).toMatchObject({ status: 'connected', workspace: fixture.workspace })
+    expect(connection.listenerCount('workspace-changing')).toBe(0)
+    expect(connection.listenerCount('disconnected')).toBe(0)
+    await expect(
+      executeConnectionCommand(connection, { command: 'printf after-interruption' }),
+    ).resolves.toBe('after-interruption')
+  })
+
+  it('does not dispatch a request whose Effect runtime was already interrupted', async () => {
+    await connect()
+    const commandCount = fixture.commands.length
+    const controller = new AbortController()
+    controller.abort()
+    const exit = await Effect.runPromiseExit(
+      executeConnectionCommandEffect(connection, { command: 'printf unreachable' }),
+      { signal: controller.signal },
+    )
+    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+    expect(fixture.commands).toHaveLength(commandCount)
     expect(connection.listenerCount('workspace-changing')).toBe(0)
     expect(connection.listenerCount('disconnected')).toBe(0)
   })

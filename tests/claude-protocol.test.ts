@@ -1,14 +1,80 @@
 import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import type { ClientChannel } from 'ssh2'
+import { describe, expect, it, vi } from 'vitest'
 import {
   claudeAdvisoryEvent,
   claudeLaunchCommand,
+  claudeMetadataControls,
   claudeRestoresUsageTotals,
   ClaudeMessageBlocks,
 } from '../src/main/claude-protocol'
+
+describe('Claude metadata transport', () => {
+  function fixture() {
+    const channel = new EventEmitter() as EventEmitter & {
+      stderr: EventEmitter
+      destroyed: boolean
+      write: ReturnType<typeof vi.fn>
+    }
+    channel.stderr = new EventEmitter()
+    channel.destroyed = false
+    channel.write = vi.fn()
+    return { channel, controls: claudeMetadataControls(channel as unknown as ClientChannel) }
+  }
+
+  it.each([
+    ['malformed', '{"type":invalid}\n', /invalid protocol message/],
+    ['oversized', '{"type":"' + 'x'.repeat(8_000_001), /larger than the protocol limit/],
+  ])(
+    'rejects pending metadata immediately for %s frames and clears deadlines',
+    async (_name, output, error) => {
+      vi.useFakeTimers()
+      const { channel, controls } = fixture()
+      try {
+        const request = controls.request({ subtype: 'initialize' }, 60000)
+        const rejected = expect(request).rejects.toThrow(error)
+        channel.emit('data', Buffer.from(output))
+        await rejected
+        expect(vi.getTimerCount()).toBe(0)
+        await expect(controls.request({ subtype: 'get_usage' })).rejects.toThrow(error)
+        expect(channel.write).toHaveBeenCalledOnce()
+      } finally {
+        controls.close()
+        vi.useRealTimers()
+      }
+    },
+  )
+
+  it('ignores login banners, accepts metadata, and releases every listener when closed', async () => {
+    const { channel, controls } = fixture()
+    const request = controls.request({ subtype: 'initialize' })
+    const message = JSON.parse(channel.write.mock.calls[0][0])
+    channel.emit('data', Buffer.from('Welcome to the research server\n'))
+    channel.emit(
+      'data',
+      Buffer.from(
+        JSON.stringify({
+          type: 'control_response',
+          response: {
+            subtype: 'success',
+            request_id: message.request_id,
+            response: { models: [{ value: 'sonnet' }] },
+          },
+        }) + '\n',
+      ),
+    )
+    await expect(request).resolves.toEqual({ models: [{ value: 'sonnet' }] })
+    controls.close()
+    for (const event of ['data', 'error', 'close']) expect(channel.listenerCount(event)).toBe(0)
+    expect(channel.stderr.listenerCount('data')).toBe(0)
+    await expect(controls.request({ subtype: 'get_usage' })).rejects.toThrow(/cancelled/)
+    expect(channel.write).toHaveBeenCalledOnce()
+  })
+})
 
 describe('Claude launch permissions', () => {
   it.each([
@@ -247,6 +313,51 @@ describe('Claude content-block reconciliation', () => {
     )[0]
     expect(delta.itemId).toBe('child-message:block:2')
     expect(blocks.text('child-message', 'delegate')).toBe('First second')
+  })
+
+  it('releases a completed child transcript while retaining replay deduplication and live siblings', () => {
+    const blocks = new ClaudeMessageBlocks()
+    const complete = { id: 'child-message', content: [{ type: 'text', text: 'Completed child' }] }
+    blocks.assistant(complete, 'complete-envelope', 'completed-child')
+    blocks.stream({ type: 'message_start', message: { id: 'live-message' } }, 'live-child')
+    blocks.stream(
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Still ' } },
+      'live-child',
+    )
+    blocks.retireStream('completed-child')
+    blocks.resetRoot()
+    expect(blocks.assistant(complete, 'complete-envelope', 'completed-child')).toEqual([])
+    expect(blocks.text('child-message', 'completed-child')).toBe('')
+    expect(
+      blocks.stream(
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'working' } },
+        'live-child',
+      ),
+    ).toEqual([{ type: 'text', itemId: 'live-message', text: 'working' }])
+    expect(blocks.text('live-message', 'live-child')).toBe('Still working')
+    expect(
+      blocks.assistant(
+        { id: 'resumed-message', content: [{ type: 'text', text: 'Resumed child' }] },
+        'resumed-envelope',
+        'completed-child',
+      ),
+    ).toEqual([
+      { type: 'text', itemId: 'resumed-message', text: 'Resumed child', status: 'replace' },
+    ])
+  })
+
+  it('bounds replay tracking across thousands of completed child streams', () => {
+    const blocks = new ClaudeMessageBlocks()
+    for (let index = 0; index < 4200; index++) {
+      blocks.assistant(
+        { id: `message-${index}`, content: [{ type: 'text', text: 'Completed child' }] },
+        `envelope-${index}`,
+        `child-${index}`,
+      )
+      blocks.retireStream(`child-${index}`)
+    }
+    expect(blocks.hasEnvelope('envelope-4199', 'child-4199')).toBe(true)
+    expect(blocks.hasEnvelope('envelope-0', 'child-0')).toBe(false)
   })
 })
 

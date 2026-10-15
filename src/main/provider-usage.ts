@@ -1,17 +1,58 @@
+import { Effect, Option, Schema } from 'effect'
 import type { ProviderUsageSnapshot, UsageRateLimit, UsageRateWindow } from '../shared/usage'
 
-type Wire = Record<string, unknown>
-const object = (value: unknown): Wire =>
-  value && typeof value === 'object' && !Array.isArray(value) ? (value as Wire) : {}
-const string = (value: unknown) => (typeof value === 'string' ? value : undefined)
-const number = (value: unknown) =>
-  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+// Native notifications are sparse. A malformed field must not reject a valid sibling
+// or remove previously reported metadata, so validation recovers at each field.
+const sparse = <S extends Schema.Constraint>(schema: S) =>
+  Schema.optional(schema).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some(undefined))))
+const NonNegativeNumber = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
+const RateWindowWire = Schema.Struct({
+  usedPercent: sparse(NonNegativeNumber),
+  windowDurationMins: sparse(NonNegativeNumber),
+  resetsAt: sparse(NonNegativeNumber),
+})
+const RateLimitWire = Schema.Struct({
+  limitId: sparse(Schema.String),
+  limitName: sparse(Schema.String),
+  planType: sparse(Schema.String),
+  normalModelSlug: sparse(Schema.String),
+  primary: sparse(RateWindowWire),
+  secondary: sparse(RateWindowWire),
+  spendControlReached: sparse(Schema.Boolean),
+  rateLimitReachedType: sparse(Schema.String),
+  individualLimit: sparse(
+    Schema.Struct({
+      limit: Schema.String,
+      used: Schema.String,
+      remainingPercent: sparse(NonNegativeNumber),
+      resetsAt: sparse(NonNegativeNumber),
+    }),
+  ),
+  credits: sparse(
+    Schema.Struct({
+      hasCredits: Schema.Boolean,
+      unlimited: Schema.Boolean,
+      balance: sparse(Schema.String),
+    }),
+  ),
+})
+const UsageWire = Schema.Struct({
+  accountId: sparse(Schema.String),
+  ordinaryUsageAllowed: sparse(Schema.Boolean),
+  rateLimits: sparse(RateLimitWire),
+  rateLimitsByLimitId: sparse(Schema.Record(Schema.String, sparse(RateLimitWire))),
+  rateLimitResetCredits: sparse(Schema.Struct({ availableCount: sparse(NonNegativeNumber) })),
+})
+const decodeUsage = Schema.decodeUnknownOption(UsageWire)
+type RateLimitWire = typeof RateLimitWire.Type
+type RateWindowWire = typeof RateWindowWire.Type
 
-function rateWindow(value: unknown, previous?: UsageRateWindow): UsageRateWindow | undefined {
-  const wire = object(value)
-  const usedPercent = number(wire.usedPercent)
-  const windowDurationMins = number(wire.windowDurationMins)
-  const resetsAt = number(wire.resetsAt)
+function rateWindow(
+  wire: RateWindowWire | undefined,
+  previous?: UsageRateWindow,
+): UsageRateWindow | undefined {
+  if (!wire) return previous
+  const { usedPercent, windowDurationMins, resetsAt } = wire
   if (usedPercent === undefined && windowDurationMins === undefined && resetsAt === undefined)
     return previous
   return {
@@ -22,48 +63,44 @@ function rateWindow(value: unknown, previous?: UsageRateWindow): UsageRateWindow
   }
 }
 
-function rateLimit(value: unknown, key: string, previous?: UsageRateLimit): UsageRateLimit {
-  const wire = object(value)
+function rateLimit(wire: RateLimitWire, key: string, previous?: UsageRateLimit): UsageRateLimit {
   const primary = rateWindow(wire.primary, previous?.primary)
   const secondary = rateWindow(wire.secondary, previous?.secondary)
-  const credits = object(wire.credits)
-  const individualLimit = object(wire.individualLimit)
+  const { credits, individualLimit } = wire
   return {
     ...(previous || {}),
-    id: string(wire.limitId) || key,
-    ...(string(wire.limitName) ? { label: string(wire.limitName) } : {}),
-    ...(string(wire.planType) ? { planType: string(wire.planType) } : {}),
-    ...(string(wire.normalModelSlug) ? { normalModelSlug: string(wire.normalModelSlug) } : {}),
+    id: wire.limitId || key,
+    ...(wire.limitName ? { label: wire.limitName } : {}),
+    ...(wire.planType ? { planType: wire.planType } : {}),
+    ...(wire.normalModelSlug ? { normalModelSlug: wire.normalModelSlug } : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
-    ...(typeof wire.spendControlReached === 'boolean'
+    ...(wire.spendControlReached !== undefined
       ? { spendControlReached: wire.spendControlReached }
       : {}),
-    ...(string(wire.rateLimitReachedType)
-      ? { rateLimitReachedType: string(wire.rateLimitReachedType) }
-      : {}),
-    ...(typeof individualLimit.limit === 'string' && typeof individualLimit.used === 'string'
+    ...(wire.rateLimitReachedType ? { rateLimitReachedType: wire.rateLimitReachedType } : {}),
+    ...(individualLimit
       ? {
           individualLimit: {
             ...(previous?.individualLimit || {}),
             limit: individualLimit.limit,
             used: individualLimit.used,
-            ...(number(individualLimit.remainingPercent) !== undefined
-              ? { remainingPercent: number(individualLimit.remainingPercent) }
+            ...(individualLimit.remainingPercent !== undefined
+              ? { remainingPercent: individualLimit.remainingPercent }
               : {}),
-            ...(number(individualLimit.resetsAt) !== undefined
-              ? { resetsAt: number(individualLimit.resetsAt) }
+            ...(individualLimit.resetsAt !== undefined
+              ? { resetsAt: individualLimit.resetsAt }
               : {}),
           },
         }
       : {}),
-    ...(typeof credits.hasCredits === 'boolean' && typeof credits.unlimited === 'boolean'
+    ...(credits
       ? {
           credits: {
             ...(previous?.credits || {}),
             hasCredits: credits.hasCredits,
             unlimited: credits.unlimited,
-            ...(string(credits.balance) !== undefined ? { balance: string(credits.balance) } : {}),
+            ...(credits.balance !== undefined ? { balance: credits.balance } : {}),
           },
         }
       : {}),
@@ -72,12 +109,13 @@ function rateLimit(value: unknown, key: string, previous?: UsageRateLimit): Usag
 
 /** Sparse server notifications preserve unavailable account metadata until a fresh read. */
 export function codexUsageSnapshot(
-  result: Wire,
+  result: unknown,
   previous?: ProviderUsageSnapshot,
   rollingUpdate = false,
   fetchedAt = Date.now(),
 ): ProviderUsageSnapshot {
-  const accountId = string(result.accountId) || undefined
+  const wire: typeof UsageWire.Type = Option.getOrElse(decodeUsage(result), () => ({}))
+  const accountId = wire.accountId || undefined
   // A reported account switch must not inherit another account's sparse metadata.
   if (rollingUpdate && accountId && previous?.accountId && accountId !== previous.accountId)
     previous = undefined
@@ -85,29 +123,30 @@ export function codexUsageSnapshot(
     rollingUpdate ? (previous?.limits || []).map((limit) => [limit.id, limit]) : [],
   )
   const updatedBuckets = new Set<string>()
-  for (const [key, value] of Object.entries(object(result.rateLimitsByLimitId))) {
-    if (!value || typeof value !== 'object') continue
-    const id = string(object(value).limitId) || key
+  for (const [key, value] of Object.entries(wire.rateLimitsByLimitId || {})) {
+    if (!value) continue
+    const id = value.limitId || key
     limits.set(id, rateLimit(value, id, rollingUpdate ? limits.get(id) : undefined))
     updatedBuckets.add(id)
   }
-  const legacy = object(result.rateLimits)
-  if (Object.keys(legacy).length) {
-    const id = string(legacy.limitId) || 'codex'
+  const legacy = wire.rateLimits
+  if (legacy && Object.keys(legacy).length) {
+    const id = legacy.limitId || 'codex'
     // The modern map is authoritative when both views contain the same bucket.
     if (!updatedBuckets.has(id))
       limits.set(id, rateLimit(legacy, id, rollingUpdate ? limits.get(id) : undefined))
   }
   const ordinaryUsageAllowed =
-    typeof result.ordinaryUsageAllowed === 'boolean'
-      ? result.ordinaryUsageAllowed
+    wire.ordinaryUsageAllowed !== undefined
+      ? wire.ordinaryUsageAllowed
       : rollingUpdate
         ? previous?.ordinaryUsageAllowed
         : undefined
-  const availableResetCredits = number(object(result.rateLimitResetCredits).availableCount)
-  const accountType = [...limits.values()].find((limit) => limit.planType)?.planType
+  const availableResetCredits = wire.rateLimitResetCredits?.availableCount
+  const buckets = [...limits.values()]
+  const accountType = buckets.find((limit) => limit.planType)?.planType
   const available =
-    [...limits.values()].some(
+    buckets.some(
       (limit) =>
         limit.primary ||
         limit.secondary ||
@@ -122,7 +161,7 @@ export function codexUsageSnapshot(
     provider: 'codex',
     status: available ? 'available' : 'unavailable',
     fetchedAt,
-    limits: [...limits.values()],
+    limits: buckets,
     error: undefined,
     message: undefined,
     ...(accountId ? { accountId } : {}),

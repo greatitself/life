@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, GitPullRequest, RefreshCw } from 'lucide-react'
 import type { ConnectionState } from '../../shared/types'
 import type { Thread } from '../state'
 import { api, errorText } from '../api'
+import { createPullRequestLinksProjector } from '../pull-request-links'
 
 interface PullRequest {
   number: number
@@ -34,16 +35,11 @@ export function PullRequestSurface({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
-  const links = useMemo(() => {
-    const text = thread?.messages.map((message) => message.text).join('\n') || ''
-    return [
-      ...new Set(
-        [
-          ...text.matchAll(/https:\/\/github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/pull\/\d+/g),
-        ].map((match) => match[0]),
-      ),
-    ]
-  }, [thread?.messages])
+  const [projectLinks] = useState(createPullRequestLinksProjector)
+  const links = useMemo(
+    () => projectLinks(thread?.messages, active && linked && !selectedLink),
+    [projectLinks, thread?.messages, active, linked, selectedLink],
+  )
   useEffect(() => {
     setSelectedLink(undefined)
   }, [thread?.id])
@@ -122,21 +118,7 @@ export function PullRequestSurface({
         </button>
       </div>
       {linked && !selectedLink ? (
-        links.length ? (
-          <div className="surface-linked-list">
-            {links.map((url) => (
-              <button key={url} onClick={() => setSelectedLink(url)}>
-                <GitPullRequest size={16} />
-                <span>{url.replace('https://github.com/', '')}</span>
-                <ArrowUpRight size={14} />
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="surface-empty">
-            Pull request links shared in this thread will appear here.
-          </div>
-        )
+        <LinkedPullRequests links={links} onSelect={setSelectedLink} />
       ) : !connected ? (
         <div className="surface-empty">
           Connect a machine and select a project to read its pull requests.
@@ -182,3 +164,25 @@ export function PullRequestSurface({
     </div>
   )
 }
+
+const LinkedPullRequests = memo(function LinkedPullRequests({
+  links,
+  onSelect,
+}: {
+  links: string[]
+  onSelect: (url: string) => void
+}) {
+  return links.length ? (
+    <div className="surface-linked-list">
+      {links.map((url) => (
+        <button key={url} onClick={() => onSelect(url)}>
+          <GitPullRequest size={16} />
+          <span>{url.replace('https://github.com/', '')}</span>
+          <ArrowUpRight size={14} />
+        </button>
+      ))}
+    </div>
+  ) : (
+    <div className="surface-empty">Pull request links shared in this thread will appear here.</div>
+  )
+})

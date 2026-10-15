@@ -288,6 +288,85 @@ describe('provider update status', () => {
     await expect(value.check()).rejects.toThrow('closed')
   })
 
+  it('interrupts both active requests immediately on disposal even when fetch ignores abort', async () => {
+    const signals: AbortSignal[] = []
+    const fetch = vi.fn<typeof globalThis.fetch>((_url, options) => {
+      signals.push(options!.signal!)
+      return new Promise(() => {})
+    })
+    const { value, emit } = controller(() => machine(), { fetch })
+    const pending = value.check()
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    const emissions = emit.mock.calls.length
+    value.dispose()
+    await expect(pending).resolves.toMatchObject({ checking: false })
+    expect(signals.every((signal) => signal.aborted)).toBe(true)
+    expect(emit).toHaveBeenCalledTimes(emissions)
+  })
+
+  it('bounds a stalled response body and releases its reader and network request on timeout', async () => {
+    vi.useFakeTimers()
+    const responses: Response[] = []
+    const signals: AbortSignal[] = []
+    const cancel = vi.fn()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, options) => {
+      signals.push(options!.signal!)
+      const response = new Response(new ReadableStream({ cancel }))
+      responses.push(response)
+      return response
+    })
+    const { value } = controller(() => machine(), { fetch, timeoutMs: 100 })
+    const pending = value.check()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(responses).toHaveLength(2)
+    expect(responses.every((response) => response.body!.locked)).toBe(true)
+    await vi.advanceTimersByTimeAsync(101)
+    const state = await pending
+    expect(state.providers.every((provider) => provider.error?.includes('timed out'))).toBe(true)
+    expect(responses.every((response) => !response.body!.locked)).toBe(true)
+    expect(signals.every((signal) => signal.aborted)).toBe(true)
+    expect(cancel).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not wait for another stream branch to close when rejecting oversized metadata', async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}))
+    const responses: Response[] = []
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      const response = new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.enqueue(new Uint8Array(256 * 1024 + 1))
+          },
+          cancel,
+        }),
+      )
+      responses.push(response)
+      return response
+    })
+    const { value } = controller(() => machine(), { fetch })
+    const state = await value.check()
+    expect(state.providers.every((provider) => provider.error?.includes('size limit'))).toBe(true)
+    expect(cancel).toHaveBeenCalledTimes(2)
+    expect(responses.every((response) => !response.body!.locked)).toBe(true)
+  })
+
+  it('records an already-locked metadata body as an unavailable release instead of rejecting the check', async () => {
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = []
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      const response = new Response(new ReadableStream())
+      readers.push(response.body!.getReader())
+      return response
+    })
+    try {
+      const { value } = controller(() => machine(), { fetch })
+      const state = await value.check()
+      expect(state.providers.every((provider) => provider.status === 'unavailable')).toBe(true)
+      expect(state.providers.every((provider) => provider.error?.includes('locked'))).toBe(true)
+    } finally {
+      for (const reader of readers) reader.releaseLock()
+    }
+  })
+
   it('refreshes automatically updated CLI versions before the daily background advisory without duplicating startup discovery', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-10-10T10:00:00Z'))

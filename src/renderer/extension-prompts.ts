@@ -274,8 +274,10 @@ const extensionCallExamples = [
   { method: 'agent.stop', signature: '(sessionId)', args: 'session-id' },
   {
     method: 'agent.respond',
-    signature: '(sessionId, requestId, accepted, answers?)',
+    signature: '(sessionId, requestId, accepted, answers?, decisionId?)',
     args: ['session-id', 'request-id', true, { questionId: ['selected answer'] }],
+    notes:
+      'The legacy signature (sessionId, requestId, accepted, answers?) remains supported for legacy approvals and questions. For native Codex approval choices, pass the exact id from the pending event approvalChoices as decisionId. Render the advertised label and description so the user explicitly chooses its scope; do not invent an id or infer a broader grant from accepted.',
   },
   { method: 'agent.models', signature: '(provider)', args: 'codex' },
   { method: 'files.list', signature: '(relativePath?)', args: 'src' },

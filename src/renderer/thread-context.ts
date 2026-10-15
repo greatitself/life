@@ -25,7 +25,7 @@ function targetKey(thread: ThreadTarget): string {
   ])
 }
 
-/** Life has one selected SSH workspace. Restore it in order when users switch threads. */
+/** Life has one selected environment and workspace. Restore them in order when switching threads. */
 export class ThreadContextController {
   private generation = 0
   private tail: Promise<unknown> = Promise.resolve()
@@ -41,7 +41,7 @@ export class ThreadContextController {
     return this.pendingCount > 0
   }
 
-  /** Explicit picker selections wait until an older SSH selection has released its lock. */
+  /** Explicit picker selections wait until an older environment selection releases its lock. */
   async settled(): Promise<void> {
     for (;;) {
       const tail = this.tail
@@ -87,19 +87,34 @@ export class ThreadContextController {
             error:
               'This thread’s saved machine is unavailable. Add its connection again to continue.',
           }
-        if (state.status === 'connecting' || profile.auth === 'password')
+        if (
+          profile.transport !== 'local' &&
+          (state.status === 'connecting' || profile.auth === 'password')
+        )
           return { kind: 'credentials', profileId: profile.id }
         try {
           state = await client.connect(
             thread.purpose === 'research' ? { ...profile, workspace: undefined } : profile,
           )
-        } catch {
-          return current() ? { kind: 'credentials', profileId: profile.id } : { kind: 'superseded' }
+        } catch (error) {
+          if (!current()) return { kind: 'superseded' }
+          return profile.transport === 'local'
+            ? {
+                kind: 'unavailable',
+                error: error instanceof Error ? error.message : String(error),
+              }
+            : { kind: 'credentials', profileId: profile.id }
         }
         if (!current()) return { kind: 'superseded' }
       }
       if (state.status !== 'connected' || state.profile?.id !== thread.profileId)
-        return { kind: 'credentials', profileId: thread.profileId }
+        return profiles.find((profile) => profile.id === thread.profileId)?.transport === 'local'
+          ? {
+              kind: 'unavailable',
+              error:
+                state.error || 'Local could not be opened. Try selecting the environment again.',
+            }
+          : { kind: 'credentials', profileId: thread.profileId }
       // Research owns its cwd without selecting it as an Agents project.
       if (thread.purpose === 'research') return { kind: 'ready', connection: state }
       if (!thread.workspace)

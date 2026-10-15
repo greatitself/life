@@ -1,9 +1,177 @@
 import type { AgentQuestion } from '../shared/types'
+import type { ApprovalChoice } from '../shared/approval-decisions'
+import { Option, Schema } from 'effect'
 
 type Wire = Record<string, unknown>
 const object = (value: unknown): Wire =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Wire) : {}
 const string = (value: unknown) => (typeof value === 'string' ? value : '')
+
+const simpleApprovalDecision = Schema.Literals(['accept', 'acceptForSession', 'decline', 'cancel'])
+const commandApprovalDecision = Schema.Union([
+  simpleApprovalDecision,
+  Schema.Struct({
+    acceptWithExecpolicyAmendment: Schema.Struct({
+      execpolicy_amendment: Schema.Array(Schema.String),
+    }),
+  }),
+  Schema.Struct({
+    applyNetworkPolicyAmendment: Schema.Struct({
+      network_policy_amendment: Schema.Struct({
+        host: Schema.NonEmptyString,
+        action: Schema.Literals(['allow', 'deny']),
+      }),
+    }),
+  }),
+])
+type NativeApprovalDecision = typeof commandApprovalDecision.Type
+const decodeCommandApprovalDecision = Schema.decodeUnknownOption(commandApprovalDecision, {
+  onExcessProperty: 'error',
+})
+const decodeFileApprovalDecision = Schema.decodeUnknownOption(simpleApprovalDecision)
+const decodeOfferedDecisions = Schema.decodeUnknownOption(Schema.Array(Schema.Unknown))
+
+function nativeApprovalMethod(method: string) {
+  return (
+    method === 'item/commandExecution/requestApproval' ||
+    method === 'item/fileChange/requestApproval'
+  )
+}
+
+function decodeApprovalDecision(method: string, value: unknown) {
+  return method === 'item/fileChange/requestApproval'
+    ? decodeFileApprovalDecision(value)
+    : decodeCommandApprovalDecision(value)
+}
+
+function approvalChoice(
+  method: string,
+  params: Wire,
+  decision: NativeApprovalDecision,
+  index: number,
+): ApprovalChoice {
+  const id = `codex-approval:${index}`
+  if (decision === 'accept')
+    return {
+      id,
+      label: 'Allow once',
+      description: params.grantRoot
+        ? `Allows these file changes and write access to ${string(params.grantRoot)} for the remainder of this session.`
+        : 'Allows this requested action.',
+      outcome: 'approved',
+    }
+  if (decision === 'acceptForSession')
+    return {
+      id,
+      label: 'Allow for this session',
+      description:
+        method === 'item/fileChange/requestApproval'
+          ? 'Allows these changes and future changes to the same files without prompting in this session.'
+          : 'Allows this action and future prompts in the same session approval cache without prompting.',
+      outcome: 'approved',
+    }
+  if (decision === 'decline')
+    return {
+      id,
+      label: 'Decline',
+      description: 'Declines this action. The agent can continue the turn.',
+      outcome: 'declined',
+    }
+  if (decision === 'cancel')
+    return {
+      id,
+      label: 'Cancel this turn',
+      description: 'Declines this action and immediately interrupts the current turn.',
+      outcome: 'cancelled',
+    }
+  if ('acceptWithExecpolicyAmendment' in decision) {
+    const prefix = decision.acceptWithExecpolicyAmendment.execpolicy_amendment
+    return {
+      id,
+      label: 'Allow and save command rule',
+      description: `Allows this action and saves a persistent rule for future commands matching this prefix: ${JSON.stringify(prefix)}${prefix.length ? '' : ' (matches every command)'}.`,
+      outcome: 'approved',
+    }
+  }
+  const amendment = decision.applyNetworkPolicyAmendment.network_policy_amendment
+  return {
+    id,
+    label: `${amendment.action === 'allow' ? 'Always allow' : 'Always deny'} ${amendment.host}`,
+    description: `Saves a persistent network ${amendment.action} rule for ${amendment.host}, including future requests.`,
+    outcome: amendment.action === 'allow' ? 'approved' : 'declined',
+  }
+}
+
+/** Only project validated native choices; an explicit list never gets fallback grants. */
+export function codexApprovalChoices(
+  method: string,
+  params: Wire,
+): {
+  approvalChoices?: ApprovalChoice[]
+  approvalChoicesUnsupported?: string
+} {
+  if (!nativeApprovalMethod(method) || params.availableDecisions == null) return {}
+  const offered = decodeOfferedDecisions(params.availableDecisions)
+  if (Option.isNone(offered))
+    return {
+      approvalChoices: [],
+      approvalChoicesUnsupported:
+        'Codex supplied an invalid approval choice list. Use the provider client or stop this turn.',
+    }
+  const approvalChoices: ApprovalChoice[] = []
+  let unsupported = 0
+  for (const [index, value] of offered.value.entries()) {
+    const decision = decodeApprovalDecision(method, value)
+    if (Option.isSome(decision))
+      approvalChoices.push(approvalChoice(method, params, decision.value, index))
+    else unsupported++
+  }
+  return {
+    approvalChoices,
+    ...(unsupported || !offered.value.length
+      ? {
+          approvalChoicesUnsupported: unsupported
+            ? `Codex offered ${unsupported} unsupported approval ${unsupported === 1 ? 'choice' : 'choices'}. Use the provider client for those choices.`
+            : 'Codex did not offer a response for this request. Use the provider client or stop this turn.',
+        }
+      : {}),
+  }
+}
+
+function selectedApprovalDecision(method: string, params: Wire, decisionId: string) {
+  if (!nativeApprovalMethod(method) || params.availableDecisions == null)
+    throw new Error('This request does not offer native approval choices.')
+  const offered = decodeOfferedDecisions(params.availableDecisions)
+  if (Option.isNone(offered)) throw new Error('Codex supplied an invalid approval choice list.')
+  for (const [index, value] of offered.value.entries()) {
+    if (`codex-approval:${index}` !== decisionId) continue
+    const decision = decodeApprovalDecision(method, value)
+    if (Option.isNone(decision))
+      throw new Error('This native approval choice is unsupported or malformed.')
+    return decision.value
+  }
+  throw new Error('Choose one of the native approval choices offered for this request.')
+}
+
+/** Stop may choose native cancellation, but never silently persist a deny policy. */
+export function codexApprovalStopDecisionId(
+  method: string,
+  params: Wire,
+): string | null | undefined {
+  if (!nativeApprovalMethod(method) || params.availableDecisions == null) return undefined
+  const offered = decodeOfferedDecisions(params.availableDecisions)
+  if (Option.isNone(offered)) return null
+  for (const decision of ['cancel', 'decline']) {
+    const index = offered.value.indexOf(decision)
+    if (index !== -1) return `codex-approval:${index}`
+  }
+  return null
+}
+
+export function codexApprovalResponseOutcome(result: Wire): ApprovalChoice['outcome'] | undefined {
+  const decision = decodeCommandApprovalDecision(result.decision)
+  return Option.isSome(decision) ? approvalChoice('', {}, decision.value, 0).outcome : undefined
+}
 
 type FormQuestion = AgentQuestion & {
   required: boolean
@@ -54,7 +222,7 @@ function formSchema(params: Wire) {
       'Life cannot display this MCP form schema. Decline it or use the provider client.',
     )
   const properties = object(schema.properties)
-  if (schema.required !== undefined && !Array.isArray(schema.required))
+  if (schema.required != null && !Array.isArray(schema.required))
     throw new Error('This MCP form has invalid required fields.')
   const required = Array.isArray(schema.required) ? schema.required : []
   if (required.some((key) => typeof key !== 'string' || !Object.hasOwn(properties, key)))
@@ -237,7 +405,10 @@ export function codexRequestResponse(
   params: Wire,
   accepted: boolean,
   answers: Record<string, string[]> = {},
+  decisionId?: string,
 ): Wire {
+  if (decisionId !== undefined)
+    return { decision: selectedApprovalDecision(method, params, decisionId) }
   if (method === 'item/permissions/requestApproval') {
     const requested = object(params.permissions)
     return {
@@ -264,15 +435,19 @@ export function codexRequestResponse(
         Object.entries(accepted ? answers : {}).map(([key, value]) => [key, { answers: value }]),
       ),
     }
+  if (!nativeApprovalMethod(method))
+    throw new Error('Life does not support this native approval request.')
   const decision = accepted ? 'accept' : 'decline'
-  if (
-    accepted &&
-    Array.isArray(params.availableDecisions) &&
-    !params.availableDecisions.includes(decision)
-  )
-    throw new Error(
-      'This request does not offer approval for one action. Decline it or use the provider client.',
-    )
+  if (params.availableDecisions != null) {
+    const offered = decodeOfferedDecisions(params.availableDecisions)
+    if (Option.isNone(offered)) throw new Error('Codex supplied an invalid approval choice list.')
+    if (!offered.value.includes(decision))
+      throw new Error(
+        accepted
+          ? 'This request does not offer approval for one action. Choose an offered native response.'
+          : 'This request does not offer decline. Choose an offered native response.',
+      )
+  }
   return { decision }
 }
 
@@ -292,7 +467,9 @@ export function codexApprovalPresentation(method: string, params: Wire) {
     string(params.command),
     string(params.reason),
     params.cwd ? `Working directory: ${string(params.cwd)}` : '',
-    params.grantRoot ? `Requested write access: ${string(params.grantRoot)}` : '',
+    params.grantRoot
+      ? `Requested write access for the remainder of this session: ${string(params.grantRoot)}`
+      : '',
     network.host
       ? `Network destination: ${string(network.protocol)}://${string(network.host)}`
       : '',

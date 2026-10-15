@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { posix } from 'node:path'
 import { z } from 'zod'
+import { Schema } from 'effect'
 import type { ClientChannel } from 'ssh2'
 import type { ConnectionState, Provider } from '../shared/types'
 import type {
@@ -13,6 +14,7 @@ import { hostHistoryWorkspacePurpose } from '../shared/agent-history'
 import { shellQuote } from '../shared/validation'
 import { LIFE_VERSION } from '../shared/version'
 import { CodexRPC, CodexRequestError } from './codex-rpc'
+import { localOwnedNodeCommand } from './local-owned-runtime'
 
 type Wire = Record<string, unknown>
 const object = (value: unknown): Wire =>
@@ -63,7 +65,7 @@ interface HistorySSH {
   state: ConnectionState
   exec(
     command: string,
-    options?: { signal?: AbortSignal; maxOutputBytes?: number; timeoutMs?: number },
+    options?: { signal?: AbortSignal; maxOutputBytes?: number; timeoutMs?: number; input?: string },
   ): Promise<string>
   channel(
     command: string,
@@ -83,6 +85,152 @@ interface Descriptor {
   parentRemoteId?: string
   summary?: HostHistorySession
 }
+
+const localIndexStatus = Schema.decodeUnknownSync(Schema.Literals(['COMPLETE', 'LIMITED']))
+
+// These fixed, read-only programs receive paths on stdin. Local history needs
+// neither a PATH runtime nor external find/stat/base64 utilities.
+const localHistoryIndex = String.raw`
+const fs = require('node:fs/promises');
+const path = require('node:path');
+(async () => {
+  let input = '';
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (Buffer.byteLength(input) > 8192) throw new Error('Invalid history directory.');
+  }
+  const {projects} = JSON.parse(input);
+  if (typeof projects !== 'string' || !path.isAbsolute(projects) || projects.length > 4096 || /[\x00-\x1f]/.test(projects))
+    throw new Error('Invalid history directory.');
+  const pending = [projects], output = [];
+  let bytes = 0, files = 0, visited = 0, limited = false;
+  while (pending.length && !limited) {
+    if (++visited > 100000) { limited = true; break; }
+    const directory = pending.pop();
+    let entries;
+    try {
+      const info = await fs.lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) continue;
+      entries = await fs.opendir(directory);
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(error.code)) continue;
+      throw error;
+    }
+    for await (const entry of entries) {
+      const filename = path.join(directory, entry.name);
+      if (filename.length > 4096 || /[\x00-\x1f]/.test(filename)) continue;
+      if (entry.isDirectory()) {
+        if (pending.length >= 10000) { limited = true; break; }
+        pending.push(filename);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+      let info;
+      try { info = await fs.lstat(filename); } catch { continue; }
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      const record = Math.floor(info.mtimeMs / 1000) + ' ' + info.size + '\0' + filename + '\0';
+      const size = Buffer.byteLength(record);
+      if (files >= 10000 || bytes + size > 2000000) { limited = true; break; }
+      output.push(record); bytes += size; files++;
+    }
+  }
+  process.stdout.write((limited ? 'LIMITED' : 'COMPLETE') + '\n' + output.join(''));
+})().catch(error => { process.stderr.write(error.message || String(error)); process.exitCode = 1; });
+`
+
+const localHistoryBytes = String.raw`
+const fs = require('node:fs/promises');
+(async () => {
+  let input = '';
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (Buffer.byteLength(input) > 8192) throw new Error('Invalid history read.');
+  }
+  const {filename, offset, count} = JSON.parse(input);
+  if (typeof filename !== 'string' || filename.length > 4096 || /[\x00-\x1f]/.test(filename) ||
+      !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(count) || count < 0 || count > 8000000)
+    throw new Error('Invalid history read.');
+  const file = await fs.open(filename, require('node:fs').constants.O_RDONLY | (require('node:fs').constants.O_NONBLOCK || 0));
+  try {
+    if (!(await file.stat()).isFile()) throw new Error('History transcripts must be regular files.');
+    const output = Buffer.alloc(count);
+    let size = 0;
+    while (size < count) {
+      const read = await file.read(output, size, count - size, offset + size);
+      if (!read.bytesRead) break;
+      size += read.bytesRead;
+    }
+    process.stdout.write(output.subarray(0, size).toString('base64'));
+  } finally { await file.close(); }
+})().catch(error => { process.stderr.write(error.message || String(error)); process.exitCode = 1; });
+`
+
+const localHistorySummary = String.raw`
+const fs = require('node:fs/promises');
+(async () => {
+  let input = '';
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (Buffer.byteLength(input) > 8192) throw new Error('Invalid history read.');
+  }
+  const {filename, indexedSize} = JSON.parse(input);
+  if (typeof filename !== 'string' || filename.length > 4096 || /[\x00-\x1f]/.test(filename) ||
+      !Number.isSafeInteger(indexedSize) || indexedSize < 0)
+    throw new Error('Invalid history read.');
+  const file = await fs.open(filename, require('node:fs').constants.O_RDONLY | (require('node:fs').constants.O_NONBLOCK || 0));
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error('History transcripts must be regular files.');
+    async function readRange(offset, count) {
+      const output = Buffer.alloc(count);
+      let size = 0;
+      while (size < count) {
+        const read = await file.read(output, size, count - size, offset + size);
+        if (!read.bytesRead) break;
+        size += read.bytesRead;
+      }
+      return output.subarray(0, size);
+    }
+    const first = await readRange(0, Math.min(indexedSize, 128000));
+    const last = indexedSize > 128000 ? await readRange(Math.max(0, info.size - 64000), 64000) : Buffer.alloc(0);
+    const titlePattern = /"type"[\x09\x0b\x0c\x0d\x20]*:[\x09\x0b\x0c\x0d\x20]*"(ai-title|custom-title|summary)"/;
+    const newline = Buffer.from('\n');
+    let titles = Buffer.alloc(0), line = Buffer.alloc(0), prefix = '', matched = false, position = 0, hasLine = false;
+    function appendTail(previous, next) {
+      const joined = Buffer.concat([previous, next]);
+      return joined.subarray(Math.max(0, joined.length - 128000));
+    }
+    function consume(part, ended) {
+      hasLine ||= part.length > 0;
+      line = appendTail(line, part);
+      // Collapse only grep's ASCII whitespace. This keeps matching state bounded
+      // even when a title's JSON punctuation contains megabytes of spaces.
+      const normalized = (prefix + part.toString('latin1')).replace(/[\x09\x0b\x0c\x0d\x20]+/g, ' ');
+      matched ||= titlePattern.test(normalized);
+      prefix = normalized.slice(-80);
+      if (ended) {
+        if (matched) titles = appendTail(titles, appendTail(line, newline));
+        line = Buffer.alloc(0); prefix = ''; matched = false; hasLine = false;
+      }
+    }
+    const buffer = Buffer.alloc(65536);
+    while (true) {
+      const read = await file.read(buffer, 0, buffer.length, position);
+      if (!read.bytesRead) break;
+      position += read.bytesRead;
+      const data = buffer.subarray(0, read.bytesRead);
+      let start = 0, end;
+      while ((end = data.indexOf(10, start)) >= 0) {
+        consume(data.subarray(start, end), true);
+        start = end + 1;
+      }
+      if (start < data.length) consume(data.subarray(start), false);
+    }
+    if (hasLine) consume(Buffer.alloc(0), true);
+    process.stdout.write(first.toString('base64') + '\0' + last.toString('base64') + '\0' + titles.toString('base64'));
+  } finally { await file.close(); }
+})().catch(error => { process.stderr.write(error.message || String(error)); process.exitCode = 1; });
+`
 interface ParseContext {
   turn: number
   tools: Map<string, string>
@@ -625,23 +773,33 @@ export class AgentHistory {
       }
     }
     const scan = (async () => {
-      const root = (
-        await this.ssh.exec('printf "%s" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"', {
+      const local = this.ssh.state.profile?.transport === 'local'
+      const configuredRoot = await this.ssh.exec(
+        'printf "%s" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"',
+        {
           signal,
           maxOutputBytes: 8192,
-        })
-      ).trim()
+        },
+      )
+      const root = local ? configuredRoot : configuredRoot.trim()
       if (!safeWorkspace(root))
         throw new Error('Claude history directory did not resolve to an absolute path.')
       // POSIX find plus GNU/BSD stat: no Python, Node or extra remote package.
       // The output cap and request deadline also bound very large history trees.
       const projects = posix.join(root, 'projects')
       const command = `if [ -d ${shellQuote(projects)} ]; then find ${shellQuote(projects)} -type f -name '*.jsonl' -exec sh -c ${shellQuote('for f do m=$(stat -c "%Y %s" "$f" 2>/dev/null) || m=$(stat -f "%m %z" "$f" 2>/dev/null) || continue; printf "%s\\000%s\\000" "$m" "$f"; done')} sh {} + 2>/dev/null | head -c 2000000; fi`
-      const output = await this.ssh.exec(command, {
+      let output = await this.ssh.exec(local ? localOwnedNodeCommand(localHistoryIndex) : command, {
         signal,
         maxOutputBytes: 2_100_000,
         timeoutMs: 30000,
+        ...(local ? { input: JSON.stringify({ projects }) } : {}),
       })
+      let indexLimitReached = false
+      if (local) {
+        const end = output.indexOf('\n')
+        indexLimitReached = localIndexStatus(output.slice(0, end)) === 'LIMITED'
+        output = output.slice(end + 1)
+      }
       const parts = output.split('\0')
       const files: Descriptor[] = []
       for (let index = 0; index + 1 < parts.length && files.length < 10000; index += 2) {
@@ -673,7 +831,7 @@ export class AgentHistory {
         throw new Error('Host history request cancelled.')
       this.claudeFiles = files.filter((file) => !seen.has(file.id) && Boolean(seen.add(file.id)))
       this.claudeIndexWarning =
-        files.length >= 10000 || Buffer.byteLength(output) >= 2000000
+        indexLimitReached || files.length >= 10000 || Buffer.byteLength(output) >= 2000000
           ? 'Claude history reached the bounded index limit of 10,000 transcripts or 2 MB of paths. Additional original sessions remain on the host.'
           : undefined
       this.claudeScanned = Date.now()
@@ -695,9 +853,17 @@ export class AgentHistory {
     count: number,
     signal: AbortSignal,
   ): Promise<Buffer> {
+    const local = this.ssh.state.profile?.transport === 'local'
     const output = await this.ssh.exec(
-      `tail -c +${offset + 1} ${shellQuote(file.path)} | head -c ${count} | base64`,
-      { signal, maxOutputBytes: Math.ceil(count * 1.5) + 8192, timeoutMs: 20000 },
+      local
+        ? localOwnedNodeCommand(localHistoryBytes)
+        : `tail -c +${offset + 1} ${shellQuote(file.path)} | head -c ${count} | base64`,
+      {
+        signal,
+        maxOutputBytes: Math.ceil(count * 1.5) + 8192,
+        timeoutMs: 20000,
+        ...(local ? { input: JSON.stringify({ filename: file.path, offset, count }) } : {}),
+      },
     )
     return Buffer.from(output.replace(/\s/g, ''), 'base64')
   }
@@ -707,9 +873,19 @@ export class AgentHistory {
     // just title records instead of deriving a title from the user's prompt.
     // One bounded channel avoids three SSH round trips for every sidebar row.
     const path = shellQuote(file.path)
+    const local = this.ssh.state.profile?.transport === 'local'
     const metadata = await this.ssh.exec(
-      `[ -f ${path} ] || exit 1; head -c ${Math.min(file.size, 128000)} ${path} | base64; printf '\\000'; tail -c ${file.size > 128000 ? 64000 : 0} ${path} | base64; printf '\\000'; LC_ALL=C grep -a -E ${shellQuote('"type"[[:space:]]*:[[:space:]]*"(ai-title|custom-title|summary)"')} ${path} | tail -c 128000 | base64`,
-      { signal, maxOutputBytes: 460000, timeoutMs: 20000 },
+      local
+        ? localOwnedNodeCommand(localHistorySummary)
+        : `[ -f ${path} ] || exit 1; head -c ${Math.min(file.size, 128000)} ${path} | base64; printf '\\000'; tail -c ${file.size > 128000 ? 64000 : 0} ${path} | base64; printf '\\000'; LC_ALL=C grep -a -E ${shellQuote('"type"[[:space:]]*:[[:space:]]*"(ai-title|custom-title|summary)"')} ${path} | tail -c 128000 | base64`,
+      {
+        signal,
+        maxOutputBytes: 460000,
+        timeoutMs: 20000,
+        ...(local
+          ? { input: JSON.stringify({ filename: file.path, indexedSize: file.size }) }
+          : {}),
+      },
     )
     const [first, last, titles] = metadata
       .split('\0')

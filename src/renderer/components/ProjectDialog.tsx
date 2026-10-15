@@ -38,6 +38,7 @@ export function ProjectDialog({
   const generation = useRef(0)
   const selectionGeneration = useRef(0)
   const recent = connection.workspace || connection.profile?.workspace
+  const requestedPath = connection.profile?.transport === 'local' ? path : path.trim()
 
   async function browse(requestedPath?: string, updatePath = true) {
     if (!api) return
@@ -83,7 +84,7 @@ export function ProjectDialog({
     try {
       await beforeSelect?.()
       if (selectionGeneration.current !== request) return
-      const state = await api.connection.selectWorkspace(path.trim())
+      const state = await api.connection.selectWorkspace(requestedPath)
       if (selectionGeneration.current !== request) return
       if (state.status !== 'connected' || state.profile?.id !== profileId)
         throw new Error('The connected machine changed. Select the project on its current machine.')
@@ -130,7 +131,7 @@ export function ProjectDialog({
               type="button"
               aria-label="Browse project directory"
               disabled={loading || selecting || !path.trim()}
-              onClick={() => void browse(path.trim())}
+              onClick={() => void browse(requestedPath)}
             >
               <ArrowUpRight size={16} />
             </button>

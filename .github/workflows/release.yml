@@ -106,15 +106,19 @@ jobs:
           - platform: linux-x64
             runner: ubuntu-24.04
             args: --linux --x64
+            executable: release/linux-unpacked/life-desktop
           - platform: windows-x64
             runner: windows-latest
             args: --win --x64
+            executable: release/win-unpacked/Life.exe
           - platform: macos-arm64
             runner: macos-latest
             args: --mac --arm64
+            executable: release/mac-arm64/Life.app/Contents/MacOS/Life
           - platform: macos-x64
             runner: macos-15-intel
             args: --mac --x64
+            executable: release/mac/Life.app/Contents/MacOS/Life
     runs-on: ${{ matrix.runner }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -139,8 +143,32 @@ jobs:
           name: life-windows-x64-installer-process-proof
           path: output/windows-installer-process-proof.json
           if-no-files-found: error
+      - name: Capture source before the release build
+        run: node scripts/record-recovery-build.cjs capture-source output/recovery-source-before.json
       - run: npm run build
       - run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: Seal build and package provenance
+        run: node scripts/record-recovery-build.cjs seal output/recovery-source-before.json "${{ matrix.executable }}" output/recovery-release-build.json
+      - name: Verify packaged Windows native compatibility
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        run: ./tests/windows-native-recovery-compatibility.ps1 -BuildProvenance output/recovery-release-build.json
+      - name: Verify packaged POSIX recovery filesystem
+        if: matrix.platform != 'windows-x64'
+        env:
+          LIFE_RECOVERY_BUILD_PROVENANCE: output/recovery-release-build.json
+        run: node tests/native-recovery-filesystem-probe.cjs "${{ matrix.executable }}" "output/native-recovery-filesystem-probe/${{ matrix.platform }}.json"
+      - name: Save native recovery compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-native-recovery-proof-${{ matrix.platform }}
+          path: |
+            output/windows-native-recovery-compatibility/
+            output/native-recovery-filesystem-probe/
+            output/recovery-source-before.json
+            output/recovery-release-build.json
+          if-no-files-found: error
       - name: Verify native installer payload integrity and guarded deployment
         if: "!cancelled() && steps.dependency_install.outcome == 'success' && matrix.platform == 'windows-x64' && hashFiles('scripts/verify-nsis-payload-fixture.cjs') != ''"
         run: node scripts/verify-nsis-payload-fixture.cjs

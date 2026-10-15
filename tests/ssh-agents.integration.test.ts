@@ -1047,6 +1047,119 @@ describe('provider configuration and cancellation', () => {
   })
 })
 
+describe('native Codex approval choices over real SSH', () => {
+  it.each([
+    {
+      prompt: 'native-approval-choices-network',
+      decisionId: 'codex-approval:0',
+      decision: {
+        applyNetworkPolicyAmendment: {
+          network_policy_amendment: { host: 'reference.example', action: 'allow' },
+        },
+      },
+      outcome: 'approved',
+      labels: ['Always allow reference.example', 'Cancel this turn'],
+    },
+    {
+      prompt: 'native-approval-choices-session',
+      decisionId: 'codex-approval:0',
+      decision: 'acceptForSession',
+      outcome: 'approved',
+      labels: ['Allow for this session', 'Decline', 'Cancel this turn'],
+    },
+    {
+      prompt: 'native-approval-choices-cancel',
+      decisionId: 'codex-approval:1',
+      decision: 'cancel',
+      outcome: 'cancelled',
+      labels: ['Allow for this session', 'Cancel this turn'],
+    },
+    {
+      prompt: 'native-approval-choices-command-rule',
+      decisionId: 'codex-approval:0',
+      decision: {
+        acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm', 'run', 'build'] },
+      },
+      outcome: 'approved',
+      labels: ['Allow and save command rule', 'Decline'],
+    },
+    {
+      prompt: 'native-approval-choices-session',
+      decisionId: 'codex-approval:1',
+      decision: 'decline',
+      outcome: 'declined',
+      labels: ['Allow for this session', 'Decline', 'Cancel this turn'],
+    },
+  ])(
+    'sends the exact $decisionId decision for $prompt',
+    async ({ prompt, decisionId, decision, outcome, labels }) => {
+      await connect()
+      await agents.start(start('codex', prompt, { mode: 'ask-for-approval' }))
+      await waitFor(() => eventOf('approval'))
+      const approval = eventOf('approval')!
+      expect(approval.approvalChoices?.map((choice) => choice.label)).toEqual(labels)
+      expect(eventOf('complete')).toBeUndefined()
+      await expect(agents.respond(approval.sessionId, approval.requestId!, true)).rejects.toThrow(
+        /does not offer approval for one action/,
+      )
+      await agents.respond(approval.sessionId, approval.requestId!, true, undefined, decisionId)
+      await waitFor(() => eventOf('complete'))
+      expect(events.findLast((event) => event.type === 'request-resolved')).toMatchObject({
+        requestId: approval.requestId,
+        status: outcome,
+        details: { decisionId },
+      })
+      expect(eventOf('complete')?.status).toBe(decision === 'cancel' ? 'interrupted' : 'completed')
+      const response = (await conversationLog()).findLast(
+        (entry) => entry.kind === 'native-approval-choices-response' && entry.prompt === prompt,
+      )
+      expect(response).toMatchObject({ offered: true, result: { decision } })
+      await expect(
+        agents.respond(approval.sessionId, approval.requestId!, true, undefined, decisionId),
+      ).rejects.toThrow(/no longer pending/)
+    },
+  )
+
+  it('keeps malformed and forged selections pending until an offered choice is selected', async () => {
+    await connect()
+    const baseline = (await conversationLog()).length
+    await agents.start(
+      start('codex', 'native-approval-choices-malformed', { mode: 'ask-for-approval' }),
+    )
+    await waitFor(() => eventOf('approval'))
+    const approval = eventOf('approval')!
+    expect(approval.approvalChoices?.map((choice) => choice.id)).toEqual([
+      'codex-approval:1',
+      'codex-approval:2',
+    ])
+    expect(approval.approvalChoicesUnsupported).toContain('unsupported approval choice')
+    for (const decisionId of ['codex-approval:0', 'codex-approval:99', 'acceptForSession'])
+      await expect(
+        agents.respond(approval.sessionId, approval.requestId!, true, undefined, decisionId),
+      ).rejects.toThrow(/choice|choices/)
+    expect(eventOf('request-resolved')).toBeUndefined()
+    expect(eventOf('complete')).toBeUndefined()
+    expect(
+      (await conversationLog())
+        .slice(baseline)
+        .some((entry) => entry.kind === 'native-approval-choices-response'),
+    ).toBe(false)
+    await agents.respond(
+      approval.sessionId,
+      approval.requestId!,
+      true,
+      undefined,
+      'codex-approval:1',
+    )
+    await waitFor(() => eventOf('complete'))
+    expect(
+      (await conversationLog()).findLast(
+        (entry) => entry.kind === 'native-approval-choices-response',
+      ),
+    ).toMatchObject({ offered: true, result: { decision: 'acceptForSession' } })
+  })
+})
+
 describe('fixture lifecycle', () => {
   it('closes its TCP listener and agent children even while a client remains connected', async () => {
     const isolated = await new SSHFixture().start()

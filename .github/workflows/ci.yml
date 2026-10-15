@@ -21,7 +21,38 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Capture source before the Linux build
+        run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
       - run: npm run build
+      - name: Record the Linux compiled build
+        shell: bash
+        run: |
+          node scripts/record-recovery-build.cjs capture-source output/linux-source-after.json
+          node <<'NODE'
+          const assert = require('node:assert/strict')
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const crypto = require('node:crypto')
+          const child = require('node:child_process')
+          const before = JSON.parse(fs.readFileSync('output/linux-source-before.json'))
+          const after = JSON.parse(fs.readFileSync('output/linux-source-after.json'))
+          assert.deepEqual(after, before, 'Source changed during the build')
+          const compiled = []
+          function visit(name) {
+            const stat = fs.lstatSync(name)
+            assert(!stat.isSymbolicLink(), 'Compiled links are rejected')
+            if (stat.isDirectory()) {
+              for (const entry of fs.readdirSync(name).sort()) visit(path.join(name, entry))
+            } else {
+              assert(stat.isFile())
+              const bytes = fs.readFileSync(name)
+              compiled.push({ path: name, mode: stat.mode & 0o7777, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') })
+            }
+          }
+          visit('out')
+          const sourceCommit = child.execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+          fs.writeFileSync('output/linux-compiled-build.json', JSON.stringify({ sourceCommit, platform: process.platform, arch: process.arch, source: before.sourceBefore, compiled }, null, 2) + '\n')
+          NODE
       - run: npx playwright install chromium --with-deps
       - run: npm run test:recovery
       - run: node tests/thread-queue-smoke.cjs
@@ -35,6 +66,18 @@ jobs:
       - name: Verify thread organization and draft workflows
         run: node tests/thread-workflows-smoke.cjs
       - run: node tests/transcript-performance.cjs current
+      - run: node tests/agent-event-batch-performance.cjs
+      - run: node tests/sidebar-history-performance.cjs current
+      - run: node tests/conversation-history-performance.cjs
+      - run: node tests/workspace-surfaces-performance.cjs
+      - run: node tests/conversation-scroll-performance.cjs
+      - run: node tests/thread-message-navigator-smoke.cjs
+      - run: node tests/thread-finder-timeline-smoke.cjs
+      - run: node tests/settled-markdown-smoke.cjs
+      - run: node tests/native-checkpoint-performance.cjs
+      - run: npm run test:checkpoints
+      - run: npm run test:loads
+      - run: node tests/studio-layout-smoke.cjs
       - run: node tests/run-selectors-smoke.cjs
       - run: node tests/research-method-ui-smoke.cjs
       - run: node tests/provider-request-ui-smoke.cjs
@@ -46,3 +89,48 @@ jobs:
       - run: node tests/deferred-dialogs-smoke.cjs
       - run: npm run test:desktop
       - run: npm run format:check
+      - name: Save the verified Linux build for native checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-verified-build
+          path: |
+            out/
+            output/linux-source-before.json
+            output/linux-source-after.json
+            output/linux-compiled-build.json
+          if-no-files-found: error
+
+  windows-native-recovery:
+    name: Windows packaged native compatibility
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Capture source before the release build
+        run: node scripts/record-recovery-build.cjs capture-source output/recovery-source-before.json
+      - run: npm run build
+      - name: Build unpacked Windows application
+        run: npx electron-builder --win --x64 --dir --publish never
+      - name: Seal build and package provenance
+        run: node scripts/record-recovery-build.cjs seal output/recovery-source-before.json release/win-unpacked/Life.exe output/recovery-release-build.json
+      - name: Verify packaged Windows native compatibility
+        shell: pwsh
+        run: ./tests/windows-native-recovery-compatibility.ps1 -BuildProvenance output/recovery-release-build.json
+      - name: Save Windows compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-windows-native-recovery-proof
+          path: |
+            output/windows-native-recovery-compatibility/
+            output/recovery-source-before.json
+            output/recovery-release-build.json
+          if-no-files-found: error

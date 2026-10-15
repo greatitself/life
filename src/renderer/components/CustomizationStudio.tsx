@@ -22,6 +22,7 @@ import type { LifeSourcePatch } from '../../shared/source-code'
 import { api, errorText } from '../api'
 import { useCustomizationStudio, type StudioOptions } from '../useCustomizationStudio'
 import type { StudioProposal, StudioStage } from '../studio-history'
+import { STUDIO_DRAFTS_KEY, StudioDraftStore, studioDraftRecovery } from '../studio-drafts'
 import { ApprovalCard } from './MessageView'
 import { ProviderIcon } from './Icons'
 import { ReferenceComposerControls } from './ReferenceComposer'
@@ -39,24 +40,6 @@ const stageNames: Record<StudioStage, string> = {
   failed: 'Needs attention',
 }
 type InspectorTab = 'overview' | 'changes' | 'build' | 'recovery'
-const draftKey = 'life.studio.drafts.v1'
-
-function readDrafts(): Record<string, string> {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(draftKey) || '{}')
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-    return Object.fromEntries(
-      Object.entries(value).filter(
-        ([id, draft]) =>
-          /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,99}$/.test(id) &&
-          typeof draft === 'string' &&
-          draft.length <= 1_000_000,
-      ),
-    )
-  } catch {
-    return {}
-  }
-}
 
 function download(name: string, value: unknown) {
   const url = URL.createObjectURL(
@@ -165,16 +148,23 @@ export function CustomizationStudio({
     applySettings,
     onNotify,
   })
-  const [drafts, setDrafts] = useState<Record<string, string>>(readDrafts)
-  const draftsCurrent = useRef(drafts)
-  draftsCurrent.current = drafts
+  const [draftStore] = useState(
+    () =>
+      new StudioDraftStore(
+        () => localStorage.getItem(STUDIO_DRAFTS_KEY),
+        (encoded) => localStorage.setItem(STUDIO_DRAFTS_KEY, encoded),
+      ),
+  )
+  const draftMounted = useRef(true)
+  const [, setDraftRevision] = useState(0)
+  const [draftFeedback, setDraftFeedback] = useState(draftStore.readError)
   const [tab, setTab] = useState<InspectorTab>('overview')
   const [action, setAction] = useState(false)
   const [feedback, setFeedback] = useState('')
   const [search, setSearch] = useState('')
   const viewport = useRef<HTMLDivElement>(null)
   const active = studio.active
-  const draft = active ? drafts[active.id] || '' : ''
+  const draft = active ? draftStore.get(active.id) : ''
   const connected = connection.status === 'connected'
   const runtimeCount = extensions.extensions.filter((extension) => extension.enabled).length
   const sourceCount = source.extensions.filter(
@@ -195,22 +185,35 @@ export function CustomizationStudio({
     viewport.current.scrollTop = viewport.current.scrollHeight
   }, [visible, active?.id, active?.thread.messages.length, active?.thread.busy])
 
-  function updateDraft(id: string, text: string) {
-    const next = { ...draftsCurrent.current, [id]: text }
-    draftsCurrent.current = next
-    setDrafts(next)
-    try {
-      localStorage.setItem(draftKey, JSON.stringify(next))
-    } catch {
-      /* The draft stays available in the current interface. */
+  useEffect(() => {
+    draftMounted.current = true
+    const retry = () => setDraftFeedback(draftStore.flush().error)
+    window.addEventListener('pagehide', retry)
+    return () => {
+      draftMounted.current = false
+      window.removeEventListener('pagehide', retry)
+      draftStore.flush()
     }
+  }, [draftStore])
+
+  useEffect(() => {
+    if (!visible) setDraftFeedback(draftStore.flush().error)
+  }, [visible, draftStore])
+
+  function updateDraft(id: string, text: string) {
+    if (text) studio.registerSession(id)
+    if (draftStore.update(id, text)) setDraftRevision((revision) => revision + 1)
+    setDraftFeedback(draftStore.flush().error)
   }
 
   async function submit() {
     if (!active) return
-    const id = active.id
-    const request = draft
-    if (await studio.submit(request)) updateDraft(id, '')
+    const submitted = draftStore.capture(active.id)
+    if (await studio.submit(submitted.text)) {
+      if (!draftMounted.current) return
+      if (draftStore.clearIfCurrent(submitted)) setDraftRevision((revision) => revision + 1)
+      setDraftFeedback(draftStore.flush().error)
+    }
   }
 
   async function sourceAction(kind: 'rollback' | 'disable') {
@@ -341,7 +344,9 @@ export function CustomizationStudio({
             <ApprovalCard
               key={event.requestId}
               event={event}
-              onRespond={(accepted, answers) => studio.respond(event, accepted, answers)}
+              onRespond={(accepted, answers, decisionId) =>
+                studio.respond(event, accepted, answers, decisionId)
+              }
             />
           ))}
           {review && active?.proposal ? (
@@ -383,6 +388,11 @@ export function CustomizationStudio({
           {studio.feedback || feedback ? (
             <p className="form-error" role="alert">
               {studio.feedback || feedback}
+            </p>
+          ) : null}
+          {draftFeedback ? (
+            <p className="form-error" role="alert">
+              {draftFeedback}
             </p>
           ) : null}
           {!connected ? (
@@ -438,11 +448,15 @@ export function CustomizationStudio({
               ) : null}
               {active?.thread.busy ? (
                 <button
+                  key="stop"
                   type="button"
                   className="studio-submit"
                   disabled={applying}
                   aria-label={applying ? 'Applying customization' : 'Stop customization'}
-                  onClick={() => void studio.stop()}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    void studio.stop()
+                  }}
                 >
                   {applying ? (
                     <LoaderCircle size={16} className="spinning" />
@@ -452,6 +466,8 @@ export function CustomizationStudio({
                 </button>
               ) : (
                 <button
+                  key="send"
+                  type="submit"
                   className="studio-submit"
                   aria-label="Send customization request"
                   disabled={!draft.trim() || !active}
@@ -518,9 +534,26 @@ export function CustomizationStudio({
                     </dl>
                     <button
                       className="button secondary"
-                      onClick={() => download(`life-studio-${active.id}.json`, active)}
+                      onClick={() =>
+                        download(`life-studio-${active.id}.json`, studio.exportSession())
+                      }
                     >
                       <Download size={13} /> Export conversation
+                    </button>
+                    <button
+                      className="button secondary"
+                      onClick={() =>
+                        download(
+                          `life-studio-recovery-${active.id}.json`,
+                          studioDraftRecovery(
+                            studio.exportSession(),
+                            active.id,
+                            draftStore.get(active.id),
+                          ),
+                        )
+                      }
+                    >
+                      <Download size={13} /> Export recovery
                     </button>
                     <button
                       className="button secondary studio-remove-session"

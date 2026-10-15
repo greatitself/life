@@ -20,6 +20,7 @@ import { ProviderIcon } from './Icons'
 import { ThreadBadge } from './ThreadBadge'
 import { ThreadRunStatus } from './ThreadRunStatus'
 import { useSidebarMinute } from '../sidebar-clock'
+import { conversationTurnCount } from '../sidebar-history'
 import { isThreadSnoozed, threadHasUnreadCompletion } from '../thread-management'
 import { ThreadActionsMenu, type ThreadActionHandler } from './ThreadActionsMenu'
 import './thread-controls.css'
@@ -295,8 +296,7 @@ export const SidebarThread = memo(function SidebarThread({
                 </div>
               ) : (
                 <span>
-                  {state} · {thread.messages.filter((message) => message.role === 'user').length}{' '}
-                  conversation turns
+                  {state} · {conversationTurnCount(thread.messages)} conversation turns
                 </span>
               )}
               <small>{observed}</small>

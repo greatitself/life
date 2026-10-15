@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowUpRight, FolderOpen, MessageSquare, Plug, Server } from 'lucide-react'
+import { ArrowUpRight, FolderOpen, MessageSquare, Monitor, Plug, Server } from 'lucide-react'
 import type { ConnectionProfile, ConnectionState } from '../../shared/types'
 import { describeEnvironment, type EnvironmentScope } from '../environment'
 import './active-environment.css'
@@ -79,7 +79,11 @@ export function ActiveProject({
           </div>
         ) : null}
         <div className="active-project-machine">
-          <Server size={14} aria-hidden="true" />
+          {environment.profile?.transport === 'local' ? (
+            <Monitor size={14} aria-hidden="true" />
+          ) : (
+            <Server size={14} aria-hidden="true" />
+          )}
           <span>{environment.authority || environment.machineName}</span>
           <span className="environment-status-label" data-status={environment.status}>
             <span

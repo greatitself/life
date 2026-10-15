@@ -5,7 +5,9 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
+import { Effect } from 'effect'
 import { SourceCodeStore } from '../src/main/source-code'
+import { assessNativeRecoveryPlatformEffect } from '../src/main/native-recovery-platform'
 import { PackagedDependencies } from '../src/main/packaged-dependencies'
 import { observeCompilerProcesses } from './helpers/compiler-proof-processes'
 
@@ -44,6 +46,14 @@ async function run() {
   // Spaces also exercise Windows npm/esbuild argument handling and junction paths.
   stage('create isolated source extension store')
   const directory = await mkdtemp(join(tmpdir(), 'life packaged source proof '))
+  const recoveryPlatform = await Effect.runPromise(
+    assessNativeRecoveryPlatformEffect({ userData: directory, exclusiveRuntime: true }),
+  )
+  assert.equal(
+    recoveryPlatform.mode,
+    process.platform === 'win32' ? 'unsupported-clean' : 'durable',
+    'The actual packaged platform did not admit this empty private source fixture',
+  )
   const compilerCache = join(directory, 'compiler-cache')
   const packagedDependencies = new PackagedDependencies({
     sourceDirectory: nodeModulesDir,
@@ -55,7 +65,9 @@ async function run() {
   const options = {
     sourceDir,
     nodeModulesDir,
-    directory,
+    directory: join(directory, 'source-code'),
+    persistenceMode: recoveryPlatform.sourcePersistenceMode,
+    recoveryPlatform,
     prepareNodeModules: async (signal: AbortSignal) => {
       preparedNodeModules = await packagedDependencies.ensure(signal)
       return preparedNodeModules
@@ -204,7 +216,11 @@ export function RuntimeProof() {
     checks.push('A clean store restart preserved the active source, dependency metadata and assets')
 
     stage('prepare an isolated app version and source upgrade')
-    const originalGeneration = join(directory, 'revisions', String(reopened.active!.revision))
+    const originalGeneration = join(
+      options.directory,
+      'revisions',
+      String(reopened.active!.revision),
+    )
     const originalFiles = [
       'metadata.json',
       'package.json',
@@ -270,7 +286,7 @@ export function RuntimeProof() {
     assert.equal(
       JSON.parse(
         await readFile(
-          join(directory, 'revisions', String(migrated.active!.revision), 'package.json'),
+          join(options.directory, 'revisions', String(migrated.active!.revision), 'package.json'),
           'utf8',
         ),
       ).version,
@@ -366,6 +382,8 @@ export function RuntimeProof() {
     platform: process.platform,
     electron: process.versions.electron,
     node: process.versions.node,
+    recoveryPlatformMode: recoveryPlatform.mode,
+    sourcePersistenceMode: recoveryPlatform.sourcePersistenceMode,
     executable: process.execPath,
     resources,
     startedAt,

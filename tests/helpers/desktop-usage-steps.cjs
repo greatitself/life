@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict')
 const { rm, writeFile } = require('node:fs/promises')
 const { join } = require('node:path')
+const { readSavedThreads } = require('./desktop-history.cjs')
 
 const providers = { codex: 'Codex', claude: 'Claude Code' }
 const tokenKeys = ['input', 'output', 'cached', 'creation', 'reasoning', 'total']
@@ -105,8 +106,7 @@ function totalFacts(sessions) {
 
 async function runUsageChecks(context) {
   const page = () => context.getPage()
-  const readThreads = () =>
-    page().evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+  const readThreads = () => readSavedThreads(page())
   const usageMessages = (thread) =>
     thread.messages.filter((message) => message.details?.tokenUsage || message.details?.modelUsage)
   const proof = { ok: false, requests: [], providerEvents: {}, filters: [], accountSnapshots: {} }

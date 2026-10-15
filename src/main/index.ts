@@ -2,7 +2,13 @@ import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, protocol } fro
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { Store } from './store'
-import { ConversationStore } from './conversation-store'
+import { ConversationStore, type ConversationStoreOptions } from './conversation-store'
+import {
+  ConversationHistoryLifecycle,
+  finishNativeShutdownEffect,
+  type CapturedHistoryDocument,
+} from './conversation-history-lifecycle'
+import { runEffect } from './effect-runtime'
 import { SSHConnection } from './ssh'
 import { Agents } from './agents'
 import {
@@ -10,11 +16,11 @@ import {
   profileSchema,
   remoteDirectorySchema,
   startSchema,
-  connectionExecutionSchema,
   agentSettingsSchema,
   agentSteerSchema,
 } from '../shared/validation'
 import { z } from 'zod'
+import { Effect, ManagedRuntime, Schema, Semaphore } from 'effect'
 import { CustomizationStore } from './customization'
 import { listSSHConfig, resolveSSHConfig } from './ssh-config'
 import { UpdatesService } from './updater'
@@ -28,16 +34,41 @@ import { extensionCoreArguments } from '../shared/extension-core'
 import { buildExtensionDocument, extensionDocumentCSP } from '../shared/extension-document'
 import { SourceCodeStore } from './source-code'
 import { PackagedDependencies } from './packaged-dependencies'
-import { executeConnectionCommand } from './connection-execution'
+import { executeConnectionCommandEffect } from './connection-execution'
+import { ApplicationRuntime } from './application-runtime'
 import { AgentHistory } from './agent-history'
 import { builtinExtensionCatalog } from '../shared/builtin-extensions'
 import { parseLifeSourcePatch, parseLifeSourceRead } from '../shared/source-code'
 import { ExtensionSharing } from './extension-sharing'
 import { canonicalPublicGistURL } from '../shared/extension-sharing'
-import { RendererDocumentAdmission, RendererRecoveryBudget } from './renderer-recovery'
+import {
+  RendererDocumentAdmission,
+  RendererRecoveryBudget,
+  RendererReloadFlights,
+  isNativeMainDocumentNavigation,
+  requestsRendererReload,
+} from './renderer-recovery'
 import { ResearchDocuments } from './research-documents'
 import { isTrustedRendererSender } from './renderer-ipc'
 import { ProviderUpdateController } from './provider-updates'
+import { NativeRecoveryStore } from './native-recovery-store'
+import type { NativeRecoveryStoreHandle } from './native-recovery-store'
+import {
+  NativeRecoveryActions,
+  NativeRecoveryActionError,
+  makeStudioRecoveryActionDrivers,
+  nativeRecoveryActionRequestSchema,
+} from './native-recovery-actions'
+import type { NativeRecoveryActionsHandle } from './native-recovery-actions'
+import {
+  unavailableNativeRecoveryActions,
+  unavailableNativeRecoveryStore,
+} from './native-recovery-fallback'
+import { NativeDocumentReadiness } from './native-document-readiness'
+import {
+  assessNativeRecoveryPlatformEffect,
+  blockedNativeRecoveryPlatformPolicy,
+} from './native-recovery-platform'
 
 app.setName('Life')
 protocol.registerSchemesAsPrivileged([
@@ -57,42 +88,174 @@ let extensions: ExtensionStore
 let sourceCode: SourceCodeStore
 let hostHistory: AgentHistory | undefined
 let conversations: ConversationStore | undefined
+let applicationRuntime: ApplicationRuntime | undefined
+let nativeRecoveryRuntime: ManagedRuntime.ManagedRuntime<NativeRecoveryStore, unknown> | undefined
+let nativeActionRuntime: ManagedRuntime.ManagedRuntime<NativeRecoveryActions, unknown> | undefined
+let flushNativeRecovery = async (): Promise<void> => {}
+let detachNativeRecovery = async (): Promise<void> => {}
+let finalizeRendererSuspension = () => {}
+let rendererHandoffAdmitted = async (): Promise<boolean> => false
+let rendererWorkPending = () => true
+let providerRetirementPending = () => false
+let rendererHandoff: { documentId: string; promise: Promise<void> } | undefined
+let suspendedRendererDocument: string | undefined
 let sourceStartupTimer: ReturnType<typeof setTimeout> | undefined
 let sourceReloadTimer: ReturnType<typeof setTimeout> | undefined
 let quitting = false
 let recovering = false
 let cancelRendererSessions = () => {}
+let releaseIdleProviders = async (): Promise<void> => {}
+let releaseProvidersOnQuit = async (): Promise<void> => {}
+let reloadRendererWhenIdle = (): Promise<void> => Promise.resolve()
 const rendererRecoveryBudget = new RendererRecoveryBudget()
+const nativeDocuments = new NativeDocumentReadiness()
+const recoveryMutationChannels = new Set([
+  'agent:reserve-recovery-owner',
+  'agent:update-recovery-owner',
+  'agent:acknowledge-recovery-history',
+  'agent:prepare-recovery-cache',
+  'agent:perform-recovery-action',
+])
 const rendererAdmissions = new WeakMap<BrowserWindow, RendererDocumentAdmission>()
+const historyLifecycle = new ConversationHistoryLifecycle()
 const extensionRecoveryStartups = new WeakSet<BrowserWindow>()
 const researchDocuments = new ResearchDocuments()
 const assertRendererAdmission = (channel: string) => {
-  if (!window || !rendererAdmissions.get(window)?.allows(channel))
-    throw new Error('Life is restarting its interface. Try again when the workspace returns.')
+  const admission = window ? rendererAdmissions.get(window) : undefined
+  if (!admission) throw new Error('Life window is unavailable.')
+  if (historyLifecycle.failure && recoveryMutationChannels.has(channel))
+    throw historyLifecycle.failure
+  historyLifecycle.admit(admission, channel)
 }
-async function cancelRendererWork() {
-  if (window) rendererAdmissions.get(window)?.suspend()
+const permitsRendererAdmission = (channel: string) => {
+  try {
+    assertRendererAdmission(channel)
+    return true
+  } catch {
+    return false
+  }
+}
+function captureHistoryDocument(owner: BrowserWindow | null): CapturedHistoryDocument | undefined {
+  if (!owner || owner.isDestroyed() || owner.webContents.isDestroyed()) return
+  const admission = rendererAdmissions.get(owner)
+  if (!admission) return
+  const frame = owner.webContents.mainFrame
+  const documentId = nativeDocuments.capture().documentId
+  const ownsNativeDocument = () => {
+    try {
+      return nativeDocuments.capture().documentId === documentId
+    } catch {
+      return false
+    }
+  }
+  return historyLifecycle.capture(
+    admission,
+    () =>
+      owner === window &&
+      !owner.isDestroyed() &&
+      !owner.webContents.isDestroyed() &&
+      owner.webContents.mainFrame === frame &&
+      rendererAdmissions.get(owner) === admission &&
+      ownsNativeDocument(),
+  )
+}
+const reportShutdownFailure = (error: unknown) => {
+  console.error('[Life] Native shutdown could not confirm completion:', error)
+}
+async function cancelRendererWork(
+  owner = window,
+  waitForIdleProviders = false,
+  ownsDocument?: () => boolean,
+  retirementPending?: () => boolean,
+): Promise<void> {
+  historyLifecycle.assertHealthy()
+  const document = captureHistoryDocument(owner)
+  const current = () =>
+    (!ownsDocument || ownsDocument()) && (!document || document.ownsDocument()) && !quitting
+  if (!current()) throw new Error('The interface handoff belongs to an earlier Life document.')
+  if (owner) rendererAdmissions.get(owner)?.suspend()
   researchDocuments.clear()
-  // Invalidate selectors and commands synchronously before cancelling provider
-  // sessions. Wait for owned profile persistence to settle before a new UI starts.
   const requests = ssh?.cancelRendererRequests()
+  // Claim the old document's drain before any await. A manual native navigation
+  // can commit a new UUID while its history and provider observations are pending.
+  const history = flushConversationHistory(owner, document)
   cancelRendererSessions()
   hostHistory?.cancelAll()
-  await requests
-  await flushConversationHistory(window)
-  await conversations?.settled()
+  const retireIdle = !rendererWorkPending() && providerRetirementPending()
+  const retirement = retireIdle
+    ? releaseIdleProviders().then(
+        () => ({ success: true as const }),
+        (error: unknown) => ({ success: false as const, error }),
+      )
+    : undefined
+  await runEffect(
+    historyLifecycle.handoffEffect(
+      undefined,
+      undefined,
+      Effect.tryPromise({
+        try: async () => {
+          await requests
+          await history
+          await runEffect(historyLifecycle.settledEffect(conversations, document))
+          const retired = await retirement
+          // A joined idle release may cover an older target snapshot. Recollect
+          // only while this document still owns the retirement request.
+          if (retired?.success && waitForIdleProviders)
+            while (retirementPending?.()) {
+              if (!current()) break
+              await releaseIdleProviders()
+            }
+          await flushNativeRecovery()
+          finalizeRendererSuspension()
+          if (retired && !retired.success) throw retired.error
+          if (!(await rendererHandoffAdmitted()))
+            throw new Error('Native ownership remains uncertain. The new interface stays paused.')
+        },
+        catch: (error) => error,
+      }),
+    ),
+  )
 }
-
-async function flushConversationHistory(owner: BrowserWindow | null): Promise<void> {
+function beginRendererHandoff(
+  owner = window,
+  waitForIdleProviders = false,
+  ownsDocument?: () => boolean,
+  retirementPending?: () => boolean,
+): Promise<void> {
+  if (rendererHandoff) return rendererHandoff.promise
+  historyLifecycle.assertHealthy()
+  const documentId = nativeDocuments.capture().documentId
+  if (suspendedRendererDocument === documentId) return Promise.resolve()
+  const handoff = { documentId, promise: Promise.resolve() }
+  rendererHandoff = handoff
+  handoff.promise = cancelRendererWork(owner, waitForIdleProviders, ownsDocument, retirementPending)
+    .then(() => {
+      suspendedRendererDocument = documentId
+    })
+    .finally(() => {
+      if (rendererHandoff === handoff) rendererHandoff = undefined
+    })
+  return handoff.promise
+}
+async function flushConversationHistory(
+  owner: BrowserWindow | null,
+  document = captureHistoryDocument(owner),
+): Promise<void> {
   if (!owner || owner.isDestroyed()) return
   const contents = owner.webContents
-  if (contents.isDestroyed() || contents.isCrashed()) return
+  if (
+    contents.isDestroyed() ||
+    contents.isCrashed() ||
+    contents.isLoadingMainFrame() ||
+    !document?.ownsDocument()
+  )
+    return
   let deadline: ReturnType<typeof setTimeout> | undefined
   try {
     // A frozen customized renderer cannot block native recovery indefinitely.
     await Promise.race([
       contents.executeJavaScript(
-        'typeof window.__lifeFlushConversationHistory === "function" ? window.__lifeFlushConversationHistory() : undefined',
+        'typeof window.__lifeFlushConversationHistory === "function" ? window.__lifeFlushConversationHistory(true) : undefined',
       ),
       new Promise<void>((resolve) => {
         deadline = setTimeout(resolve, 3_000)
@@ -112,10 +275,12 @@ app.on('second-instance', () => {
   window?.focus()
 })
 async function recoverExtensions() {
-  if (recovering || !extensions) return
+  historyLifecycle.assertHealthy()
+  if (quitting || recovering || !extensions) return
   recovering = true
+  const owner = window
+  const document = captureHistoryDocument(owner)
   try {
-    const owner = window
     if (owner && !owner.isDestroyed()) {
       const mainFrame = owner.webContents.mainFrame
       const frameProcesses = new Set<number>()
@@ -142,10 +307,12 @@ async function recoverExtensions() {
         }
       }
     }
-    await cancelRendererWork()
+    await beginRendererHandoff(owner)
+    if (quitting || (owner && !document?.ownsDocument())) return
     ssh?.disconnect()
     clearTimeout(sourceStartupTimer)
     await sourceCode?.disable()
+    if (quitting || (owner && !document?.ownsDocument())) return
     await Promise.all(
       extensions
         .list()
@@ -153,7 +320,7 @@ async function recoverExtensions() {
         .map((extension) => extensions.enable(extension.id, false)),
     )
     // Main-process recovery remains usable even when generated UI is stuck in a CPU loop.
-    if (owner && !owner.isDestroyed()) {
+    if (!quitting && owner && !owner.isDestroyed() && document?.ownsDocument()) {
       createWindow(owner, true)
       owner.destroy()
     }
@@ -162,15 +329,18 @@ async function recoverExtensions() {
   }
 }
 async function restartInterface(owner: BrowserWindow, sourceFailure?: string) {
+  historyLifecycle.assertHealthy()
   if (owner !== window || owner.isDestroyed() || recovering || quitting) return
   recovering = true
+  const document = captureHistoryDocument(owner)
   try {
     clearTimeout(sourceStartupTimer)
-    // A replacement cannot receive the old renderer's in-flight events. Stop those
-    // sessions while retaining the SSH connection, selected project and host trust.
-    await cancelRendererWork()
+    // A replacement receives only native replay admitted against its saved
+    // history, while the provider and selected project retain their ownership.
+    await beginRendererHandoff(owner)
+    if (!document?.ownsDocument()) return
     if (sourceFailure && sourceCode?.get().enabled) await sourceCode.disable(sourceFailure)
-    if (owner !== window || owner.isDestroyed() || quitting) return
+    if (owner !== window || owner.isDestroyed() || quitting || !document?.ownsDocument()) return
     createWindow(owner)
     owner.destroy()
   } finally {
@@ -178,14 +348,28 @@ async function restartInterface(owner: BrowserWindow, sourceFailure?: string) {
   }
 }
 const send = (channel: string, data: unknown) => {
-  if (!window || window.isDestroyed()) return
+  if (!window || window.isDestroyed()) return false
   const contents = window.webContents
-  if (!contents.isDestroyed() && !contents.isCrashed()) contents.send(channel, data)
+  if (contents.isDestroyed() || contents.isCrashed()) return false
+  contents.send(channel, data)
+  return true
+}
+function assertStartupActive(): void {
+  if (quitting) throw new Error('Life is shutting down.')
 }
 async function init() {
+  assertStartupActive()
   const store = new Store(app.getPath('userData'))
   await store.init()
-  conversations = new ConversationStore(app.getPath('userData'))
+  assertStartupActive()
+  let recoveryPolicy = await runEffect(
+    assessNativeRecoveryPlatformEffect({
+      userData: app.getPath('userData'),
+      exclusiveRuntime: ownsInstance,
+    }),
+  )
+  assertStartupActive()
+  let recoveryAgents: Agents | undefined
   customization = new CustomizationStore(app.getPath('userData'), (state) => {
     nativeTheme.themeSource = state.config.theme
     ssh?.forwarding.setEnabled(state.config.autoPortForward)
@@ -193,11 +377,72 @@ async function init() {
     send('customization:state', state)
   })
   await customization.init()
+  assertStartupActive()
   updates = new UpdatesService((state) => send('updates:state', state))
   await updates.init()
-  ssh = new SSHConnection(store)
+  assertStartupActive()
+  const recoveryDirectory = join(app.getPath('userData'), 'native-recovery')
+  let recoveryStore: NativeRecoveryStoreHandle | undefined
+  if (recoveryPolicy.mode === 'durable') {
+    nativeRecoveryRuntime = ManagedRuntime.make(
+      NativeRecoveryStore.layer({ directory: recoveryDirectory, exclusiveRuntime: ownsInstance }),
+    )
+    try {
+      recoveryStore = await nativeRecoveryRuntime.runPromise(NativeRecoveryStore)
+    } catch (cause) {
+      recoveryPolicy = blockedNativeRecoveryPlatformPolicy(app.getPath('userData'), cause)
+      recoveryStore = unavailableNativeRecoveryStore(recoveryDirectory, cause)
+    }
+    assertStartupActive()
+  } else if (recoveryPolicy.mode === 'blocked') {
+    recoveryStore = unavailableNativeRecoveryStore(recoveryDirectory, recoveryPolicy.error)
+  }
+  const historyOptions: ConversationStoreOptions = {
+    persistenceMode: recoveryPolicy.sourcePersistenceMode,
+  }
+  if (recoveryPolicy.mode === 'durable') {
+    historyOptions.authorizeRecoveryReceipt = (candidate, admissions) =>
+      recoveryAgents?.authorizeRecoveryReceiptEffect(candidate, admissions) ?? Effect.succeed(null)
+    historyOptions.onCommitted = (ack) =>
+      Effect.tryPromise({
+        try: () => recoveryAgents?.acknowledgeCommittedHistory(ack) ?? Promise.resolve(),
+        catch: (cause) => cause,
+      })
+  }
+  conversations = new ConversationStore(app.getPath('userData'), historyOptions)
+  ssh = new SSHConnection(store, {}, recoveryStore, recoveryPolicy)
   ssh.forwarding.setEnabled(customization.get().config.autoPortForward)
-  const agents = new Agents(ssh, (event) => send('agent:event', event))
+  const agents = new Agents(
+    ssh,
+    (event) => send('agent:event', event),
+    recoveryStore,
+    recoveryPolicy,
+  )
+  recoveryAgents = agents
+  let nativeHistoryReconciled = false
+  const nativeHistoryAdmission = Semaphore.makeUnsafe(1)
+  const admitNativeHistory = Effect.fn('Life.admitNativeHistory')(() =>
+    nativeHistoryAdmission.withPermits(1)(
+      Effect.gen(function* () {
+        if (nativeHistoryReconciled) return
+        const proof = yield* conversations!.loadRecoveryReceiptEffect()
+        if (proof) yield* agents.acknowledgeRecoveredHistoryProofEffect(proof)
+        nativeHistoryReconciled = true
+      }).pipe(
+        // History/export stays available when private recovery evidence fails.
+        // The native service retains uncertain ownership instead of advancing it.
+        Effect.catch(() => Effect.void),
+      ),
+    ),
+  )
+  const attestLoadedHistory = Effect.fn('Life.attestLoadedHistory')(function* (input: unknown) {
+    const request = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({ hash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)) }),
+    )(input)
+    const proof = yield* conversations!.loadRecoveryReceiptEffect()
+    if (!proof || proof.hash !== request.hash) return []
+    return yield* agents.admitLoadedHistoryProofEffect(proof)
+  })
   providerUpdates = new ProviderUpdateController(
     () => ssh.state,
     (state) => send('provider-updates:state', state),
@@ -207,8 +452,36 @@ async function init() {
     },
   )
   hostHistory = new AgentHistory(ssh)
-  cancelRendererSessions = () =>
-    agents.close('Life restarted its interface. Send a message to continue this thread.')
+  cancelRendererSessions = () => agents.suspendRendererConsumers()
+  flushNativeRecovery = () => agents.flushRecovery()
+  detachNativeRecovery = () => agents.detachForShutdown()
+  finalizeRendererSuspension = () => agents.finalizeRendererSuspension()
+  rendererHandoffAdmitted = () => agents.rendererHandoffAdmitted()
+  rendererWorkPending = () => agents.hasPendingRendererWork()
+  providerRetirementPending = () => agents.hasProviderRetirementTargets()
+  releaseIdleProviders = async () => {
+    const releases = await Promise.all([
+      agents.releaseIdleProviders(),
+      agents.releaseIdleClaudeProviders(),
+    ])
+    if (releases.some((results) => results.some((released) => !released)))
+      throw new Error(
+        'An idle provider has not confirmed its exit. The current interface is paused; use Restart Interface to recover.',
+      )
+    if (agents.hasPendingRendererWork())
+      throw new Error('Native work still owns this interface. Use Restart Interface to recover.')
+  }
+  releaseProvidersOnQuit = async () => {
+    const releases = await Promise.allSettled([
+      agents.releaseIdleProviders(),
+      agents.releaseIdleClaudeProviders(),
+    ])
+    for (const result of releases) {
+      if (result.status === 'rejected') reportShutdownFailure(result.reason)
+      else if (result.value.some((released) => !released))
+        reportShutdownFailure(new Error('An idle native provider did not confirm its exit.'))
+    }
+  }
   const extensionSharing = new ExtensionSharing()
   ssh.on('state', (state) => {
     send('connection:state', state)
@@ -217,7 +490,8 @@ async function init() {
   ssh.on('host-key', (request) => send('connection:host-key', request))
   ssh.on('terminal', (data) => send('terminal:data', data))
   ssh.on('forwarding-state', (state) => send('forwarding:state', state))
-  const operations = new Map<string, (...args: unknown[]) => unknown>()
+  const operations = new ApplicationRuntime(assertRendererAdmission)
+  applicationRuntime = operations
   let localApplies = 0
   const applyLocal = async <T>(operation: () => Promise<T>): Promise<T> => {
     localApplies++
@@ -228,14 +502,37 @@ async function init() {
     }
   }
   const handle = (name: string, fn: (...args: unknown[]) => unknown) => {
-    operations.set(name, fn)
-    ipcMain.handle(name, (event, ...args: unknown[]) => {
+    operations.register(name, fn)
+    ipcMain.handle(name, async (event, ...args: unknown[]) => {
       if (!isTrustedRendererSender(window, event)) throw new Error('Untrusted IPC sender')
+      const incomingDocumentId = nativeDocuments.capture().documentId
+      const handoff = rendererHandoff
+      // A new document can load before the preceding document's accepted
+      // history/owner work has drained. Hold its requests behind that receipt.
+      if (handoff && incomingDocumentId !== handoff.documentId) {
+        await handoff.promise
+        if (
+          !isTrustedRendererSender(window, event) ||
+          nativeDocuments.capture().documentId !== incomingDocumentId
+        )
+          throw new Error('The request belongs to an earlier Life document.')
+      }
       assertRendererAdmission(name)
-      return fn(...args)
+      return operations.invoke(name, args, {
+        beforeDispatch: () => {
+          if (!isTrustedRendererSender(window, event)) throw new Error('Untrusted IPC sender')
+          if (nativeDocuments.capture().documentId !== incomingDocumentId)
+            throw new Error('The request belongs to an earlier Life document.')
+        },
+      })
     })
   }
   const invokeCore = async (method: string, payload: unknown) => {
+    const documentId = nativeDocuments.capture().documentId
+    const beforeDispatch = () => {
+      if (nativeDocuments.capture().documentId !== documentId)
+        throw new Error('The extension request belongs to an earlier Life document.')
+    }
     const args = extensionCoreArguments(method, parseExtensionPayload(payload))
     if (method === 'window.minimize') {
       window?.minimize()
@@ -284,10 +581,9 @@ async function init() {
                     } as Record<string, string>
                   )[method] || method.replace('sourceCode.', 'source-code:')
                 : method.replace('.', ':')
-    const operation = operations.get(channel)
-    if (!operation) throw new Error(`This Life method is unavailable: ${method}`)
+    if (!operations.has(channel)) throw new Error(`This Life method is unavailable: ${method}`)
     assertRendererAdmission(channel)
-    const value = await operation(...args)
+    const value = await operations.invoke(channel, args, { beforeDispatch })
     // Built-in snapshots may include optional undefined fields; worker RPC is strict JSON.
     return JSON.parse(JSON.stringify(value === undefined ? null : value))
   }
@@ -312,50 +608,202 @@ async function init() {
       ? (signal) => packagedDependencies.ensure(signal)
       : undefined,
     directory: join(app.getPath('userData'), 'source-code'),
+    persistenceMode: recoveryPolicy.sourcePersistenceMode,
+    recoveryPlatform: recoveryPolicy,
     onUpdate: (state) => send('source-code:state', state),
   })
   await sourceCode.init()
-  let sourceReload: Promise<void> | undefined
+  assertStartupActive()
+  type PendingReload = { acknowledgement: Promise<void>; cancel(): void }
+  const sourceReloads = new RendererReloadFlights<BrowserWindow | null, PendingReload>()
   const reloadSource = () => {
-    if (sourceReload) return sourceReload
+    if (historyLifecycle.failure) return Promise.reject(historyLifecycle.failure)
     const owner = window
-    sourceReload = new Promise<void>((resolve) => {
-      const reloadWhenIdle = () => {
-        if (!owner || owner !== window || owner.isDestroyed() || quitting) {
-          sourceReload = undefined
-          resolve()
-          return
-        }
-        // Keep the current renderer receiving other threads' streaming events.
-        // Reloading once their sessions settle preserves those conversations.
-        if (agents.hasRunningSessions() || localApplies) {
-          sourceReloadTimer = setTimeout(reloadWhenIdle, 200)
-          return
-        }
-        sourceReload = undefined
-        resolve()
-        setTimeout(() => {
-          if (owner !== window || owner.isDestroyed() || quitting) return
-          if (agents.hasRunningSessions() || localApplies) void reloadSource()
-          else {
-            const admission = rendererAdmissions.get(owner)
-            const documentRevision = admission?.documentRevision
-            void cancelRendererWork()
-              .then(() => {
-                if (owner !== window || owner.isDestroyed() || quitting) return
-                // A native reload may already have committed a fresh document
-                // while persistence was settling. Do not discard its new work.
-                if (admission?.documentRevision !== documentRevision) return
-                owner.webContents.reload()
-              })
-              .catch((error) => dialog.showErrorBox('Life reload failed', String(error)))
-          }
-        }, 100)
-      }
-      sourceReloadTimer = setTimeout(reloadWhenIdle, 100)
+    const document = captureHistoryDocument(owner)
+    const requestedRevision = owner ? rendererAdmissions.get(owner)?.documentRevision : undefined
+    const requestedDocumentId = nativeDocuments.capture().documentId
+    const existing = sourceReloads.get(owner, requestedRevision, requestedDocumentId)
+    if (existing) return existing.acknowledgement
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let acknowledge = () => {}
+    const acknowledgement = new Promise<void>((resolve) => {
+      acknowledge = resolve
     })
-    return sourceReload
+    const clearTimer = () => {
+      clearTimeout(timer)
+      if (sourceReloadTimer === timer) sourceReloadTimer = undefined
+      timer = undefined
+    }
+    const finish = () => {
+      cancelled = true
+      clearTimer()
+      sourceReloads.clear(pending)
+      acknowledge()
+    }
+    const pending: PendingReload = { acknowledgement, cancel: finish }
+    sourceReloads.replace(owner, requestedRevision, pending, requestedDocumentId)?.cancel()
+    const ownsDocument = () =>
+      Boolean(
+        !cancelled &&
+        owner &&
+        owner === window &&
+        !owner.isDestroyed() &&
+        !quitting &&
+        document?.ownsDocument() &&
+        rendererAdmissions.get(owner)?.documentRevision === requestedRevision &&
+        nativeDocuments.capture().documentId === requestedDocumentId,
+      )
+    const schedule = (work: () => void, delay: number) => {
+      clearTimer()
+      const scheduled = setTimeout(() => {
+        if (timer !== scheduled) return
+        if (sourceReloadTimer === scheduled) sourceReloadTimer = undefined
+        timer = undefined
+        work()
+      }, delay)
+      timer = scheduled
+      sourceReloadTimer = scheduled
+    }
+    const canHandoff = async () => {
+      if (localApplies) return false
+      try {
+        if (await agents.rendererHandoffAdmitted()) return true
+      } catch {
+        return false
+      }
+      return (
+        !agents.hasPendingRendererWork() &&
+        (!agents.hasUntrackedRunningSessions() || agents.hasProviderRetirementTargets())
+      )
+    }
+    const reloadWhenIdle = async () => {
+      if (!owner || !ownsDocument() || historyLifecycle.failure) return finish()
+      const admitted = await canHandoff()
+      if (!ownsDocument() || historyLifecycle.failure) return finish()
+      if (!admitted) {
+        schedule(() => void reloadWhenIdle(), 200)
+        return
+      }
+      // Keep the flight until the final native/history barrier has completed.
+      acknowledge()
+      schedule(() => {
+        void (async () => {
+          if (!ownsDocument()) return finish()
+          const admitted = await canHandoff()
+          if (!ownsDocument() || historyLifecycle.failure) return finish()
+          if (!admitted) {
+            schedule(() => void reloadWhenIdle(), 200)
+            return
+          }
+          await beginRendererHandoff(
+            owner,
+            true,
+            ownsDocument,
+            () => agents.hasPendingRendererWork() || agents.hasProviderRetirementTargets(),
+          )
+          if (!ownsDocument() || historyLifecycle.failure) return
+          // Accepted start/control work can enter while history is flushing.
+          // Recheck its real durable ownership after every asynchronous barrier.
+          if (!(await agents.rendererHandoffAdmitted())) {
+            if (ownsDocument()) schedule(() => void reloadWhenIdle(), 200)
+            return
+          }
+          if (!ownsDocument() || historyLifecycle.failure) return
+          owner.webContents.reload()
+        })()
+          .catch((error) => {
+            if (!quitting && ownsDocument())
+              dialog.showErrorBox('Life reload failed', String(error))
+          })
+          .finally(() => {
+            if (timer === undefined) finish()
+          })
+      }, 100)
+    }
+    schedule(() => void reloadWhenIdle(), 100)
+    return acknowledgement
   }
+  reloadRendererWhenIdle = reloadSource
+  const actionDirectory = join(app.getPath('userData'), 'native-recovery-actions')
+  let recoveryActions: NativeRecoveryActionsHandle = unavailableNativeRecoveryActions(
+    actionDirectory,
+    recoveryPolicy.error ?? new Error('Native recovery actions are unavailable on this platform.'),
+  )
+  if (recoveryPolicy.mode === 'durable') {
+    nativeActionRuntime = ManagedRuntime.make(
+      NativeRecoveryActions.layer({
+        directory: actionDirectory,
+        exclusiveRuntime: ownsInstance,
+        drivers: makeStudioRecoveryActionDrivers({
+          sourceCode,
+          customization,
+          extensions,
+          captureReloadDocument: () => nativeDocuments.capture(),
+          reload: async (request, prepared, signal) => {
+            const revision = z.number().int().min(0).parse(request.intent.revision)
+            if (!nativeDocuments.matches(prepared.originalDocumentId, revision)) {
+              await reloadSource()
+              await nativeDocuments.wait(prepared.originalDocumentId, revision, signal)
+            }
+          },
+          reconcileReload: async (request, prepared) =>
+            nativeDocuments.matches(
+              prepared.originalDocumentId,
+              z.number().int().min(0).parse(request.intent.revision),
+            ),
+        }),
+      }),
+    )
+    try {
+      recoveryActions = await nativeActionRuntime.runPromise(NativeRecoveryActions)
+    } catch (cause) {
+      recoveryActions = unavailableNativeRecoveryActions(actionDirectory, cause)
+    }
+    assertStartupActive()
+  }
+  const performRecoveryAction = Effect.fn('Life.performRecoveryAction')(function* (input: unknown) {
+    yield* recoveryPolicy.assertNativeRecoveryEffect('perform-recovery-action').pipe(
+      Effect.mapError(
+        (cause) =>
+          new NativeRecoveryActionError({
+            operation: 'platform',
+            path: actionDirectory,
+            reason: 'unsupported',
+            message: 'Native recovery actions are unavailable in this platform mode.',
+            cause,
+          }),
+      ),
+    )
+    const request = yield* Schema.decodeUnknownEffect(nativeRecoveryActionRequestSchema)(
+      input,
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new NativeRecoveryActionError({
+            operation: 'validate',
+            path: actionDirectory,
+            reason: 'invalid',
+            message: 'Select an owned Studio action to continue.',
+            cause,
+          }),
+      ),
+    )
+    const authorization = yield* Effect.tryPromise({
+      try: () => agents.assertRecoveryActionOwner(request),
+      catch: (cause) =>
+        new NativeRecoveryActionError({
+          operation: 'authorize',
+          path: actionDirectory,
+          reason: 'ownership',
+          message: 'This Studio action no longer belongs to the active native owner.',
+          cause,
+        }),
+    })
+    return yield* authorization === 'reconcile-only'
+      ? recoveryActions.reconcileOnly(request)
+      : recoveryActions.perform(request)
+  })
   const sourceFailure = async (revision: number, reason: string) => {
     if (!sourceCode.get().enabled || sourceCode.get().active?.revision !== revision) return
     const owner = window
@@ -390,7 +838,10 @@ async function init() {
   handle('source-code:reload', reloadSource)
   handle('source-code:ready', (value) => {
     const revision = z.number().int().min(0).parse(value)
-    if (sourceCode.get().active?.revision === revision) clearTimeout(sourceStartupTimer)
+    if (sourceCode.get().active?.revision === revision) {
+      clearTimeout(sourceStartupTimer)
+      if (window) nativeDocuments.ready(window, revision)
+    }
   })
   handle('source-code:error', (value, reason) =>
     sourceFailure(z.number().int().min(0).parse(value), z.string().max(10000).parse(reason)),
@@ -428,18 +879,25 @@ async function init() {
     if (error) throw new Error(error)
   })
   handle('extensions:recover', () => {
-    void recoverExtensions().catch((error) =>
-      dialog.showErrorBox('Life recovery failed', String(error)),
-    )
+    void recoverExtensions().catch((error) => {
+      if (!quitting) dialog.showErrorBox('Life recovery failed', String(error))
+    })
   })
   handle('profiles:list', () => store.list())
-  handle('conversations:load', () => conversations!.load())
-  handle('conversations:save', (threads, savedAt) =>
-    conversations!.save(
+  handle('conversations:load', () =>
+    admitNativeHistory().pipe(Effect.andThen(conversations!.loadEffect())),
+  )
+  handle('conversations:loadEncoded', () =>
+    admitNativeHistory().pipe(Effect.andThen(conversations!.loadEncodedEffect())),
+  )
+  handle('conversations:save', (threads, savedAt, projectionAdmissions) =>
+    conversations!.saveEffect(
       z.array(z.unknown()).parse(threads),
       savedAt === undefined ? undefined : z.number().int().min(0).parse(savedAt),
+      projectionAdmissions,
     ),
   )
+  handle('conversations:checkpoint', (input) => conversations!.saveCheckpointEffect(input))
   handle('app:info', () => ({
     name: 'Life',
     version: app.getVersion(),
@@ -480,7 +938,7 @@ async function init() {
   handle('updates:download', () => updates.download())
   handle('updates:auto-download', (enabled) => updates.setAutoDownload(z.boolean().parse(enabled)))
   handle('updates:install', () => {
-    if (agents.hasRunningSessions())
+    if (agents.hasPendingRendererWork())
       throw new Error('Finish or stop active agents before restarting Life to install the update.')
     updates.install()
   })
@@ -503,25 +961,108 @@ async function init() {
     if (recovering) throw new Error('Life is already restarting its interface')
     return restartInterface(owner)
   })
-  handle('profiles:save', (p) => store.save(profileSchema.parse(p)))
-  handle('profiles:remove', (id) => store.remove(z.string().parse(id)))
-  handle('connection:connect', (input) => ssh.connect(connectSchema.parse(input)))
+  handle('profiles:save', (p) => store.saveEffect(profileSchema.parse(p)))
+  handle('profiles:remove', (id) => store.removeEffect(z.string().parse(id)))
+  handle('connection:connect', (input) => {
+    const parsed = connectSchema.parse(input)
+    ssh.validateConnectInput(parsed)
+    const owner = window
+    const admission = owner ? rendererAdmissions.get(owner) : undefined
+    const documentRevision = admission?.documentRevision
+    const documentId = nativeDocuments.capture().documentId
+    const ownsDocument = () =>
+      Boolean(
+        owner &&
+        owner === window &&
+        !owner.isDestroyed() &&
+        rendererAdmissions.get(owner) === admission &&
+        admission?.documentRevision === documentRevision &&
+        nativeDocuments.capture().documentId === documentId &&
+        !historyLifecycle.failure &&
+        admission?.allows('connection:connect'),
+      )
+    const ownsEnvironment = ssh.captureEnvironmentOwnership()
+    const ownsRequest = () => ownsEnvironment() && ownsDocument()
+    return agents.withEnvironmentChangeEffect(
+      Effect.gen(function* () {
+        const state = yield* Effect.tryPromise({
+          try: () => {
+            if (!ownsRequest()) throw new Error('The selected environment changed.')
+            return ssh.connect(parsed)
+          },
+          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+        })
+        const ownsConnectedEnvironment = ssh.captureEnvironmentOwnership()
+        const current = () =>
+          ownsDocument() &&
+          ownsConnectedEnvironment() &&
+          ssh.state.status === 'connected' &&
+          ssh.state.profile?.id === state.profile?.id
+        if (!current()) return yield* Effect.fail(new Error('The selected environment changed.'))
+        yield* store.selectionEffect(state.profile!.id, current)
+        if (!current()) return yield* Effect.fail(new Error('The selected environment changed.'))
+        return ssh.state
+      }),
+      ownsRequest,
+    )
+  })
   handle('connection:select-workspace', (path) =>
     ssh.selectWorkspace(remoteDirectorySchema.parse(path)),
   )
   handle('connection:list-directories', (path) =>
     ssh.listDirectories(remoteDirectorySchema.optional().parse(path)),
   )
-  handle('connection:disconnect', () => ssh.disconnect())
+  handle('connection:disconnect', () => {
+    const owner = window
+    const admission = owner ? rendererAdmissions.get(owner) : undefined
+    const documentRevision = admission?.documentRevision
+    const documentId = nativeDocuments.capture().documentId
+    const ownsEnvironment = ssh.captureEnvironmentOwnership()
+    const ownsRequest = () =>
+      Boolean(
+        ownsEnvironment() &&
+        owner &&
+        owner === window &&
+        !owner.isDestroyed() &&
+        rendererAdmissions.get(owner) === admission &&
+        admission?.documentRevision === documentRevision &&
+        nativeDocuments.capture().documentId === documentId &&
+        !historyLifecycle.failure &&
+        admission?.allows('connection:disconnect'),
+      )
+    return agents.withEnvironmentChangeEffect(
+      Effect.try({
+        try: () => {
+          if (!ownsRequest()) throw new Error('The selected environment changed.')
+          ssh.disconnect()
+        },
+        catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+      }),
+      ownsRequest,
+    )
+  })
   handle('connection:state', () => ssh.state)
-  handle('connection:execute', (input) =>
-    executeConnectionCommand(ssh, connectionExecutionSchema.parse(input)),
-  )
+  handle('connection:execute', (input) => executeConnectionCommandEffect(ssh, input))
   handle('forwarding:get', () => ssh.forwarding.getState())
   handle('connection:trust', (id, accepted) =>
     ssh.trust(z.string().parse(id), z.boolean().parse(accepted)),
   )
   handle('agent:start', (input) => agents.start(startSchema.parse(input)))
+  handle('agent:recovery-support', () => recoveryPolicy.status)
+  handle('agent:reserve-recovery-owner', (input) => agents.reserveRecoveryOwner(input))
+  handle('agent:attest-loaded-history', (input) => attestLoadedHistory(input))
+  handle('agent:prepare-recovery-cache', (input) => agents.prepareRecoveryCacheEffect(input))
+  handle('agent:attest-recovery-cache', (input) => agents.attestRecoveryCacheEffect(input))
+  handle('agent:recover', (input) =>
+    admitNativeHistory().pipe(
+      Effect.andThen(
+        Effect.tryPromise({ try: () => agents.recover(input), catch: (cause) => cause }),
+      ),
+    ),
+  )
+  handle('agent:update-recovery-owner', (input) => agents.updateRecoveryOwner(input))
+  handle('agent:acknowledge-recovery-history', (input) => agents.acknowledgeRecoveryHistory(input))
+  handle('agent:perform-recovery-action', (input) => performRecoveryAction(input))
   handle('agent-history:list', (input) => hostHistory!.list(input))
   handle('agent-history:read', (input) => hostHistory!.read(input))
   handle('agent-history:cancel', (id) => hostHistory!.cancel(z.string().min(1).max(100).parse(id)))
@@ -529,12 +1070,13 @@ async function init() {
   handle('agent:steer', (input) => agents.steer(agentSteerSchema.parse(input)))
   handle('agent:stop', (id) => agents.stop(z.string().parse(id)))
   handle('agent:dispose', (id) => agents.dispose(z.string().parse(id)))
-  handle('agent:respond', (id, requestId, accepted, answers) =>
+  handle('agent:respond', (id, requestId, accepted, answers, decisionId) =>
     agents.respond(
       z.string().parse(id),
       z.string().parse(requestId),
       z.boolean().parse(accepted),
       z.record(z.string(), z.array(z.string())).optional().parse(answers),
+      z.string().min(1).max(128).optional().parse(decisionId),
     ),
   )
   handle('agent:models', (provider) => agents.models(z.enum(['codex', 'claude']).parse(provider)))
@@ -571,7 +1113,7 @@ async function init() {
       window &&
       e.sender === window.webContents &&
       e.senderFrame === window.webContents.mainFrame &&
-      rendererAdmissions.get(window)?.allows('terminal:write') &&
+      permitsRendererAdmission('terminal:write') &&
       typeof data === 'string' &&
       data.length <= 100000
     )
@@ -582,7 +1124,7 @@ async function init() {
       e.sender === window?.webContents &&
       e.senderFrame === window?.webContents.mainFrame &&
       window &&
-      rendererAdmissions.get(window)?.allows('terminal:resize') &&
+      permitsRendererAdmission('terminal:resize') &&
       typeof cols === 'number' &&
       typeof rows === 'number' &&
       Number.isInteger(cols) &&
@@ -601,6 +1143,7 @@ async function init() {
     if (action === 'close') window?.close()
   })
   await extensions.init()
+  assertStartupActive()
   protocol.handle('life-code', async (request) => {
     try {
       const path = sourceCode.assetPath(request.url)
@@ -658,10 +1201,34 @@ async function init() {
       return new Response('Invalid extension request', { status: 400 })
     }
   })
-  createWindow()
+  const initialProfile = store.selectedProfile()
+  if (initialProfile.transport === 'local') {
+    const startup = ssh.connect(initialProfile)
+    createWindow()
+    void startup.catch((cause) => {
+      if (quitting) return
+      // Failed admission precedes connection publication. A newer environment
+      // selection always keeps its own state and error.
+      if (ssh.state.status === 'disconnected' && !ssh.state.profile) {
+        ssh.state = {
+          status: 'disconnected',
+          profile: initialProfile,
+          error: cause instanceof Error ? cause.message : String(cause),
+        }
+        send('connection:state', ssh.state)
+      }
+      console.error('Local environment startup failed:', cause)
+    })
+  } else {
+    // Retain an explicit SSH selection without storing or replaying its credentials.
+    ssh.state = { status: 'disconnected', profile: initialProfile }
+    createWindow()
+  }
   updates.start()
 }
 function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
+  assertStartupActive()
+  historyLifecycle.assertCanCreateDocument()
   const previousAlive = previous && !previous.isDestroyed() ? previous : undefined
   const previousBounds =
     previousAlive && (previousAlive.isMaximized() || previousAlive.isFullScreen())
@@ -703,16 +1270,46 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
     event.preventDefault()
     if (closePending || owner !== window || owner.isDestroyed()) return
     closePending = true
-    void flushConversationHistory(owner)
-      .then(() => conversations?.settled())
-      .finally(() => {
-        closeReady = true
-        if (!owner.isDestroyed()) owner.close()
-      })
+    const document = captureHistoryDocument(owner)
+    rendererAdmissions.get(owner)?.suspend()
+    void runEffect(
+      finishNativeShutdownEffect(
+        [
+          historyLifecycle.handoffEffect(
+            undefined,
+            undefined,
+            Effect.tryPromise({
+              try: async () => {
+                await flushConversationHistory(owner, document)
+                cancelRendererSessions()
+                await runEffect(historyLifecycle.settledEffect(conversations, document))
+                await flushNativeRecovery()
+                finalizeRendererSuspension()
+              },
+              catch: (error) => error,
+            }),
+          ),
+          Effect.tryPromise({ try: () => releaseProvidersOnQuit(), catch: (error) => error }),
+          Effect.tryPromise({ try: () => detachNativeRecovery(), catch: (error) => error }),
+        ],
+        (error) => {
+          reportShutdownFailure(error)
+          if (historyLifecycle.failure && !quitting)
+            dialog.showErrorBox(
+              'Life history could not be confirmed',
+              historyLifecycle.failure.message,
+            )
+        },
+      ),
+    ).finally(() => {
+      closeReady = true
+      if (!owner.isDestroyed()) owner.close()
+    })
   })
   if (extensionRecovery) extensionRecoveryStartups.add(owner)
   const admission = new RendererDocumentAdmission()
   rendererAdmissions.set(owner, admission)
+  nativeDocuments.commit(owner)
   let recoveryPrompt:
     { controller: AbortController; cause: 'unresponsive' | 'crash' | 'load' } | undefined
   const reportRecoveryFailure = (error: unknown) => {
@@ -743,7 +1340,7 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
             : 'Life could not keep its interface running.',
         detail:
           `${detail}\n\nYour saved projects, conversations and installed extensions are preserved. ` +
-          'Restarting the interface stops current agent work and keeps your machine connected.' +
+          'Verified agent work continues while Life restores its interface and keeps your machine connected.' +
           (canRecoverExtensions
             ? '\nRecover extensions disables customizations and disconnects the machine.'
             : ''),
@@ -791,18 +1388,35 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
     }, 25000)
     sourceStartupTimer.unref()
   }
-  owner.webContents.on('did-start-navigation', (_event, url, inPlace, mainFrame) => {
-    if (!mainFrame || inPlace || owner !== window || quitting) return
-    // Native/manual reloads also discard the old UI's request ownership. Foreign
-    // navigations are blocked below and must not cancel useful work.
+  owner.webContents.on('did-start-navigation', (navigation) => {
+    if (owner !== window || quitting) return
     const currentURL = owner.webContents.getURL()
-    if (currentURL && url !== currentURL) return
-    if (currentURL) void cancelRendererWork().catch(reportRecoveryFailure)
+    // Renderer attempts reach will-navigate after this event. They must not
+    // retire work before that attempt is blocked or deferred through the idle path.
+    if (!isNativeMainDocumentNavigation(navigation)) return
+    if (currentURL && navigation.url !== currentURL) return
+    if (currentURL) void beginRendererHandoff(owner).catch(reportRecoveryFailure)
     startSourceWatchdog()
   })
   owner.webContents.on('did-frame-navigate', (_event, _url, _code, _status, mainFrame) => {
-    if (mainFrame && owner === window && !owner.isDestroyed() && !quitting && !recovering)
-      admission.commitMainDocument()
+    if (!mainFrame || owner !== window || owner.isDestroyed() || quitting) return
+    nativeDocuments.commit(owner)
+    const documentId = nativeDocuments.capture().documentId
+    const admit = () => {
+      if (
+        owner === window &&
+        !owner.isDestroyed() &&
+        !quitting &&
+        !recovering &&
+        !closePending &&
+        !historyLifecycle.failure &&
+        nativeDocuments.capture().documentId === documentId
+      )
+        historyLifecycle.commitDocument(admission)
+    }
+    const handoff = rendererHandoff
+    if (handoff) void handoff.promise.then(admit).catch(reportRecoveryFailure)
+    else admit()
   })
   owner.webContents.on('render-process-gone', (_event, details) => {
     if (owner !== window || owner.isDestroyed() || recovering || quitting) return
@@ -845,7 +1459,12 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
     }
     return { action: 'deny' }
   })
-  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  owner.webContents.on('will-navigate', (event) => {
+    event.preventDefault()
+    if (owner !== window || owner.isDestroyed() || quitting || recovering) return
+    if (requestsRendererReload(owner.webContents.getURL(), event.url))
+      void reloadRendererWhenIdle().catch(reportRecoveryFailure)
+  })
   window.webContents.on('before-input-event', (event, input) => {
     if (
       input.type === 'keyDown' &&
@@ -854,9 +1473,9 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
       input.key.toLowerCase() === 'l'
     ) {
       event.preventDefault()
-      void recoverExtensions().catch((error) =>
-        dialog.showErrorBox('Life recovery failed', String(error)),
-      )
+      void recoverExtensions().catch((error) => {
+        if (!quitting) dialog.showErrorBox('Life recovery failed', String(error))
+      })
     }
   })
   const loaded = process.env.ELECTRON_RENDERER_URL
@@ -867,6 +1486,7 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
       promptRecovery('load', `The interface could not load: ${String(error)}`)
   })
   window.on('closed', () => {
+    nativeDocuments.invalidate(owner)
     recoveryPrompt?.controller.abort()
     if (window === owner) {
       researchDocuments.clear()
@@ -880,38 +1500,67 @@ if (ownsInstance)
     .whenReady()
     .then(init)
     .catch((error) => {
-      dialog.showErrorBox('Life could not start', error.message)
+      if (!quitting) dialog.showErrorBox('Life could not start', error.message)
       app.quit()
     })
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 app.on('activate', () => {
-  if (!window) createWindow()
+  if (!window && !quitting) {
+    try {
+      createWindow()
+    } catch (error) {
+      dialog.showErrorBox('Life history could not be confirmed', String(error))
+    }
+  }
 })
 app.on('before-quit', (event) => {
   if (quitting) return
-  if (window) rendererAdmissions.get(window)?.suspend()
+  event.preventDefault()
+  quitting = true
+  const owner = window
+  const document = captureHistoryDocument(owner)
+  if (owner) rendererAdmissions.get(owner)?.suspend()
   researchDocuments.clear()
-  ssh?.disconnect()
   const rendererRequests = ssh?.cancelRendererRequests()
   customization?.close()
   updates?.dispose()
   providerUpdates?.dispose()
   clearTimeout(sourceStartupTimer)
   clearTimeout(sourceReloadTimer)
-  if (extensions) {
-    event.preventDefault()
-    quitting = true
-    void flushConversationHistory(window)
-      .then(() =>
-        Promise.allSettled([
-          rendererRequests,
-          extensions.close(),
-          sourceCode?.close(),
-          conversations?.settled(),
-        ]),
-      )
-      .finally(() => app.quit())
-  }
+  const boundary = (operation: () => Promise<unknown> | undefined) =>
+    Effect.tryPromise({ try: () => Promise.resolve(operation()), catch: (error) => error })
+  void runEffect(
+    finishNativeShutdownEffect(
+      [
+        historyLifecycle.handoffEffect(
+          conversations,
+          document,
+          boundary(() => flushConversationHistory(owner, document)).pipe(Effect.asVoid),
+        ),
+        Effect.sync(() => nativeDocuments.close()),
+        Effect.sync(() => cancelRendererSessions()),
+        boundary(() => applicationRuntime?.dispose()),
+        boundary(() => flushNativeRecovery()),
+        Effect.sync(() => finalizeRendererSuspension()),
+        boundary(() => releaseProvidersOnQuit()),
+        boundary(() => detachNativeRecovery()),
+        ssh?.disconnectAndWaitEffect() ?? Effect.void,
+        Effect.all(
+          [
+            boundary(() => rendererRequests),
+            boundary(() => extensions?.close()),
+            boundary(() => sourceCode?.close()),
+            boundary(() => customization?.closeAndSettle()),
+            historyLifecycle.closeEffect(conversations, document),
+          ].map((resource) => finishNativeShutdownEffect([resource], reportShutdownFailure)),
+          { concurrency: 'unbounded' },
+        ),
+        boundary(() => nativeActionRuntime?.dispose()),
+        boundary(() => nativeRecoveryRuntime?.dispose()),
+      ],
+      reportShutdownFailure,
+    ),
+  ).finally(() => app.quit())
 })

@@ -552,15 +552,33 @@ export function WorkspacePanel({
       )}
       <footer className="workspace-footer">
         <span className={`status-dot ${connection.status === 'connected' ? 'online' : ''}`} />
-        <span title={connection.profile?.host}>
-          {connection.status === 'connected' ? connection.profile?.host : 'No machine connected'}
+        <span
+          title={
+            connection.profile?.transport === 'local'
+              ? 'Runs on the computer running Life'
+              : connection.profile?.host
+          }
+        >
+          {connection.status === 'connected'
+            ? connection.profile?.transport === 'local'
+              ? 'Local'
+              : connection.profile?.host
+            : 'No machine connected'}
         </span>
         {tab === 'diff' && git.branch && git.branch !== 'No repository' ? (
           <span className="workspace-footer-branch" title={git.branch}>
             <GitBranch size={11} /> {git.branch}
           </span>
         ) : null}
-        <button className="icon-button" aria-label="Open remote terminal" onClick={onTerminal}>
+        <button
+          className="icon-button"
+          aria-label={
+            connection.profile?.transport === 'local'
+              ? 'Open local terminal'
+              : 'Open remote terminal'
+          }
+          onClick={onTerminal}
+        >
           <Terminal size={14} />
         </button>
       </footer>

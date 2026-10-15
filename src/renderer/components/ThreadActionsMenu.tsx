@@ -188,6 +188,13 @@ export function ThreadActionsMenu({
             <Download size={14} />
             Export thread
           </DropdownMenu.Item>
+          <DropdownMenu.Item
+            className="life-thread-menu-item"
+            onSelect={() => act('export', 'recovery')}
+          >
+            <Download size={14} />
+            Export recovery JSON
+          </DropdownMenu.Item>
           <DropdownMenu.Item className="life-thread-menu-item" onSelect={() => act('settings')}>
             <Settings size={14} />
             Settings and undo

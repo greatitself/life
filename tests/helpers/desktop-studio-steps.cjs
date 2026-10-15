@@ -3,6 +3,7 @@ const { createHash } = require('node:crypto')
 const { existsSync } = require('node:fs')
 const { readFile, stat, writeFile } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
+const { readSavedThreads } = require('./desktop-history.cjs')
 
 const historyKey = 'life.studio.sessions.v1'
 const activeKey = 'life.studio.active.v1'
@@ -181,8 +182,7 @@ async function runStudioChecks(context) {
     await waitForBoard(heading)
     return waitSession(request)
   }
-  const ordinaryHistory = () =>
-    page().evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+  const ordinaryHistory = () => readSavedThreads(page())
   const checks = []
   const proof = { checks, providers: [], source: {}, sharing: {} }
   const baselineWorkspace = (await page().evaluate(() => window.relay.connection.state())).workspace
@@ -758,7 +758,7 @@ async function runStudioChecks(context) {
     assert.ok((await ordinaryHistory()).some((thread) => thread.id === id))
   await waitUntil(
     async () => (await ordinaryHistory()).length >= savedTranscript.length,
-    'a cold start reconstructs cached conversations from the native disk checkpoint',
+    'a cold start restores conversations from the native disk checkpoint',
   )
   const restoredNativeHistory = await page().evaluate(() => window.relay.conversations.load())
   for (const saved of savedTranscript) {

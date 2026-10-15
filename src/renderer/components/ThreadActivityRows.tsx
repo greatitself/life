@@ -28,16 +28,19 @@ function ActivityDisclosure({
   summary,
   children,
   label,
+  messageIds,
 }: {
   summary: ReactNode
   children: ReactNode
   label: string
+  messageIds: string
 }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <details
       className="thread-action-disclosure"
       aria-label={label}
+      data-message-ids={messageIds}
       onToggle={(event) => setExpanded(event.currentTarget.open)}
     >
       <summary className="thread-action-heading">
@@ -198,6 +201,7 @@ const ToolBatch = memo(function ToolBatch({
     return (
       <ActivityDisclosure
         label={agents ? 'Subagent activity' : 'Tool activity'}
+        messageIds={messages.map((message) => encodeURIComponent(message.id)).join(' ')}
         summary={
           <>
             <Icon size={15} aria-hidden="true" />
@@ -304,6 +308,7 @@ export function ThreadActivityRows({
             <ActivityDisclosure
               key={row.message.id}
               label="Agent activity"
+              messageIds={encodeURIComponent(row.message.id)}
               summary={<span>{activitySummary(row.message)}</span>}
             >
               <MessageView message={row.message} provider={provider} minimal />

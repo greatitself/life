@@ -117,14 +117,16 @@ export function isSubagentActivity(message: Message): boolean {
     message.role === 'tool' &&
     (message.kind === 'subagent' ||
       /(?:collabAgent|(?:spawn|send|wait|close|resume|interrupt|followup)[_-]?(?:agent|message|task)|agent[_-]?spawn|^Agent$|^Task(?:Output|Stop)?$|^wait$)/i.test(
-        message.title || '',
+        typeof message.title === 'string' ? message.title : '',
       ))
   )
 }
 export function isSubagentLaunch(message: Message): boolean {
   return (
     message.role === 'tool' &&
-    /(?:spawn[_-]?agent|agent[_-]?spawn|^Agent$|^Task$)/i.test(message.title || '')
+    /(?:spawn[_-]?agent|agent[_-]?spawn|^Agent$|^Task$)/i.test(
+      typeof message.title === 'string' ? message.title : '',
+    )
   )
 }
 export function subagentTitle(message: Message): string {

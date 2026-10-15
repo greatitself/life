@@ -5,6 +5,10 @@ import { Agents } from '../src/main/agents'
 import { SSHConnection } from '../src/main/ssh'
 import type { AgentEvent, StartInput } from '../src/shared/types'
 
+vi.mock('../src/main/provider-titles', () => ({
+  generateProviderTitle: vi.fn(async () => undefined),
+}))
+
 let channelSequence = 0
 class Channel extends EventEmitter {
   private id = ++channelSequence
@@ -95,7 +99,368 @@ function fixture() {
   return { channels, ssh, events, agents, start }
 }
 
-describe('Codex transport restart lifecycle', () => {
+describe('provider transport restart lifecycle', () => {
+  it.each(['direct', 'initialize replay'])(
+    'leaves an undeclared Claude dialog pending without fabricating a user dismissal (%s)',
+    async (delivery) => {
+      const { channels, events, agents, start } = fixture()
+      try {
+        const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+        await vi.waitFor(() =>
+          expect(
+            channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+          ).toBe(true),
+        )
+        const channel = channels[0]
+        const initialize = channel.messages.find(
+          (message) => message.request?.subtype === 'initialize',
+        )!
+        expect(initialize.request).not.toHaveProperty('supportedDialogKinds')
+        const dialog = {
+          type: 'control_request',
+          request_id: 'native-pending-dialog',
+          session_id: 'saved-claude',
+          request: {
+            subtype: 'request_user_dialog',
+            dialog_kind: 'future-native-dialog',
+            payload: { opaque: 'preserve the provider-owned request' },
+          },
+        }
+        channel.reply({
+          type: 'control_response',
+          response: {
+            subtype: 'success',
+            request_id: initialize.request_id,
+            response: { session_state: 'requires_action' },
+            ...(delivery === 'initialize replay' ? { pending_user_dialog_requests: [dialog] } : {}),
+          },
+        })
+        await starting
+        if (delivery === 'direct') channel.reply(dialog)
+        channel.reply(dialog)
+        expect(
+          channel.messages.filter(
+            (message) =>
+              message.type === 'control_response' &&
+              message.response?.request_id === dialog.request_id,
+          ),
+        ).toEqual([])
+        expect(channel.closeRequested).toBe(false)
+        expect(
+          events.some((event) =>
+            ['approval', 'question', 'request-resolved', 'complete', 'error'].includes(event.type),
+          ),
+        ).toBe(false)
+        expect(agents.hasRunningSessions()).toBe(true)
+        channel.reply({
+          type: 'result',
+          session_id: 'saved-claude',
+          is_error: false,
+          result: 'Provider result awaiting its native dialog resolution',
+        })
+        expect(events.some((event) => event.type === 'complete')).toBe(false)
+        channel.reply({
+          type: 'system',
+          subtype: 'session_state_changed',
+          session_id: 'saved-claude',
+          state: 'idle',
+        })
+        expect(events.findLast((event) => event.type === 'complete')?.status).toBe('completed')
+        expect(
+          channel.messages.some(
+            (message) =>
+              message.type === 'control_response' &&
+              message.response?.request_id === dialog.request_id,
+          ),
+        ).toBe(false)
+      } finally {
+        agents.close()
+      }
+    },
+  )
+
+  it('rejects a different Claude resume ID before sending a prompt and preserves the saved session for retry', async () => {
+    const { channels, events, agents, start } = fixture()
+    try {
+      const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+      const rejected = expect(starting).rejects.toThrow(/different conversation/)
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].reply({ type: 'system', subtype: 'init', session_id: 'wrong-conversation' })
+      await rejected
+      expect(channels[0].closeRequested).toBe(true)
+      expect(channels[0].messages.some((message) => message.type === 'user')).toBe(false)
+      expect(events.some((event) => event.type === 'session')).toBe(false)
+      expect(events.find((event) => event.type === 'error')?.text).toMatch(
+        /saved thread is unchanged/,
+      )
+      expect(agents.hasRunningSessions()).toBe(false)
+
+      const retrying = start({ provider: 'claude' })
+      await vi.waitFor(() =>
+        expect(
+          channels[1]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].finishClose()
+      channels[1].reply({ type: 'system', subtype: 'init', session_id: 'saved-claude' })
+      channels[1].initializeClaude()
+      await retrying
+      expect(channels[1].messages.find((message) => message.type === 'user')?.session_id).toBe(
+        'saved-claude',
+      )
+      expect(events.some((event) => event.remoteId === 'wrong-conversation')).toBe(false)
+    } finally {
+      agents.close()
+    }
+  })
+
+  it('ends an active Claude transport if its root conversation ID changes', async () => {
+    const { channels, events, agents, start } = fixture()
+    try {
+      const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].initializeClaude()
+      await starting
+      channels[0].reply({
+        type: 'assistant',
+        session_id: 'wrong-conversation',
+        message: { id: 'wrong-answer', content: [{ type: 'text', text: 'Wrong conversation' }] },
+      })
+      expect(channels[0].closeRequested).toBe(true)
+      expect(agents.hasRunningSessions()).toBe(false)
+      expect(events.some((event) => event.text === 'Wrong conversation')).toBe(false)
+      expect(events.some((event) => event.remoteId === 'wrong-conversation')).toBe(false)
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
+    } finally {
+      agents.close()
+    }
+  })
+
+  it('adopts a new Claude session ID and ignores empty IDs without changing it', async () => {
+    const { channels, events, agents, start } = fixture()
+    try {
+      const starting = start({ provider: 'claude' })
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].reply({ type: 'system', subtype: 'init', session_id: 'new-native-session' })
+      channels[0].initializeClaude()
+      await starting
+      channels[0].reply({ type: 'system', subtype: 'init', session_id: '' })
+      expect(
+        events.filter((event) => event.type === 'session').map((event) => event.remoteId),
+      ).toEqual(['new-native-session'])
+      expect(channels[0].messages.find((message) => message.type === 'user')?.session_id).toBe(
+        'new-native-session',
+      )
+      expect(events.some((event) => event.type === 'error')).toBe(false)
+    } finally {
+      agents.close()
+    }
+  })
+
+  it.each([
+    {
+      output: {
+        functions: [' main ', 'helper'],
+        nested: { enabled: false, count: 0, empty: null },
+      },
+    },
+    { output: ['first', 'second'] },
+    { output: '  exact structured string\n' },
+    { output: null },
+  ])(
+    'preserves successful Claude structured output in the conversation: %j',
+    async ({ output }) => {
+      const { channels, events, agents, start } = fixture()
+      try {
+        const starting = start({
+          provider: 'claude',
+          remoteId: 'saved-claude',
+          providerOptions: { args: ['--json-schema', '{"type":"object"}'] },
+        })
+        await vi.waitFor(() =>
+          expect(
+            channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+          ).toBe(true),
+        )
+        channels[0].initializeClaude()
+        await starting
+        channels[0].reply({
+          type: 'result',
+          uuid: 'structured-output-result',
+          session_id: 'saved-claude',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          structured_output: output,
+        })
+        const answer = events.find((event) => event.type === 'text')!
+        expect(answer).toMatchObject({
+          itemId: 'structured-result-structured-output-result',
+          status: 'replace',
+          details: { structuredOutput: output },
+        })
+        expect(JSON.parse(answer.text!)).toEqual(output)
+        expect(events.findLast((event) => event.type === 'complete')?.status).toBe('completed')
+        expect(agents.hasRunningSessions()).toBe(false)
+      } finally {
+        agents.close()
+      }
+    },
+  )
+
+  it('retains streamed Claude text once while displaying the separate structured result', async () => {
+    const { channels, events, agents, start } = fixture()
+    try {
+      const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].initializeClaude()
+      await starting
+      const answer = '  Exact ordinary answer\n'
+      channels[0].reply({
+        type: 'stream_event',
+        session_id: 'saved-claude',
+        event: { type: 'message_start', message: { id: 'ordinary-answer' } },
+      })
+      channels[0].reply({
+        type: 'stream_event',
+        session_id: 'saved-claude',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: answer },
+        },
+      })
+      const output = { exact: '  JSON answer\n', enabled: false }
+      channels[0].reply({
+        type: 'result',
+        uuid: 'complete-answer',
+        session_id: 'saved-claude',
+        subtype: 'success',
+        is_error: false,
+        result: answer,
+        structured_output: output,
+      })
+      const messages = events.filter((event) => event.type === 'text')
+      expect(messages).toHaveLength(2)
+      expect(messages[0]).toMatchObject({ itemId: 'ordinary-answer', text: answer })
+      expect(messages[1]).toMatchObject({ itemId: 'structured-result-complete-answer' })
+      expect(JSON.parse(messages[1].text!)).toEqual(output)
+    } finally {
+      agents.close()
+    }
+  })
+
+  it.each([
+    ['malformed', '{"type":invalid}\n', /invalid protocol message/],
+    ['oversized', '{"type":"' + 'x'.repeat(8_000_001), /larger than the protocol limit/],
+  ])(
+    'fails Claude initialization immediately on %s protocol output',
+    async (_name, output, error) => {
+      vi.useFakeTimers()
+      const { channels, events, agents, start } = fixture()
+      try {
+        const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+        const rejected = expect(starting).rejects.toThrow(error)
+        await vi.waitFor(() =>
+          expect(
+            channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+          ).toBe(true),
+        )
+        channels[0].emit('data', Buffer.from(output))
+        await rejected
+        expect(channels[0].closeRequested).toBe(true)
+        expect(channels[0].destroyed).toBe(false)
+        expect(agents.hasRunningSessions()).toBe(false)
+        expect(vi.getTimerCount()).toBe(0)
+        expect(events.find((event) => event.type === 'error')?.text).toMatch(error)
+        expect(channels[0].messages.some((message) => message.type === 'user')).toBe(false)
+      } finally {
+        agents.close()
+        vi.useRealTimers()
+      }
+    },
+  )
+
+  it.each([
+    ['malformed', '{"type":invalid}\n', /invalid protocol message/],
+    ['oversized', '{"type":"' + 'x'.repeat(8_000_001), /larger than the protocol limit/],
+  ])(
+    'fails an active Claude turn on %s output and preserves its resume ID',
+    async (_name, output, error) => {
+      const { channels, events, agents, start } = fixture()
+      try {
+        const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+        await vi.waitFor(() =>
+          expect(
+            channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+          ).toBe(true),
+        )
+        channels[0].initializeClaude()
+        await starting
+        expect(agents.hasRunningSessions()).toBe(true)
+        channels[0].emit('data', Buffer.from(output))
+        expect(agents.hasRunningSessions()).toBe(false)
+        expect(channels[0].closeRequested).toBe(true)
+        expect(events.find((event) => event.type === 'error')?.text).toMatch(error)
+        const replacing = start({ provider: 'claude' })
+        await vi.waitFor(() =>
+          expect(
+            channels[1]?.messages.some((message) => message.request?.subtype === 'initialize'),
+          ).toBe(true),
+        )
+        channels[0].finishClose()
+        channels[0].reply({ type: 'result', is_error: false, result: 'stale result' })
+        channels[1].initializeClaude()
+        await replacing
+        expect(channels[1].messages.find((message) => message.type === 'user')?.session_id).toBe(
+          'saved-claude',
+        )
+        expect(agents.hasRunningSessions()).toBe(true)
+        expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
+        expect(events.some((event) => event.text === 'stale result')).toBe(false)
+      } finally {
+        agents.close()
+      }
+    },
+  )
+
+  it('accepts Claude login banners before a valid handshake and active result', async () => {
+    const { channels, events, agents, start } = fixture()
+    try {
+      const starting = start({ provider: 'claude', remoteId: 'saved-claude' })
+      await vi.waitFor(() =>
+        expect(
+          channels[0]?.messages.some((message) => message.request?.subtype === 'initialize'),
+        ).toBe(true),
+      )
+      channels[0].emit('data', Buffer.from('Welcome to the research server\n'))
+      channels[0].initializeClaude()
+      await starting
+      channels[0].reply({ type: 'result', is_error: false, result: 'Complete reply' })
+      expect(events.some((event) => event.type === 'error')).toBe(false)
+      expect(events.some((event) => event.type === 'complete')).toBe(true)
+      expect(agents.hasRunningSessions()).toBe(false)
+    } finally {
+      agents.close()
+    }
+  })
+
   it('reports active conversations for a reconnect and drops completed turns from that snapshot', async () => {
     const { channels, agents, start } = fixture()
     try {

@@ -3,7 +3,13 @@ import type { ClientChannel } from 'ssh2'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Agents } from '../src/main/agents'
 import type { SSHConnection } from '../src/main/ssh'
-import type { AgentEvent, PermissionMode, Provider, StartInput } from '../src/shared/types'
+import type {
+  AgentEvent,
+  ConnectionProfile,
+  PermissionMode,
+  Provider,
+  StartInput,
+} from '../src/shared/types'
 
 const titleGenerator = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../src/main/provider-titles', () => ({ generateProviderTitle: titleGenerator }))
@@ -160,7 +166,12 @@ function fixture(
     channels.push(channel)
     return channel as unknown as ClientChannel
   })
-  if (options.durable) ssh.durableChannel = ssh.channel
+  if (options.durable)
+    ssh.durableChannel = async (command, onOpening) => {
+      const channel = await ssh.channel(command)
+      onOpening?.(channel)
+      return channel
+    }
   ssh.exec = vi.fn(async () => {
     throw new Error('An ordinary conversation must not stage extra instructions')
   })
@@ -929,6 +940,176 @@ describe('complete provider events and independent child agents', () => {
 })
 
 describe('durable agent state and asynchronous ownership', () => {
+  function selectTransport(ssh: SSHConnection, transport: 'local' | 'ssh') {
+    ssh.state.profile = {
+      id: transport === 'local' ? 'local-installation' : 'ssh-localhost',
+      name: transport === 'local' ? 'Local' : 'Local SSH server',
+      transport,
+      host: 'localhost',
+      port: 22,
+      username: 'researcher',
+      auth: 'agent',
+      privateKeyPath: '',
+      workspace: '/project',
+    }
+    ssh.emit('workspace-changing')
+  }
+
+  it.each(['local', 'ssh'] as const)(
+    'keeps equal-version localhost Codex transports, catalogs and permissions separate when leaving %s',
+    async (firstTransport) => {
+      let openingTransport = firstTransport
+      const { start, agents, ssh, channels, events } = fixture({
+        durable: true,
+        configureChannel: (channel) => {
+          channel.remoteId = `${openingTransport}-remote`
+          channel.codexModels = [{ ...model, model: `${openingTransport}-model` }]
+          channel.config = { model: `${openingTransport}-model` }
+        },
+      })
+      selectTransport(ssh, firstTransport)
+      await start({ sessionId: 'first-thread', model: undefined })
+      const first = channels[0]
+      expect(await agents.models('codex')).toContainEqual(
+        expect.objectContaining({ id: `${firstTransport}-model` }),
+      )
+      const firstPermissions = { fileSystem: { write: ['/project/first-result'] } }
+      first.reply({
+        id: 'native-permission',
+        method: 'item/permissions/requestApproval',
+        params: {
+          threadId: first.remoteId,
+          turnId: 'turn-1',
+          itemId: 'first-tool',
+          permissions: firstPermissions,
+        },
+      })
+      const firstApproval = events.findLast(
+        (event) => event.sessionId === 'first-thread' && event.type === 'approval',
+      )!
+      expect(firstApproval.requestId).toBeDefined()
+
+      openingTransport = firstTransport === 'local' ? 'ssh' : 'local'
+      selectTransport(ssh, openingTransport)
+      await start({ sessionId: 'second-thread', model: undefined })
+      expect(channels).toHaveLength(2)
+      const second = channels[1]
+      expect(await agents.models('codex')).toContainEqual(
+        expect.objectContaining({ id: `${openingTransport}-model` }),
+      )
+      expect(first.of('initialize')).toHaveLength(1)
+      expect(second.of('initialize')).toHaveLength(1)
+      expect(first.of('turn/start')[0].params.model).toBe(`${firstTransport}-model`)
+      expect(second.of('turn/start')[0].params.model).toBe(`${openingTransport}-model`)
+      expect(first.of('turn/start')).toHaveLength(1)
+      expect(second.of('turn/start')).toHaveLength(1)
+      expect(first.closes).toBe(0)
+
+      second.reply({
+        id: 'native-permission',
+        method: 'item/permissions/requestApproval',
+        params: {
+          threadId: second.remoteId,
+          turnId: 'turn-1',
+          itemId: 'second-tool',
+          permissions: { fileSystem: { write: ['/project/second-result'] } },
+        },
+      })
+      const secondApproval = events.findLast(
+        (event) => event.sessionId === 'second-thread' && event.type === 'approval',
+      )!
+      expect(secondApproval.requestId).toBeDefined()
+      await agents.respond('first-thread', firstApproval.requestId!, true)
+      await agents.respond('second-thread', secondApproval.requestId!, false)
+      expect(first.messages.filter((message) => message.id === 'native-permission')).toEqual([
+        { id: 'native-permission', result: { permissions: firstPermissions, scope: 'turn' } },
+      ])
+      expect(second.messages.filter((message) => message.id === 'native-permission')).toEqual([
+        { id: 'native-permission', result: { permissions: {}, scope: 'turn' } },
+      ])
+
+      expect(
+        await agents.configure({ sessionId: 'first-thread', reasoningEffort: 'high' }),
+      ).toMatchObject({ applied: 'next-request' })
+      for (const channel of channels) {
+        expect(channel.of('thread/settings/update')).toHaveLength(0)
+        expect(channel.of('turn/settings/update')).toHaveLength(0)
+      }
+      first.reply({
+        method: 'turn/completed',
+        params: { threadId: first.remoteId, turn: { id: 'turn-1', status: 'completed' } },
+      })
+      await expect(start({ sessionId: 'first-thread' })).rejects.toThrow(/saved machine/)
+      expect(first.of('turn/start')).toHaveLength(1)
+      expect(second.of('turn/start')).toHaveLength(1)
+    },
+  )
+
+  it('retains the Local Codex daemon and turn when its saved display metadata changes', async () => {
+    const { start, agents, ssh, channels } = fixture({ durable: true })
+    selectTransport(ssh, 'local')
+    await start()
+    const original = channels[0]
+    ssh.state.profile = {
+      ...ssh.state.profile!,
+      name: 'This computer',
+      host: 'display-only.local',
+      port: 2222,
+      username: 'display-name',
+    } satisfies ConnectionProfile
+    ssh.emit('workspace-changing')
+    await agents.models('codex')
+    expect(channels).toHaveLength(1)
+    expect(original.of('initialize')).toHaveLength(1)
+    expect(original.of('turn/start')).toHaveLength(1)
+    expect(
+      await agents.configure({ sessionId: 'local-thread', reasoningEffort: 'high' }),
+    ).toMatchObject({ applied: 'live' })
+    expect(original.of('turn/settings/update')[0].params.effort).toBe('high')
+    expect(original.closes).toBe(0)
+  })
+
+  it.each(['local', 'ssh'] as const)(
+    'rejects late %s localhost model discovery when transport ownership changes before notification',
+    async (firstTransport) => {
+      let openingTransport = firstTransport
+      const { start, agents, ssh, channels } = fixture({
+        durable: true,
+        configureChannel: (channel) => {
+          channel.remoteId = `${openingTransport}-remote`
+          channel.codexModels = [{ ...model, model: `${openingTransport}-model` }]
+          channel.config = { model: `${openingTransport}-model` }
+        },
+      })
+      selectTransport(ssh, firstTransport)
+      await start({ sessionId: 'first-thread', model: undefined })
+      const original = channels[0]
+      original.held.add('model/list')
+      const stale = agents.models('codex').catch((error: Error) => error)
+      await vi.waitFor(() => expect(original.of('model/list')).toHaveLength(1))
+      openingTransport = firstTransport === 'local' ? 'ssh' : 'local'
+      ssh.state.profile = {
+        ...ssh.state.profile!,
+        id: openingTransport === 'local' ? 'local-installation' : 'ssh-localhost',
+        transport: openingTransport,
+      }
+      // Discovery can finish during the interval before workspace-changing is delivered.
+      await start({ sessionId: 'second-thread', model: undefined })
+      expect(channels).toHaveLength(2)
+      expect(await agents.models('codex')).toContainEqual(
+        expect.objectContaining({ id: `${openingTransport}-model` }),
+      )
+      original.reply({
+        id: original.of('model/list')[0].id,
+        result: { data: [{ ...model, model: 'stale-first-model' }] },
+      })
+      expect(await stale).toBeInstanceOf(Error)
+      await start({ sessionId: 'another-second-thread', model: undefined })
+      expect(channels[1].of('turn/start').at(-1)?.params.model).toBe(`${openingTransport}-model`)
+      expect(original.of('turn/start')).toHaveLength(1)
+    },
+  )
+
   function selectMachine(ssh: SSHConnection, host: string) {
     ssh.state = {
       ...ssh.state,

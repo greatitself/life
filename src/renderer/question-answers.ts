@@ -130,7 +130,7 @@ export function approvalRequestPresentation(event: AgentEvent) {
   add('Command', value('command'))
   add('Requested permissions', value('permissions'))
   add(
-    'File access',
+    value('grantRoot') ? 'Write access for the remainder of this session' : 'File access',
     value('grantRoot') ?? value('filePath') ?? value('file_path') ?? value('blocked_path'),
   )
   add('Network access', value('networkApprovalContext') ?? value('network'))

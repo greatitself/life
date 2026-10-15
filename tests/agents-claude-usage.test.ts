@@ -133,7 +133,12 @@ function fixture(configure?: (channel: Channel) => void, durable = false) {
     channels.push(channel)
     return channel as unknown as ClientChannel
   })
-  if (durable) ssh.durableChannel = ssh.channel
+  if (durable)
+    ssh.durableChannel = async (command, onOpening) => {
+      const channel = await ssh.channel(command)
+      onOpening?.(channel)
+      return channel
+    }
   ssh.exec = vi.fn(async () => {
     throw new Error('Account metadata must not run inference or shell commands')
   })
@@ -155,6 +160,108 @@ async function flush() {
 }
 
 describe('Claude native account usage transport', () => {
+  it.each(['local', 'ssh'] as const)(
+    'does not read %s localhost account limits through an equal-version channel from the other transport',
+    async (firstTransport) => {
+      const { agents, ssh, channels, start } = fixture(undefined, true)
+      ssh.state.profile = {
+        ...ssh.state.profile!,
+        id: firstTransport === 'local' ? 'local-installation' : 'ssh-localhost',
+        transport: firstTransport,
+        host: 'localhost',
+      }
+      await start()
+      const original = channels[0]
+      const nextTransport = firstTransport === 'local' ? 'ssh' : 'local'
+      ssh.state.profile = {
+        ...ssh.state.profile,
+        id: nextTransport === 'local' ? 'local-installation' : 'ssh-localhost',
+        transport: nextTransport,
+      }
+      ssh.emit('workspace-changing')
+      const snapshot = await agents.usage('claude')
+      expect(snapshot).toMatchObject({
+        status: 'available',
+        machineIdentity:
+          nextTransport === 'local'
+            ? JSON.stringify(['local', 'local-installation'])
+            : JSON.stringify(['localhost', 22, 'researcher']),
+      })
+      expect(channels).toHaveLength(2)
+      expect(original.of('get_usage')).toHaveLength(0)
+      expect(original.users()).toHaveLength(1)
+      expect(original.closes).toBe(0)
+      expect(channels[1].of('get_usage')).toHaveLength(1)
+      expect(channels[1].users()).toHaveLength(0)
+      expect(channels[1].closes).toBe(1)
+      expect(agents.hasRunningSessions()).toBe(true)
+    },
+  )
+
+  it.each(['local', 'ssh'] as const)(
+    'rejects a late %s localhost quota after transport ownership changes before notification',
+    async (firstTransport) => {
+      const { agents, ssh, channels, events, start } = fixture(
+        (channel) => channel.held.add('get_usage'),
+        true,
+      )
+      ssh.state.profile = {
+        ...ssh.state.profile!,
+        id: firstTransport === 'local' ? 'local-installation' : 'ssh-localhost',
+        transport: firstTransport,
+        host: 'localhost',
+      }
+      await start()
+      const reading = agents.usage('claude')
+      await flush()
+      const original = channels[0]
+      expect(original.of('get_usage')).toHaveLength(1)
+      const nextTransport = firstTransport === 'local' ? 'ssh' : 'local'
+      ssh.state.profile = {
+        ...ssh.state.profile,
+        id: nextTransport === 'local' ? 'local-installation' : 'ssh-localhost',
+        transport: nextTransport,
+      }
+      // The identity guard also covers the interval before the connection event arrives.
+      original.controlReply(original.of('get_usage')[0], accountUsage)
+      expect(await reading).toMatchObject({
+        status: 'unavailable',
+        limits: [],
+        message: expect.stringContaining('machine changed'),
+      })
+      expect(events.filter((event) => event.type === 'account-usage')).toEqual([])
+      expect(original.closes).toBe(0)
+      expect(original.users()).toHaveLength(1)
+    },
+  )
+
+  it('keeps a live Local Claude usage channel owned after display metadata changes', async () => {
+    const { agents, ssh, channels, start } = fixture(undefined, true)
+    ssh.state.profile = {
+      ...ssh.state.profile!,
+      id: 'local-installation',
+      transport: 'local',
+      host: 'localhost',
+    }
+    await start()
+    ssh.state.profile = {
+      ...ssh.state.profile,
+      name: 'This computer',
+      host: 'display-only.local',
+      port: 2222,
+      username: 'display-name',
+    }
+    ssh.emit('workspace-changing')
+    expect(await agents.usage('claude')).toMatchObject({
+      status: 'available',
+      machineIdentity: JSON.stringify(['local', 'local-installation']),
+    })
+    expect(channels).toHaveLength(1)
+    expect(channels[0].of('get_usage')).toHaveLength(1)
+    expect(channels[0].users()).toHaveLength(1)
+    expect(channels[0].closes).toBe(0)
+  })
+
   it('returns safe account identity and machine scope from promptless initialization', async () => {
     const { agents, ssh, channels } = fixture((channel) => {
       channel.account = {

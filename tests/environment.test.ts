@@ -26,6 +26,65 @@ function connected(overrides: Partial<ConnectionState> = {}): ConnectionState {
 }
 
 describe('active environment descriptions', () => {
+  it('describes genuine Local without SSH endpoints or saved credential metadata', () => {
+    const local = {
+      ...profile,
+      id: 'local:host-instance',
+      transport: 'local' as const,
+      name: 'Local',
+    }
+    expect(describeEnvironment(connected({ profile: local }))).toMatchObject({
+      profile: local,
+      machineName: 'Local',
+      authority: 'This computer',
+      workspace: '/srv/current-project',
+      sshAlias: undefined,
+      sshConfigPath: undefined,
+    })
+  })
+
+  it('does not infer Local from a saved SSH profile id or localhost hostname', () => {
+    const ssh = { ...profile, id: 'local:old-import', host: 'localhost' }
+    expect(describeEnvironment(connected({ profile: ssh }))).toMatchObject({
+      authority: 'researcher@localhost',
+      sshAlias: 'research',
+    })
+  })
+
+  it('shows Local availability only from the current installed provider check', () => {
+    const local = { ...profile, id: 'local:host', transport: 'local' as const, name: 'Local' }
+    const state = connected({ profile: local, codex: 'missing' })
+    expect(describeEnvironment(state).providerStatuses[0]).toMatchObject({
+      availability: 'missing',
+      detail: 'Not installed',
+    })
+    expect(
+      describeEnvironment({ ...state, status: 'disconnected' }).providerStatuses[0],
+    ).toMatchObject({
+      availability: 'unknown',
+      detail: 'Connect to check availability',
+    })
+  })
+
+  it.each([
+    ['checking', 'Checking installed providers…'],
+    ['failed', 'Availability check failed'],
+  ] as const)(
+    'keeps %s Local provider checks unknown instead of declaring providers installed',
+    (providerVersionsStatus, detail) => {
+      const local = { ...profile, id: 'local:host', transport: 'local' as const, name: 'Local' }
+      const state = connected({
+        profile: local,
+        codex: undefined,
+        claude: undefined,
+        providerVersionsStatus,
+      })
+      expect(describeEnvironment(state).providerStatuses).toEqual([
+        { provider: 'codex', label: 'Codex', availability: 'unknown', detail },
+        { provider: 'claude', label: 'Claude Code', availability: 'unknown', detail },
+      ])
+    },
+  )
   it('describes the connected machine and the actual selected project', () => {
     const description = describeEnvironment(connected())
     expect(description).toMatchObject({

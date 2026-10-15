@@ -235,4 +235,51 @@ describe('native Codex account quota snapshots', () => {
     expect(snapshot.limits[0].primary?.usedPercent).toBe(50)
     expect(codexUsageSnapshot({ rateLimits: {} }, previous).accountId).toBeUndefined()
   })
+
+  it('validates sparse fields independently without losing valid sibling values or prior metadata', () => {
+    const previous = codexUsageSnapshot({
+      rateLimits: {
+        limitId: 'codex',
+        primary: { usedPercent: 25, resetsAt: 100 },
+        credits: { hasCredits: true, unlimited: false, balance: '10.125' },
+      },
+    })
+    const snapshot = codexUsageSnapshot(
+      {
+        ordinaryUsageAllowed: 'true',
+        rateLimitsByLimitId: {
+          primitive: false,
+          array: [],
+          codex: {
+            limitId: 'codex',
+            primary: { usedPercent: '50', resetsAt: 200, windowDurationMins: NaN },
+            credits: { hasCredits: true, unlimited: false, balance: 1 },
+          },
+        },
+        rateLimitResetCredits: { availableCount: 3 },
+      },
+      previous,
+      true,
+    )
+    expect(snapshot.limits).toHaveLength(1)
+    expect(snapshot.limits[0]).toMatchObject({
+      primary: { usedPercent: 25, resetsAt: 200 },
+      credits: { hasCredits: true, unlimited: false, balance: '10.125' },
+    })
+    expect(snapshot.limits[0].primary?.windowDurationMins).toBeUndefined()
+    expect(snapshot.ordinaryUsageAllowed).toBeUndefined()
+    expect(snapshot.availableResetCredits).toBe(3)
+  })
+
+  it.each([null, false, [], 'untrusted payload'])(
+    'handles malformed top-level native metadata %#',
+    (input) => {
+      expect(codexUsageSnapshot(input)).toMatchObject({
+        provider: 'codex',
+        status: 'unavailable',
+        limits: [],
+        message: expect.stringContaining('did not return'),
+      })
+    },
+  )
 })

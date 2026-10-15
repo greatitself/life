@@ -140,11 +140,11 @@ describe('connection persistence', () => {
     } as ConnectionProfile)
     const raw = await readFile(join(directory, 'connections.json'), 'utf8')
     expect(raw).not.toContain('very-secret')
-    expect(instance.list()).toEqual([profile])
+    expect(instance.list().filter((entry) => entry.transport !== 'local')).toEqual([profile])
     expect((await stat(join(directory, 'connections.json'))).mode & 0o777).toBe(0o600)
     const reloaded = new Store(directory)
     await reloaded.init()
-    expect(reloaded.list()).toEqual([profile])
+    expect(reloaded.list().filter((entry) => entry.transport !== 'local')).toEqual([profile])
   })
 
   it('serializes concurrent profile and host trust writes without losing data', async () => {
@@ -156,10 +156,20 @@ describe('connection persistence', () => {
     ])
     const reloaded = new Store(directory)
     await reloaded.init()
-    expect(reloaded.list().map((p) => p.id)).toEqual(['machine-1', 'machine-2'])
+    expect(
+      reloaded
+        .list()
+        .filter((entry) => entry.transport !== 'local')
+        .map((p) => p.id),
+    ).toEqual(['machine-1', 'machine-2'])
     expect(reloaded.hostKey('127.0.0.1:22')).toBe('SHA256:fixture')
     await reloaded.remove('machine-1')
-    expect(reloaded.list().map((p) => p.id)).toEqual(['machine-2'])
+    expect(
+      reloaded
+        .list()
+        .filter((entry) => entry.transport !== 'local')
+        .map((p) => p.id),
+    ).toEqual(['machine-2'])
   })
 
   it('discards invalid profiles and removes legacy secret fields on load', async () => {
@@ -173,7 +183,10 @@ describe('connection persistence', () => {
     )
     const reloaded = new Store(directory)
     await reloaded.init()
-    expect(reloaded.list()).toEqual([profile])
+    expect(reloaded.list().filter((entry) => entry.transport !== 'local')).toEqual([profile])
+    expect(await readFile(join(directory, 'connections.json'), 'utf8')).not.toContain(
+      'legacy-password',
+    )
   })
 })
 

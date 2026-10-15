@@ -1,6 +1,7 @@
 import type { Provider } from '../shared/types'
 import type { Thread } from './state'
 import { compareManualThreads } from './thread-management'
+import { conversationTurnCount } from './sidebar-history'
 
 export type SidebarThreadSort =
   'manual' | 'recent' | 'oldest' | 'title' | 'project' | 'provider' | 'activity' | 'messages'
@@ -91,8 +92,6 @@ export function compareSidebarThreads(a: Thread, b: Thread, sort: SidebarThreadS
     const rank = { waiting: 0, running: 1, idle: 2 }
     result = rank[threadStatus(a)] - rank[threadStatus(b)]
   } else if (sort === 'messages')
-    result =
-      b.messages.filter((message) => message.role === 'user').length -
-      a.messages.filter((message) => message.role === 'user').length
+    result = conversationTurnCount(b.messages) - conversationTurnCount(a.messages)
   return result || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)
 }

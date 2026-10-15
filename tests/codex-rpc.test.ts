@@ -1,7 +1,13 @@
 import { EventEmitter } from 'node:events'
 import type { ClientChannel } from 'ssh2'
+import { Effect, Fiber } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CodexRPC, CodexRequestError } from '../src/main/codex-rpc'
+import {
+  CodexRPC,
+  CodexRequestCancelled,
+  CodexRequestError,
+  CodexTransportError,
+} from '../src/main/codex-rpc'
 
 class Channel extends EventEmitter {
   stderr = new EventEmitter()
@@ -34,6 +40,152 @@ function fixture() {
 }
 
 describe('Codex RPC response and recovery lifecycle', () => {
+  it('starts an Effect request lazily and exposes remote errors to typed recovery', async () => {
+    const { channel, rpc } = fixture()
+    const program = rpc
+      .requestEffect('turn/settings/update', { threadId: 'saved' })
+      .pipe(
+        Effect.catchTag('CodexRequestError', (error) =>
+          Effect.succeed({ fallback: true, method: error.method, code: error.code }),
+        ),
+      )
+    expect(channel.messages).toEqual([])
+    const result = Effect.runPromise(program)
+    channel.reply({ id: 1, error: { code: -32601, message: 'Unsupported live settings' } })
+    await expect(result).resolves.toEqual({
+      fallback: true,
+      method: 'turn/settings/update',
+      code: -32601,
+    })
+    expect(channel.destroyed).toBe(false)
+  })
+
+  it('releases deadlines and abort listeners when its Effect fiber is interrupted', async () => {
+    vi.useFakeTimers()
+    const { channel, receive, rpc } = fixture()
+    const controller = new AbortController()
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener')
+    const fiber = Effect.runFork(rpc.requestEffect('model/list', {}, 60000, controller.signal))
+    expect(channel.messages).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(1)
+    await Effect.runPromise(Fiber.interrupt(fiber))
+    expect(vi.getTimerCount()).toBe(0)
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    channel.reply({ id: 1, result: { data: [] } })
+    channel.emit('suspended')
+    channel.emit('resumed')
+    expect(vi.getTimerCount()).toBe(0)
+    expect(receive).not.toHaveBeenCalled()
+    expect(channel.destroyed).toBe(false)
+    const next = rpc.request('model/list')
+    channel.reply({ id: 2, result: { data: [] } })
+    await expect(next).resolves.toEqual({ data: [] })
+  })
+
+  it.each(['initialize', 'thread/start', 'thread/resume', 'turn/start'])(
+    'retires an uncertain %s mutation when its Effect fiber is interrupted after send',
+    async (method) => {
+      vi.useFakeTimers()
+      const { channel, receive, rpc } = fixture()
+      const fiber = Effect.runFork(
+        rpc.requestEffect(method, {
+          threadId: 'saved',
+          ...(method === 'turn/start' ? { input: [{ type: 'text', text: 'User request' }] } : {}),
+        }),
+      )
+      expect(channel.messages[0].method).toBe(method)
+      const reading = rpc.request('model/list')
+      const readFailure = expect(reading).rejects.toBeInstanceOf(CodexTransportError)
+      await Effect.runPromise(Fiber.interrupt(fiber))
+      await readFailure
+      expect(channel.signals).toEqual(['TERM'])
+      expect(channel.destroyed).toBe(true)
+      expect(rpc.closed).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+      channel.reply({ id: 1, result: { thread: { id: 'saved' }, turn: { id: 'late-turn' } } })
+      channel.reply({ method: 'turn/started', params: { threadId: 'saved' } })
+      channel.emit('suspended')
+      channel.emit('resumed')
+      expect(receive).not.toHaveBeenCalled()
+      await expect(rpc.request('model/list')).rejects.toBeInstanceOf(CodexTransportError)
+      expect(channel.messages).toHaveLength(2)
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it.each(['initialize', 'thread/start', 'thread/resume', 'turn/start'])(
+    'retires an uncertain %s mutation when its AbortSignal is cancelled after send',
+    async (method) => {
+      vi.useFakeTimers()
+      const { channel, rpc } = fixture()
+      const controller = new AbortController()
+      const pending = rpc.request(method, { threadId: 'saved' }, 60000, controller.signal)
+      const cancelled = expect(pending).rejects.toBeInstanceOf(CodexRequestCancelled)
+      const reading = rpc.request('model/list')
+      const readFailure = expect(reading).rejects.toBeInstanceOf(CodexTransportError)
+      expect(channel.messages[0].method).toBe(method)
+      controller.abort()
+      await Promise.all([cancelled, readFailure])
+      expect(channel.destroyed).toBe(true)
+      expect(channel.signals).toEqual(['TERM'])
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it.each(['initialize', 'thread/start', 'thread/resume', 'turn/start'])(
+    'keeps the transport open after a successful %s mutation and scoped cleanup',
+    async (method) => {
+      vi.useFakeTimers()
+      const { channel, rpc } = fixture()
+      const controller = new AbortController()
+      const pending = rpc.request(method, { threadId: 'saved' }, 60000, controller.signal)
+      channel.reply({ id: 1, result: { thread: { id: 'saved' }, turn: { id: 'accepted-turn' } } })
+      await expect(pending).resolves.toMatchObject({ turn: { id: 'accepted-turn' } })
+      controller.abort()
+      expect(channel.destroyed).toBe(false)
+      expect(channel.signals).toEqual([])
+      expect(vi.getTimerCount()).toBe(0)
+      const reading = rpc.request('model/list')
+      channel.reply({ id: 2, result: { data: [] } })
+      await expect(reading).resolves.toEqual({ data: [] })
+    },
+  )
+
+  it('returns typed cancellation before sending an already aborted request', async () => {
+    vi.useFakeTimers()
+    const { channel, rpc } = fixture()
+    const controller = new AbortController()
+    controller.abort()
+    const error = await Effect.runPromise(
+      Effect.flip(rpc.requestEffect('thread/resume', {}, 60000, controller.signal)),
+    )
+    expect(error).toBeInstanceOf(CodexRequestCancelled)
+    expect(error).toMatchObject({ _tag: 'CodexRequestCancelled', method: 'thread/resume' })
+    expect(channel.messages).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('returns typed send failures and releases scoped state without waiting for close', async () => {
+    vi.useFakeTimers()
+    const { channel, rpc } = fixture()
+    const controller = new AbortController()
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener')
+    const failure = new Error('SSH provider channel cannot write')
+    vi.spyOn(channel, 'write').mockImplementationOnce(() => {
+      throw failure
+    })
+    const error = await rpc
+      .request('initialize', {}, 60000, controller.signal)
+      .catch((error) => error)
+    expect(error).toBeInstanceOf(CodexTransportError)
+    expect(error).toMatchObject({ message: failure.message, cause: failure })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    channel.emit('suspended')
+    channel.emit('resumed')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('surfaces oversized resume responses immediately and terminates the unusable transport', async () => {
     const { channel, rpc } = fixture()
     const resuming = rpc.request('thread/resume', { threadId: 'saved-conversation' })
@@ -92,15 +244,15 @@ describe('Codex RPC response and recovery lifecycle', () => {
     expect(channel.destroyed).toBe(true)
   })
 
-  it('cancels only a pending resume, ignores its late response, and clears its timer', async () => {
+  it('cancels only a pending metadata read, ignores its late response, and clears its timer', async () => {
     vi.useFakeTimers()
     const { channel, rpc, receive } = fixture()
     const controller = new AbortController()
-    const pending = rpc.request('thread/resume', { threadId: 'saved' }, 60000, controller.signal)
+    const pending = rpc.request('config/read', {}, 60000, controller.signal)
     const rejected = expect(pending).rejects.toThrow(/cancelled/)
     controller.abort()
     await rejected
-    channel.reply({ id: 1, result: { thread: { id: 'saved' } } })
+    channel.reply({ id: 1, result: { config: {} } })
     expect(receive).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
     const listing = rpc.request('model/list')
@@ -235,12 +387,7 @@ describe('Codex RPC durable transport suspension', () => {
     vi.useFakeTimers()
     const { channel, rpc, receive } = fixture()
     const controller = new AbortController()
-    const pending = rpc.request(
-      'thread/resume',
-      { threadId: 'saved-conversation' },
-      1000,
-      controller.signal,
-    )
+    const pending = rpc.request('config/read', {}, 1000, controller.signal)
     const rejected = expect(pending).rejects.toThrow(/cancelled/)
 
     await vi.advanceTimersByTimeAsync(350)
@@ -248,7 +395,7 @@ describe('Codex RPC durable transport suspension', () => {
     controller.abort()
     await rejected
     expect(vi.getTimerCount()).toBe(0)
-    channel.reply({ id: 1, result: { thread: { id: 'saved-conversation' } } })
+    channel.reply({ id: 1, result: { config: {} } })
     channel.emit('resumed')
     await vi.advanceTimersByTimeAsync(120_000)
     expect(receive).not.toHaveBeenCalled()
@@ -259,10 +406,43 @@ describe('Codex RPC durable transport suspension', () => {
     const next = rpc.request('model/list')
     channel.reply({ id: 2, result: { data: [] } })
     await expect(next).resolves.toEqual({ data: [] })
-    expect(channel.messages.map((message) => message.method)).toEqual([
-      'thread/resume',
-      'model/list',
-    ])
+    expect(channel.messages.map((message) => message.method)).toEqual(['config/read', 'model/list'])
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('settles the cancelled request and retires its transport when the failure observer throws', async () => {
+    vi.useFakeTimers()
+    const channel = new Channel()
+    const receive = vi.fn()
+    const failure = new Error('Failure observer crashed')
+    const rpc = new CodexRPC(channel as unknown as ClientChannel, receive, () => {
+      throw failure
+    })
+    const controller = new AbortController()
+    let abort: (() => void) | undefined
+    // Direct callback delivery keeps the observer failure test-contained.
+    vi.spyOn(controller.signal, 'addEventListener').mockImplementation((type, listener) => {
+      if (type === 'abort' && typeof listener === 'function')
+        abort = () => listener.call(controller.signal, new Event('abort'))
+    })
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener')
+    const pending = rpc.request('thread/resume', { threadId: 'saved' }, 60000, controller.signal)
+    const cancelled = expect(pending).rejects.toMatchObject({
+      _tag: 'CodexRequestCancelled',
+      method: 'thread/resume',
+    })
+    const reading = rpc.request('model/list')
+    const readFailure = expect(reading).rejects.toBeInstanceOf(CodexTransportError)
+    expect(abort).toBeTypeOf('function')
+    expect(() => abort?.()).toThrow(failure)
+    await Promise.all([cancelled, readFailure])
+    expect(channel.signals).toEqual(['TERM'])
+    expect(channel.destroyed).toBe(true)
+    expect(rpc.closed).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    channel.reply({ id: 1, result: { thread: { id: 'saved' } } })
+    channel.reply({ method: 'turn/started', params: { threadId: 'saved' } })
+    expect(receive).not.toHaveBeenCalled()
   })
 })

@@ -54,6 +54,8 @@ export interface SSHConfigList {
   error?: string
 }
 export interface ConnectionProfile {
+  /** Omitted on saved profiles from earlier releases, which use SSH. */
+  transport?: 'ssh' | 'local'
   id: string
   name: string
   host: string
@@ -70,6 +72,7 @@ export interface ConnectInput extends Omit<ConnectionProfile, 'workspace'> {
   passphrase?: string
 }
 export interface ConnectionState {
+  providerVersionsStatus?: 'checking' | 'ready' | 'failed'
   /** Advances when installed provider versions are successfully rediscovered. */
   providerVersionsRevision?: number
   status: 'disconnected' | 'connecting' | 'connected'
@@ -83,6 +86,8 @@ export interface ConnectionState {
 }
 export interface StartInput {
   sessionId: string
+  /** The renderer turn owned by this native invocation; generations need not equal UI turns. */
+  localTurn?: number
   provider: Provider
   remoteId?: string
   prompt: string
@@ -96,6 +101,8 @@ export interface StartInput {
   scope?: 'life-customization' | 'research'
   studioContext?: LifeStudioContext
   attachments?: AgentAttachment[]
+  /** Renderer planner continuation owned durably by the original native session. */
+  clientRecovery?: unknown
 }
 export interface AgentAttachment {
   remotePath: string
@@ -179,6 +186,8 @@ export interface AgentEvent {
   requestId?: string
   remoteId?: string
   questions?: AgentQuestion[]
+  approvalChoices?: import('./approval-decisions').ApprovalChoice[]
+  approvalChoicesUnsupported?: string
   status?: string
   phase?: 'commentary' | 'final_answer'
   input?: string
@@ -187,6 +196,96 @@ export interface AgentEvent {
   parentItemId?: string
   provider?: Provider
   details?: unknown
+  /** Identity issued by Life's durable native ledger, independent of provider payloads. */
+  nativeRecovery?: {
+    transportId: string
+    revision: number
+    eventId: string
+    ownerGeneration?: number
+    emittedAt?: number
+    snapshotToken?: string
+    localTurn?: number
+    /** Ephemeral renderer delivery capability; never saved in conversation JSON. */
+    deliveryToken?: string
+    /** Current native control attestation on this delivery, independent of event history. */
+    ownerStatus?: 'recovering' | 'unknown' | 'running' | 'idle'
+  }
+}
+export interface NativeRecoverySupport {
+  mode: 'durable' | 'unsupported-clean' | 'blocked'
+  message?: string
+}
+export interface NativeRecoveryCursor {
+  appliedRevision: number
+  snapshotToken?: string
+  ownerGeneration?: number
+}
+export interface NativeRecoveryConsumer {
+  kind: 'main' | 'studio'
+  sessionId: string
+  profileId: string
+  workspace?: string
+  remoteId?: string
+  applied?: Record<string, NativeRecoveryCursor>
+  /** SHA256 of the actual privately admitted cache source. */
+  cacheHash?: string
+  projectionAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[]
+}
+export interface NativeRecoveryOwnerState {
+  sessionId: string
+  transportId: string
+  status: 'recovering' | 'unknown' | 'running' | 'idle'
+  snapshotToken?: string
+  ownerGeneration?: number
+  throughEventRevision?: number
+  /** Progress validated against this consumer's actual native/admitted-cache checkpoint. */
+  acceptedAppliedRevision?: number
+  acceptedAppliedCursor?: NativeRecoveryCursor
+  acceptedProjectionAdmission?: import('./conversations').ConversationProjectionAdmission
+  acceptedCacheHash?: string
+  /** Current control ownership; historical projection admission is separate. */
+  deliveryToken?: string
+  message?: string
+  /** Native-owned planner state; saved conversation metadata cannot grant this ownership. */
+  clientRecovery?: unknown
+  originalInput?: StartInput
+  localTurn?: number
+  remoteId?: string
+  provider?: Provider
+  pending?: AgentEvent[]
+  currentChildren?: AgentEvent[]
+}
+export interface NativeRecoveryHistoryReceipt {
+  kind: 'studio'
+  sessionId: string
+  transportId: string
+  snapshotToken: string
+  snapshotId: string
+  throughEventRevision: number
+  durability: 'admitted-cache'
+  fileHash?: string
+}
+export type NativeRecoveryActionKind =
+  'source-read' | 'source-apply' | 'settings-apply' | 'extension-apply' | 'reload'
+export interface NativeRecoveryActionIdentity {
+  actionId: string
+  transportId: string
+  ownerGeneration: number
+}
+export interface NativeRecoveryActionRequest extends NativeRecoveryActionIdentity {
+  sessionId: string
+  kind: NativeRecoveryActionKind
+  intent: unknown
+}
+export interface NativeRecoveryActionResult {
+  status: 'intended' | 'started' | 'succeeded' | 'failed' | 'unknown'
+  native: NativeRecoveryActionIdentity
+  receipt?: {
+    native: NativeRecoveryActionIdentity
+    source?: LifeSourceContext
+    snapshot?: LifeSourceSnapshot
+  }
+  error?: string
 }
 export interface AgentQuestion {
   id: string
@@ -219,8 +318,18 @@ export interface ModelOption {
 export interface RelayAPI {
   platform: string
   conversations?: {
+    supportsMessageFields?: true
+    supportsMessageAppends?: true
     load(): Promise<import('./conversations').ConversationHistorySnapshot | null>
-    save(threads: unknown[], savedAt?: number): Promise<void>
+    loadEncoded?(): Promise<ArrayBuffer | null>
+    save(
+      threads: unknown[],
+      savedAt?: number,
+      projectionAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[],
+    ): Promise<void>
+    checkpoint?(
+      input: import('./conversations').ConversationCheckpointInput,
+    ): Promise<import('./conversations').ConversationCheckpointAck>
   }
   hostHistory?: HostHistoryAPI
   researchDocuments?: ResearchDocumentsAPI
@@ -312,9 +421,45 @@ export interface RelayAPI {
       requestId: string,
       accepted: boolean,
       answers?: Record<string, string[]>,
+      decisionId?: string,
     ): Promise<void>
     models(provider: Provider): Promise<ModelOption[]>
     usage?(provider: Provider): Promise<ProviderUsageSnapshot>
+    /** Host-owned support report; renderer input cannot select the persistence mode. */
+    recoverySupport?(): Promise<NativeRecoverySupport>
+    /** Register hydrated consumers before delivering durable replay to this renderer. */
+    recover?(input: {
+      consumers: NativeRecoveryConsumer[]
+      membershipAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[]
+    }): Promise<{ owners: NativeRecoveryOwnerState[] }>
+    acknowledgeRecoveryHistory?(receipt: NativeRecoveryHistoryReceipt): Promise<void>
+    attestLoadedHistory?(input: {
+      hash: string
+    }): Promise<import('./conversations').ConversationProjectionAdmission[]>
+    prepareRecoveryCache?(input: {
+      snapshotId: string
+      hash: string
+      savedAt: number
+      projectionAdmissions: readonly import('./conversations').ConversationProjectionAdmission[]
+      membershipAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[]
+    }): Promise<void>
+    attestRecoveryCache?(input: { hash: string }): Promise<{
+      projectionAdmissions: readonly import('./conversations').ConversationProjectionAdmission[]
+      membershipAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[]
+      savedAt?: number
+    }>
+    updateRecoveryOwner?(input: {
+      sessionId: string
+      clientRecovery: unknown
+      transportId?: string
+      ownerGeneration?: number
+      projectionAdmissions?: readonly import('./conversations').ConversationProjectionAdmission[]
+    }): Promise<void>
+    performRecoveryAction?(input: NativeRecoveryActionRequest): Promise<NativeRecoveryActionResult>
+    reserveRecoveryOwner?(input: {
+      input: StartInput
+      clientRecovery: unknown
+    }): Promise<NativeRecoveryOwnerState>
   }
   files: {
     list(path?: string): Promise<FileEntry[]>

@@ -18,6 +18,17 @@ async function run() {
   let server
   try {
     await build({
+      entryPoints: [resolve(__dirname, '../src/main/codex-requests.ts')],
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      outfile: join(directory, 'codex-requests.cjs'),
+      logLevel: 'silent',
+    })
+    const { codexApprovalChoices, codexRequestResponse } = require(
+      join(directory, 'codex-requests.cjs'),
+    )
+    await build({
       stdin: {
         resolveDir: resolve(__dirname, '..'),
         sourcefile: 'provider-requests-fixture.tsx',
@@ -36,8 +47,8 @@ async function run() {
             window.setRequest = (request) => { window.responseCalls = []; setEvent({ sessionId: 'fixture', requestId: 'request-' + ++requestNumber, ...request }) }
             return <main className="request-fixture" style={{ maxWidth: 800, margin: '0 auto', padding: 28 }}>
               <h1>Provider requests</h1>
-              <ApprovalCard event={event} onRespond={async (accepted, answers) => {
-                window.responseCalls.push({ accepted, answers: answers === undefined ? null : structuredClone(answers) })
+              <ApprovalCard event={event} onRespond={async (accepted, answers, decisionId) => {
+                window.responseCalls.push({ accepted, answers: answers === undefined ? null : structuredClone(answers), ...(decisionId === undefined ? {} : { decisionId }) })
                 if (window.holdResponse) await new Promise(resolve => window.releaseResponse = resolve)
                 if (window.rejectResponse) throw new Error('The response was not delivered. Reconnect and retry.')
               }} />
@@ -352,6 +363,183 @@ async function run() {
     assert.deepEqual(await responses(), [{ accepted: true, answers: null }])
     checks.push(
       'Permission requests accurately display reason, cwd, command, read/write paths and network access with the actual turn grant scope',
+    )
+
+    const method = 'item/commandExecution/requestApproval'
+    const networkChoice = {
+      applyNetworkPolicyAmendment: {
+        network_policy_amendment: { host: 'reference.example', action: 'allow' },
+      },
+    }
+    const networkOnly = {
+      availableDecisions: [networkChoice, 'cancel'],
+      networkApprovalContext: { host: 'reference.example', protocol: 'https' },
+    }
+    await request({
+      type: 'approval',
+      details: { method, ...networkOnly },
+      ...codexApprovalChoices(method, networkOnly),
+    })
+    assert.equal(await page.getByRole('button', { name: 'Allow once', exact: true }).count(), 0)
+    assert.equal(await page.getByRole('button', { name: 'Decline', exact: true }).count(), 0)
+    assert.equal(
+      await page
+        .getByText(
+          'Saves a persistent network allow rule for reference.example, including future requests.',
+          { exact: true },
+        )
+        .isVisible(),
+      true,
+    )
+    await page.screenshot({ path: join(output, 'native-network-choices.png'), fullPage: true })
+    await page.getByRole('button', { name: 'Always allow reference.example', exact: true }).click()
+    await page
+      .locator('.approval-card .badge')
+      .getByText('Response sent', { exact: true })
+      .waitFor()
+    assert.deepEqual(await responses(), [
+      { accepted: true, answers: null, decisionId: 'codex-approval:0' },
+    ])
+    assert.deepEqual(
+      codexRequestResponse(method, networkOnly, true, {}, (await responses())[0].decisionId),
+      { decision: networkChoice },
+    )
+    checks.push(
+      'A network-only approval presents only the advertised native choices and returns the exact selected persistent host policy',
+    )
+
+    const sessionChoices = { availableDecisions: ['acceptForSession', 'decline', 'cancel'] }
+    await request({
+      type: 'approval',
+      details: { method, ...sessionChoices },
+      ...codexApprovalChoices(method, sessionChoices),
+    })
+    assert.equal(await page.getByRole('button', { name: 'Allow once', exact: true }).count(), 0)
+    assert.equal(await page.getByText(/session approval cache without prompting/).isVisible(), true)
+    await page.getByRole('button', { name: 'Allow for this session', exact: true }).click()
+    await page
+      .locator('.approval-card .badge')
+      .getByText('Response sent', { exact: true })
+      .waitFor()
+    assert.deepEqual(await responses(), [
+      { accepted: true, answers: null, decisionId: 'codex-approval:0' },
+    ])
+    checks.push('Session approval is an explicit choice with its session cache scope visible')
+
+    await request({
+      type: 'approval',
+      details: { method, ...sessionChoices },
+      ...codexApprovalChoices(method, sessionChoices),
+    })
+    await page.evaluate(() => {
+      window.rejectResponse = true
+    })
+    await page.getByRole('button', { name: 'Allow for this session', exact: true }).click()
+    await page.getByRole('alert').filter({ hasText: 'Reconnect and retry' }).waitFor()
+    assert.equal(
+      await page.getByRole('button', { name: 'Allow for this session', exact: true }).isEnabled(),
+      true,
+    )
+    await page.evaluate(() => {
+      window.rejectResponse = false
+      window.holdResponse = true
+    })
+    await page.getByRole('button', { name: 'Allow for this session', exact: true }).click()
+    assert.equal(
+      await page.getByRole('button', { name: 'Cancel this turn', exact: true }).isDisabled(),
+      true,
+    )
+    assert.equal(
+      await page.getByRole('button', { name: 'Decline', exact: true }).isDisabled(),
+      true,
+    )
+    await page
+      .getByRole('button', { name: 'Allow for this session', exact: true })
+      .evaluate((button) => button.click())
+    assert.deepEqual(await responses(), [
+      { accepted: true, answers: null, decisionId: 'codex-approval:0' },
+      { accepted: true, answers: null, decisionId: 'codex-approval:0' },
+    ])
+    await page.evaluate(() => {
+      window.holdResponse = false
+      window.releaseResponse()
+    })
+    await page
+      .locator('.approval-card .badge')
+      .getByText('Response sent', { exact: true })
+      .waitFor()
+    checks.push(
+      'Failed native choice delivery preserves an exact retry; an in-flight response disables every competing choice and cannot submit twice',
+    )
+
+    for (const [label, decisionId, decision] of [
+      ['Decline', 'codex-approval:1', 'decline'],
+      ['Cancel this turn', 'codex-approval:2', 'cancel'],
+    ]) {
+      await request({
+        type: 'approval',
+        details: { method, ...sessionChoices },
+        ...codexApprovalChoices(method, sessionChoices),
+      })
+      await page.getByRole('button', { name: label, exact: true }).click()
+      await page
+        .locator('.approval-card .badge')
+        .getByText('Response sent', { exact: true })
+        .waitFor()
+      assert.deepEqual(await responses(), [{ accepted: false, answers: null, decisionId }])
+      assert.deepEqual(codexRequestResponse(method, sessionChoices, false, {}, decisionId), {
+        decision,
+      })
+    }
+    checks.push('Decline and turn cancellation send their distinct native responses')
+
+    const policyChoices = {
+      availableDecisions: [
+        { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm', 'run', 'build'] } },
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: { host: 'reference.example', action: 'deny' },
+          },
+        },
+        { unsupportedDecision: { arbitraryGrant: true } },
+      ],
+    }
+    await request({
+      type: 'approval',
+      details: { method, ...policyChoices },
+      ...codexApprovalChoices(method, policyChoices),
+    })
+    assert.equal(await page.getByRole('button').count(), 2)
+    await page.getByRole('alert').filter({ hasText: 'unsupported approval choice' }).waitFor()
+    assert.equal(
+      await page.getByText(/matching this prefix: \["npm","run","build"\]/).isVisible(),
+      true,
+    )
+    await page.getByRole('button', { name: 'Always deny reference.example', exact: true }).click()
+    await page
+      .locator('.approval-card .badge')
+      .getByText('Response sent', { exact: true })
+      .waitFor()
+    assert.deepEqual(await responses(), [
+      { accepted: false, answers: null, decisionId: 'codex-approval:1' },
+    ])
+    assert.deepEqual(
+      codexRequestResponse(method, policyChoices, false, {}, (await responses())[0].decisionId),
+      { decision: policyChoices.availableDecisions[1] },
+    )
+    checks.push(
+      'Persistent command and network-deny choices show their exact scope; unsupported choices are surfaced without creating grant buttons',
+    )
+
+    await request({
+      type: 'approval',
+      details: { method, availableDecisions: [] },
+      ...codexApprovalChoices(method, { availableDecisions: [] }),
+    })
+    assert.equal(await page.getByRole('button').count(), 0)
+    await page.getByRole('alert').filter({ hasText: 'did not offer a response' }).waitFor()
+    checks.push(
+      'An explicit empty native choice list cannot be approved through a fabricated fallback',
     )
 
     assert.deepEqual(errors, [])

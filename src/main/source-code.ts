@@ -4,6 +4,9 @@ import { existsSync, realpathSync, statSync } from 'node:fs'
 import {
   copyFile,
   mkdir,
+  link,
+  lstat,
+  open,
   readdir,
   readFile,
   rename,
@@ -16,6 +19,20 @@ import {
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
+import { Effect, Predicate } from 'effect'
+import {
+  atomicSnapshot,
+  persistenceError,
+  persistenceIO,
+  type PersistenceError,
+} from './persistence-effects'
+import { runEffect } from './effect-runtime'
+import {
+  validateNativeRecoveryPlatformPolicyEffect,
+  type NativeRecoveryPersistenceMode,
+  type NativeRecoveryPlatformPolicy,
+} from './native-recovery-platform'
+import { inlineWorkerPlugin } from './inline-worker-plugin'
 import { applyPatch, createTwoFilesPatch, diffChars } from 'diff'
 import { BuiltinExtensionStore } from './builtin-extension-store'
 import type { BuiltinExtensionDefinition } from '../shared/builtin-extensions'
@@ -56,7 +73,128 @@ export interface SourceCodeStoreOptions {
   incorporatedExtensions?: readonly IncorporatedSourceExtension[]
   /** Trusted optional features shipped with the installed release. */
   builtinExtensions?: readonly BuiltinExtensionDefinition[]
+  persistenceMode?: NativeRecoveryPersistenceMode
+  recoveryPlatform?: NativeRecoveryPlatformPolicy
 }
+
+const recoverySnapshotSchema = z
+  .object({
+    extensions: z.array(
+      z
+        .object({
+          id: z.string(),
+          name: z.string(),
+          description: z.string(),
+          version: z.string(),
+          enabled: z.boolean(),
+          builtIn: z.literal(true).optional(),
+          deleted: z.literal(true).optional(),
+          originalId: z.string().optional(),
+          features: z.array(z.string()).optional(),
+          effect: z.string().optional(),
+          incorporated: z.literal(true).optional(),
+          files: z.array(z.string()),
+          dependencies: z.record(z.string(), z.string()),
+          createdAt: z.string(),
+          updatedAt: z.string(),
+          error: z.string().optional(),
+        })
+        .strict(),
+    ),
+    revision: z.number().int().nonnegative(),
+    builtInRevision: z.number().int().nonnegative().optional(),
+    builtInError: z.string().optional(),
+    enabled: z.boolean(),
+    active: z
+      .object({
+        revision: z.number().int().nonnegative(),
+        js: z.string(),
+        css: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    canRollback: z.boolean(),
+    path: z.string(),
+    error: z.string().optional(),
+    recovered: z.boolean(),
+    summary: z.string().optional(),
+    baseChanged: z.boolean().optional(),
+  })
+  .strict()
+const recoveryActionIdentitySchema = z
+  .object({
+    actionId: z.string().min(1).max(200),
+    intentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+const legacyRecoveryActionSchema = recoveryActionIdentitySchema
+  .extend({
+    payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+    snapshot: recoverySnapshotSchema,
+  })
+  .strict()
+const recoveryActionMarkerSchema = recoveryActionIdentitySchema
+  .extend({
+    payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+    revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    snapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+const recoveryActionSchema = z.union([recoveryActionMarkerSchema, legacyRecoveryActionSchema])
+const recoverySnapshotRecordSchema = legacyRecoveryActionSchema
+  .extend({
+    format: z.literal('life-source-recovery-action'),
+    version: z.literal(1),
+    revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    checksum: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+type SourceRecoveryActionReceipt = z.infer<typeof recoveryActionSchema>
+
+const syncSourceDirectory = Effect.fnUntraced(function* (path: string) {
+  const directory = yield* Effect.acquireRelease(
+    persistenceIO('open-directory', path, () => open(path, 'r')),
+    (directory) =>
+      persistenceIO('close-directory', path, () => directory.close()).pipe(Effect.orDie),
+  )
+  yield* persistenceIO('sync-directory', path, () => directory.sync())
+}, Effect.scoped)
+
+/** Publish fully synced immutable bytes without replacing an existing generation receipt. */
+const publishSourceRecoverySnapshot = Effect.fnUntraced(function* (
+  path: string,
+  serialized: string,
+) {
+  const temporary = path + '.' + randomUUID() + '.tmp'
+  yield* Effect.acquireRelease(Effect.succeed(temporary), (temporary) =>
+    persistenceIO('cleanup-snapshot', temporary, () => rm(temporary, { force: true })).pipe(
+      Effect.orDie,
+    ),
+  )
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const file = yield* Effect.acquireRelease(
+        persistenceIO('open-snapshot', temporary, () => open(temporary, 'wx', 0o600)),
+        (file) => persistenceIO('close-snapshot', temporary, () => file.close()).pipe(Effect.orDie),
+      )
+      yield* persistenceIO('write-snapshot', temporary, () => file.writeFile(serialized, 'utf8'))
+      yield* persistenceIO('sync-snapshot', temporary, () => file.sync())
+    }),
+  )
+  const published = yield* persistenceIO('publish-snapshot', path, () =>
+    link(temporary, path),
+  ).pipe(
+    Effect.as(true),
+    Effect.catch((error) =>
+      Predicate.isObject(error.cause) && error.cause.code === 'EEXIST'
+        ? Effect.succeed(false)
+        : Effect.fail(error),
+    ),
+  )
+  if (published) yield* syncSourceDirectory(dirname(path))
+  return published
+}, Effect.scoped)
+export type SourceRecoveryActionIdentity = z.infer<typeof recoveryActionIdentitySchema>
 
 const stateSchema = z
   .object({
@@ -67,6 +205,7 @@ const stateSchema = z
     enabled: z.boolean(),
     error: z.string().optional(),
     failed: z.array(z.number().int().min(1)).max(100).default([]),
+    recoveryActions: z.array(recoveryActionSchema).optional(),
   })
   .strict()
 type SavedState = z.infer<typeof stateSchema>
@@ -246,9 +385,13 @@ const hasTailwindDirectives = (css: string) =>
 export class SourceCodeStore {
   readonly path: string
   private state = defaultState()
+  private stateWriteError?: Error
   private metadata?: Metadata
   private recovered = false
   private initialized = false
+  private hydrated = false
+  private initializing?: Promise<LifeSourceSnapshot>
+  private markerContents?: string
   private closed = false
   private operations: Promise<unknown> = Promise.resolve()
   private baselineDependencies: Record<string, string> = {}
@@ -257,15 +400,52 @@ export class SourceCodeStore {
   private operationEpoch = 0
   private activeController?: AbortController
   private builtinExtensions: BuiltinExtensionStore
+  private readonly persistenceMode: NativeRecoveryPersistenceMode
+  private readonly recoveryPlatform?: NativeRecoveryPlatformPolicy
 
   constructor(private options: SourceCodeStoreOptions) {
     this.path = resolve(options.directory)
     this.builtinExtensions = new BuiltinExtensionStore(this.path, options.builtinExtensions || [])
+    this.persistenceMode = options.persistenceMode ?? 'native-protected'
+    this.recoveryPlatform = options.recoveryPlatform
   }
 
   async init(): Promise<LifeSourceSnapshot> {
+    if (this.closed) throw new Error('Life source runtime is closed')
+    if (this.initializing) return this.initializing
+    const initializing = this.initialize()
+    this.initializing = initializing
+    try {
+      return await initializing
+    } finally {
+      if (this.initializing === initializing) this.initializing = undefined
+    }
+  }
+
+  private async initialize(): Promise<LifeSourceSnapshot> {
     if (this.initialized) return this.get()
-    this.initialized = true
+    if (this.persistenceMode === 'read-only') {
+      if (this.recoveryPlatform)
+        await runEffect(validateNativeRecoveryPlatformPolicyEffect(this.recoveryPlatform))
+      this.recovered = true
+      await this.builtinExtensions.init()
+      try {
+        this.state = stateSchema.parse(JSON.parse(await readFile(this.statePath, 'utf8')))
+        if (this.state.current !== null) this.metadata = await this.readMetadata(this.state.current)
+      } catch {
+        this.state = defaultState()
+      }
+      this.state = {
+        ...this.state,
+        enabled: false,
+        error: 'Source changes are read-only while protected recovery state is unavailable.',
+      }
+      this.hydrated = true
+      this.initialized = true
+      this.emit()
+      return this.get()
+    }
+    await runEffect(this.assertSourceWritableEffect())
     await mkdir(join(this.path, 'revisions'), { recursive: true })
     await mkdir(join(this.path, 'packages'), { recursive: true })
     await this.builtinExtensions.init()
@@ -302,12 +482,17 @@ export class SourceCodeStore {
     try {
       this.state = stateSchema.parse(JSON.parse(await readFile(this.statePath, 'utf8')))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.stateWriteError = new Error(
+          `Life preserved the unreadable source state at ${this.statePath}. Repair or export that state before applying more source changes: ${explain(error)}`,
+        )
         this.state = {
           ...defaultState(),
           error: `Life restored its built-in interface because the saved source could not load: ${explain(error)}`,
         }
+      }
     }
+    this.hydrated = true
     const wasRunning = existsSync(this.markerPath)
     const canRefresh =
       !wasRunning &&
@@ -342,7 +527,10 @@ export class SourceCodeStore {
     }
     // Cover startup compilation as well as renderer execution. A crashed upgrade
     // must enter recovery on its next launch, rather than repeatedly rebuilding.
-    await writeFile(this.markerPath, String(process.pid), 'utf8')
+    const markerContents =
+      this.persistenceMode === 'ordinary' ? `${process.pid}:${randomUUID()}` : String(process.pid)
+    await writeFile(this.markerPath, markerContents, 'utf8')
+    this.markerContents = markerContents
     if (this.state.current !== null) {
       try {
         this.metadata = await this.readMetadata(this.state.current)
@@ -366,13 +554,15 @@ export class SourceCodeStore {
                 throw new Error(
                   'This older customization did not save the original source needed to merge files changed by Life. Open Life Studio to adapt those files.',
                 )
-              await this.queue(() =>
-                this.commitLayers(
-                  this.cloneLayers(),
-                  'Update source customizations for the installed Life version',
-                  this.operationEpoch,
-                  true,
-                ),
+              await this.queue(
+                () =>
+                  this.commitLayers(
+                    this.cloneLayers(),
+                    'Update source customizations for the installed Life version',
+                    this.operationEpoch,
+                    true,
+                  ),
+                true,
               )
             } catch (error) {
               this.state = {
@@ -418,30 +608,37 @@ export class SourceCodeStore {
         await this.writeState(this.state)
       }
     }
+    this.initialized = true
     this.emit()
     return this.get()
   }
 
   get(): LifeSourceSnapshot {
+    return this.snapshot(this.state, this.metadata, this.recovered)
+  }
+
+  private snapshot(
+    state: SavedState,
+    metadata: Metadata | undefined,
+    recovered: boolean,
+  ): LifeSourceSnapshot {
     return {
-      extensions: this.extensionSummaries(),
-      revision: this.state.revision,
+      extensions: this.extensionSummaries(state, metadata),
+      revision: state.revision,
       ...(this.options.builtinExtensions?.length
         ? {
             builtInRevision: this.builtinExtensions.revision,
             ...(this.builtinExtensions.error ? { builtInError: this.builtinExtensions.error } : {}),
           }
         : {}),
-      enabled: this.state.enabled,
-      ...(this.state.enabled && this.state.current !== null
-        ? { active: this.assets(this.state.current) }
-        : {}),
-      canRollback: this.state.history.length > 0,
+      enabled: state.enabled,
+      ...(state.enabled && state.current !== null ? { active: this.assets(state.current) } : {}),
+      canRollback: state.history.length > 0,
       path: this.path,
-      ...(this.state.error ? { error: this.state.error } : {}),
-      recovered: this.recovered,
-      ...(this.metadata ? { summary: this.metadata.summary } : {}),
-      ...(this.metadata && this.metadata.baseFingerprint !== this.baselineFingerprint
+      ...(state.error ? { error: state.error } : {}),
+      recovered,
+      ...(metadata ? { summary: metadata.summary } : {}),
+      ...(metadata && metadata.baseFingerprint !== this.baselineFingerprint
         ? { baseChanged: true }
         : {}),
     }
@@ -508,11 +705,32 @@ export class SourceCodeStore {
     }
   }
 
-  async apply(value: unknown): Promise<LifeSourceSnapshot> {
+  async apply(
+    value: unknown,
+    recovery?: SourceRecoveryActionIdentity,
+  ): Promise<LifeSourceSnapshot> {
+    if (recovery && this.persistenceMode !== 'native-protected')
+      throw persistenceError(
+        'source-recovery-platform',
+        this.statePath,
+        new Error('Native source action receipts are unsupported in ordinary persistence mode.'),
+      )
     const patch = parseLifeSourcePatch(value)
+    if (recovery) recovery = recoveryActionIdentitySchema.parse(recovery)
+    const payloadHash = this.hash(JSON.stringify(patch))
     const epoch = this.operationEpoch
     return this.queue(async () => {
       this.checkEpoch(epoch)
+      if (recovery) {
+        const existing = this.state.recoveryActions?.find(
+          (entry) => entry.actionId === recovery.actionId,
+        )
+        if (existing) {
+          if (existing.intentHash !== recovery.intentHash || existing.payloadHash !== payloadHash)
+            throw new Error('This source action ID belongs to a different exact proposal.')
+          return this.readRecoverySnapshot(existing)
+        }
+      }
       if (patch.baseRevision !== this.state.revision)
         throw new Error(
           `Life source changed since the proposal was written (proposal revision ${patch.baseRevision}, current revision ${this.state.revision}). Read the current source and regenerate the patch.`,
@@ -582,9 +800,135 @@ export class SourceCodeStore {
         epoch,
         Boolean(this.get().baseChanged),
         adaptations,
+        recovery ? { ...recovery, payloadHash } : undefined,
       )
     })
   }
+
+  /** Historical commit evidence remains valid after rollback or recovery disabling. */
+  async readRecoveryAction(
+    actionId: string,
+    intentHash: string,
+  ): Promise<LifeSourceSnapshot | undefined> {
+    if (this.persistenceMode !== 'native-protected')
+      throw persistenceError(
+        'source-recovery-platform',
+        this.statePath,
+        new Error('Native source action receipts are unavailable in this platform mode.'),
+      )
+    const identity = recoveryActionIdentitySchema.parse({ actionId, intentHash })
+    await this.operations
+    let state: SavedState
+    try {
+      state = stateSchema.parse(JSON.parse(await readFile(this.statePath, 'utf8')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    const receipt = state.recoveryActions?.find((entry) => entry.actionId === identity.actionId)
+    if (!receipt) return
+    if (receipt.intentHash !== identity.intentHash)
+      throw new Error('This source action ID belongs to a different exact proposal.')
+    return this.readRecoverySnapshot(receipt)
+  }
+
+  private readRecoverySnapshot(receipt: SourceRecoveryActionReceipt): Promise<LifeSourceSnapshot> {
+    return runEffect(this.readRecoverySnapshotEffect(receipt))
+  }
+
+  private readonly readRecoverySnapshotEffect = Effect.fnUntraced(function* (
+    this: SourceCodeStore,
+    receipt: SourceRecoveryActionReceipt,
+  ): Effect.fn.Return<LifeSourceSnapshot, PersistenceError> {
+    if ('snapshot' in receipt) return structuredClone(receipt.snapshot)
+    const path = join(this.generation(receipt.revision), 'recovery-action.json')
+    const info = yield* persistenceIO('stat-recovery-snapshot', path, () => lstat(path))
+    if (!info.isFile() || info.isSymbolicLink())
+      return yield* persistenceError(
+        'read-recovery-snapshot',
+        path,
+        new Error('The committed source recovery snapshot must be a regular private file.'),
+      )
+    const text = yield* persistenceIO('read-recovery-snapshot', path, () => readFile(path, 'utf8'))
+    return yield* Effect.try({
+      try: () => {
+        const raw = JSON.parse(text)
+        const snapshot = recoverySnapshotRecordSchema.parse(raw)
+        const { checksum, ...payload } = raw
+        if (
+          checksum !== receipt.snapshotHash ||
+          checksum !== this.hash(JSON.stringify(payload)) ||
+          snapshot.actionId !== receipt.actionId ||
+          snapshot.intentHash !== receipt.intentHash ||
+          snapshot.payloadHash !== receipt.payloadHash ||
+          snapshot.revision !== receipt.revision ||
+          snapshot.snapshot.revision !== receipt.revision
+        )
+          throw new Error(
+            'The committed source recovery snapshot does not match its original action checksum.',
+          )
+        return structuredClone(snapshot.snapshot)
+      },
+      catch: (cause) => persistenceError('parse-recovery-snapshot', path, cause),
+    })
+  })
+
+  private readonly compactRecoveryActionEffect = Effect.fnUntraced(function* (
+    this: SourceCodeStore,
+    receipt: SourceRecoveryActionReceipt,
+  ): Effect.fn.Return<SourceRecoveryActionReceipt, PersistenceError> {
+    if (!('snapshot' in receipt)) return receipt
+    const revision = receipt.snapshot.revision
+    const directory = this.generation(revision)
+    const info = yield* persistenceIO('stat-recovery-generation', directory, () =>
+      lstat(directory),
+    ).pipe(
+      Effect.catch((error) =>
+        Predicate.isObject(error.cause) && error.cause.code === 'ENOENT'
+          ? Effect.succeed(undefined)
+          : Effect.fail(error),
+      ),
+    )
+    // Never manufacture a generation for an older inline receipt whose files
+    // were removed. Retain that complete evidence in its original state form.
+    if (!info) return receipt
+    if (!info.isDirectory() || info.isSymbolicLink())
+      return yield* persistenceError(
+        'compact-recovery-snapshot',
+        directory,
+        new Error('Source recovery snapshots require their original private generation.'),
+      )
+    const payload = {
+      format: 'life-source-recovery-action' as const,
+      version: 1 as const,
+      actionId: receipt.actionId,
+      intentHash: receipt.intentHash,
+      payloadHash: receipt.payloadHash,
+      revision,
+      snapshot: receipt.snapshot,
+    }
+    const snapshotHash = this.hash(JSON.stringify(payload))
+    const marker = yield* Effect.try({
+      try: () =>
+        recoveryActionMarkerSchema.parse({
+          actionId: receipt.actionId,
+          intentHash: receipt.intentHash,
+          payloadHash: receipt.payloadHash,
+          revision,
+          snapshotHash,
+        }),
+      catch: (cause) => persistenceError('encode-recovery-marker', directory, cause),
+    })
+    const path = join(directory, 'recovery-action.json')
+    const published = yield* publishSourceRecoverySnapshot(
+      path,
+      JSON.stringify({ ...payload, checksum: snapshotHash }),
+    )
+    // A racing writer may have created the final path. Only identical evidence
+    // can be reused; its existing bytes are never replaced.
+    if (!published) yield* this.readRecoverySnapshotEffect(marker)
+    return marker
+  })
 
   async setExtensionEnabled(id: string, enabled: boolean): Promise<LifeSourceSnapshot> {
     const epoch = this.operationEpoch
@@ -736,10 +1080,13 @@ export class SourceCodeStore {
     )
   }
 
-  private extensionSummaries(): SourceExtensionSummary[] {
-    const layers = this.metadata?.extensions || []
+  private extensionSummaries(
+    state = this.state,
+    metadata = this.metadata,
+  ): SourceExtensionSummary[] {
+    const layers = metadata?.extensions || []
     const failedIndex =
-      this.state.current !== null && this.state.failed.includes(this.state.current)
+      state.current !== null && state.failed.includes(state.current)
         ? layers.findLastIndex((layer) => layer.enabled)
         : -1
     return [
@@ -756,7 +1103,7 @@ export class SourceCodeStore {
         dependencies: { ...layer.bundle.dependencies },
         createdAt: layer.bundle.createdAt,
         updatedAt: layer.bundle.updatedAt,
-        ...(index === failedIndex && this.state.error ? { error: this.state.error } : {}),
+        ...(index === failedIndex && state.error ? { error: state.error } : {}),
       })),
     ]
   }
@@ -1142,6 +1489,7 @@ export class SourceCodeStore {
     epoch: number,
     rebase = false,
     adaptations = new Map<string, string | undefined>(),
+    recovery?: SourceRecoveryActionIdentity & { payloadHash: string },
   ): Promise<LifeSourceSnapshot> {
     this.checkEpoch(epoch)
     const nextRevision = this.state.revision + 1
@@ -1196,12 +1544,32 @@ export class SourceCodeStore {
             : [...this.state.history, this.state.current].slice(-5),
         enabled: composed.layers.some((layer) => layer.enabled),
         failed: [...this.state.failed],
+        ...(this.state.recoveryActions ? { recoveryActions: [...this.state.recoveryActions] } : {}),
       }
+      if (recovery)
+        next.recoveryActions = [
+          ...(next.recoveryActions || []),
+          {
+            ...recovery,
+            snapshot: recoverySnapshotSchema.parse(this.snapshot(next, metadata, false)),
+          },
+        ]
       try {
         signal.throwIfAborted()
         await this.writeState(next)
       } catch (error) {
-        await rm(destination, { recursive: true, force: true })
+        // A directory-sync failure can follow a successful state publication.
+        // Never remove a generation that the authoritative state already owns.
+        let published = false
+        try {
+          const stored = stateSchema.parse(JSON.parse(await readFile(this.statePath, 'utf8')))
+          published = stored.current === nextRevision && stored.revision === nextRevision
+          if (published) {
+            this.state = stored
+            this.metadata = metadata
+          }
+        } catch {}
+        if (!published) await rm(destination, { recursive: true, force: true })
         throw error
       }
       this.state = next
@@ -1263,6 +1631,7 @@ export class SourceCodeStore {
           !metadata?.baselineOnly &&
           Boolean(metadata?.extensions?.some((layer) => layer.enabled)),
         failed: [...this.state.failed],
+        ...(this.state.recoveryActions ? { recoveryActions: [...this.state.recoveryActions] } : {}),
         ...(baseChanged
           ? {
               error:
@@ -1339,7 +1708,18 @@ export class SourceCodeStore {
     if (this.closed) return
     this.closed = true
     this.cancelActive('Life source application was cancelled because Life is closing.')
+    await this.initializing?.catch(() => {})
     await this.operations.catch(() => {})
+    if (this.persistenceMode === 'read-only' || this.markerContents === undefined) return
+    await runEffect(this.assertSourceWritableEffect())
+    let marker: string
+    try {
+      marker = await readFile(this.markerPath, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    if (marker !== this.markerContents) return
     await unlink(this.markerPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error
     })
@@ -1362,9 +1742,22 @@ export class SourceCodeStore {
     this.activeController?.abort(new Error(reason))
   }
 
-  private queue<T>(operation: () => Promise<T>): Promise<T> {
+  private queue<T>(operation: () => Promise<T>, startup = false): Promise<T> {
     if (this.closed) return Promise.reject(new Error('Life source runtime is closed'))
-    const next = this.operations.then(operation, operation)
+    if (!this.hydrated || (!this.initialized && !startup))
+      return Promise.reject(
+        persistenceError(
+          'source-recovery-platform',
+          this.statePath,
+          new Error('Life source state must load before it can be changed.'),
+        ),
+      )
+    if (this.stateWriteError) return Promise.reject(this.stateWriteError)
+    const admitted = async () => {
+      await runEffect(this.assertSourceWritableEffect())
+      return operation()
+    }
+    const next = this.operations.then(admitted, admitted)
     this.operations = next.catch(() => {})
     return next
   }
@@ -1387,11 +1780,81 @@ export class SourceCodeStore {
     }
   }
 
-  private async writeState(state: SavedState) {
-    const temporary = `${this.statePath}.tmp`
-    await writeFile(temporary, JSON.stringify(state), 'utf8')
-    await rename(temporary, this.statePath)
+  private writeState(state: SavedState): Promise<void> {
+    return runEffect(this.writeStateEffect(state))
   }
+
+  private readonly assertSourceWritableEffect = Effect.fn('SourceCodeStore.platform')(
+    function* (this: SourceCodeStore) {
+      if (this.persistenceMode === 'read-only')
+        return yield* persistenceError(
+          'source-recovery-platform',
+          this.statePath,
+          new Error('Protected source state is read-only.'),
+        )
+      if (this.persistenceMode === 'native-protected') {
+        if (this.recoveryPlatform) {
+          const policy = yield* validateNativeRecoveryPlatformPolicyEffect(this.recoveryPlatform)
+          yield* policy.assertNativeRecoveryEffect('source-recovery-platform')
+          yield* policy.assertOrdinarySourceWriteEffect(this.path)
+        } else if (process.platform === 'win32') {
+          return yield* persistenceError(
+            'source-recovery-platform',
+            this.statePath,
+            new Error('Windows source persistence requires an issued platform policy.'),
+          )
+        }
+        return
+      }
+      const policy = yield* validateNativeRecoveryPlatformPolicyEffect(this.recoveryPlatform)
+      if (policy.mode !== 'unsupported-clean')
+        return yield* persistenceError(
+          'source-recovery-platform',
+          this.statePath,
+          new Error(
+            'Ordinary source persistence requires a privately admitted unsupported platform.',
+          ),
+        )
+      yield* policy.assertOrdinarySourceWriteEffect(this.path)
+      if (this.state.recoveryActions?.length)
+        return yield* persistenceError(
+          'source-recovery-platform',
+          this.statePath,
+          new Error('Existing native source action receipts were preserved.'),
+        )
+    },
+    (effect) =>
+      effect.pipe(
+        Effect.mapError((cause) =>
+          persistenceError('source-recovery-platform', this.statePath, cause),
+        ),
+      ),
+  )
+
+  private readonly writeStateEffect = Effect.fn('SourceCodeStore.writeState')(function* (
+    this: SourceCodeStore,
+    state: SavedState,
+  ): Effect.fn.Return<void, PersistenceError> {
+    if (this.stateWriteError)
+      return yield* persistenceError('write-source-state', this.statePath, this.stateWriteError)
+    yield* this.assertSourceWritableEffect()
+    if (this.persistenceMode !== 'native-protected' && state.recoveryActions?.length)
+      return yield* persistenceError(
+        'source-recovery-platform',
+        this.statePath,
+        new Error('Native source receipts cannot be written by ordinary persistence.'),
+      )
+    if (state.recoveryActions && this.persistenceMode === 'native-protected') {
+      const compacted: SourceRecoveryActionReceipt[] = []
+      for (const receipt of state.recoveryActions)
+        compacted.push(
+          'snapshot' in receipt ? yield* this.compactRecoveryActionEffect(receipt) : receipt,
+        )
+      state.recoveryActions = compacted
+    }
+    yield* atomicSnapshot(this.statePath, JSON.stringify(state))
+    if (this.persistenceMode === 'native-protected') yield* syncSourceDirectory(this.path)
+  })
 
   private async readMetadata(revision: number): Promise<Metadata> {
     return metadataSchema.parse(
@@ -1591,6 +2054,11 @@ export class SourceCodeStore {
       assetNames: 'assets/[name]-[hash]',
       logLevel: 'silent',
       plugins: [
+        inlineWorkerPlugin(compiler, {
+          nodePaths: [...(packageModules ? [packageModules] : []), nodeModulesDir],
+          define: { 'process.env.NODE_ENV': '"production"', __LIFE_SOURCE_BUILD__: 'true' },
+          target: ['es2022'],
+        }),
         {
           name: 'life-tailwind-postcss',
           setup(build) {

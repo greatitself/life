@@ -120,6 +120,8 @@ export function compareProviderVersions(a: string, b: string): number | undefine
 
 export function providerUpdateMachineId(connection: ConnectionState): string | undefined {
   if (connection.status !== 'connected' || !connection.profile || !connection.home) return undefined
+  if (connection.profile.transport === 'local')
+    return JSON.stringify(['local', connection.profile.id, connection.home])
   const { host, port, username } = connection.profile
   return JSON.stringify([host.toLowerCase(), port, username, connection.home])
 }

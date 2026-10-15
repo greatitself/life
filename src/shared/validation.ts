@@ -15,11 +15,12 @@ export const sshConfigPathSchema = z
   .refine((value) => !/[\x00-\x1f]/.test(value), 'Enter a valid SSH config path')
 export const remoteDirectorySchema = z
   .string()
-  .trim()
   .min(1)
   .max(4096)
+  .refine((value) => value.trim().length > 0, 'Enter a valid remote path')
   .refine((value) => !/[\x00-\x1f]/.test(value), 'Enter a valid remote path')
 export const profileSchema = z.object({
+  transport: z.enum(['ssh', 'local']).optional(),
   id: z.string().min(1).max(100),
   name: z.string().trim().min(1).max(100),
   host: z
@@ -194,6 +195,8 @@ export const startSchema = z
     scope: z.enum(['life-customization', 'research']).optional(),
     studioContext: lifeStudioContextSchema.optional(),
     attachments: agentAttachmentsSchema.optional(),
+    localTurn: z.number().int().nonnegative().safe().optional(),
+    clientRecovery: z.unknown().optional(),
   })
   .superRefine((value, context) => {
     if (!value.prompt.trim() && !value.attachments?.length)

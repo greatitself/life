@@ -3,10 +3,18 @@ import type {
   ConnectionProfile,
   ConnectionState,
   ModelOption,
+  NativeRecoveryCursor,
+  NativeRecoveryOwnerState,
   PermissionMode,
   Provider,
 } from '../shared/types'
 import { permissionModes } from '../shared/permissions'
+import { appendConversationMessageText } from './conversation-message-appends'
+import {
+  attachConversationSource,
+  conversationSourceHasPersistedField,
+  reconcileConversationLifecycle,
+} from './conversation-source'
 import { normalizeThreadAttachments, type ThreadAttachment } from './attachments'
 import { normalizeQueuedMessages, pauseQueuedMessages, type QueuedMessage } from './thread-queue'
 import { isSubagentActivity, normalizeFileChanges, type ThreadFileChange } from './thread-activity'
@@ -21,7 +29,15 @@ import {
   type ThreadMetadata,
 } from './thread-metadata'
 import { normalizeSourceChange, type SourceChangeReceipt } from './source-presentation'
+import {
+  carryNativeProjectionOwnerSnapshot,
+  carryNativeProjectionAuthoredTransition,
+  hasNativeProjectionCursor,
+  registerNativeProjectionBaseline,
+  registerNativeProjectionDelivery,
+} from './native-projection-admissions'
 export interface Message extends MessageMetadata {
+  nativeRecovery?: { transportId: string; ownerGeneration?: number }
   /** Restored child snapshots retain history but need a fresh native event to prove liveness. */
   activityStateUnknown?: true
   createdAt?: number
@@ -39,6 +55,12 @@ export interface Message extends MessageMetadata {
   turn: number
 }
 export interface Thread extends ThreadMetadata {
+  /** Applied ledger progress is persisted with the exact recovered transcript. */
+  nativeRecovery?: Record<string, NativeRecoveryCursor>
+  /** Mutation authority is reconciled with the native owner after cold hydration. */
+  nativeRecoveryStatus?: NativeRecoveryOwnerState['status']
+  nativeRecoveryOwner?: { transportId: string; ownerGeneration?: number; snapshotToken?: string }
+  nativeRecoveryAdmissionBlocked?: true
   createdAt?: number
   pinnedAt?: number
   pinOrder?: number
@@ -86,6 +108,293 @@ export interface Thread extends ThreadMetadata {
   pending: AgentEvent[]
   /** Follow-up messages retain Life scope until the user returns to their project. */
   lifeScope?: boolean
+}
+function recoveryNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+const liveRecoveryCursors = new WeakSet<NativeRecoveryCursor>()
+function admitRecoveryCursor<T extends NativeRecoveryCursor>(cursor: T): T {
+  liveRecoveryCursors.add(cursor)
+  return cursor
+}
+export function normalizeNativeRecovery(value: unknown): Thread['nativeRecovery'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const entries: [string, NativeRecoveryCursor][] = []
+  for (const transportId of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, transportId)
+    const cursor = descriptor && !descriptor.get && !descriptor.set ? descriptor.value : undefined
+    if (!transportId || !cursor || typeof cursor !== 'object' || Array.isArray(cursor)) continue
+    const applied = Object.getOwnPropertyDescriptor(cursor, 'appliedRevision')
+    if (!applied || applied.get || applied.set || !recoveryNumber(applied.value)) continue
+    const token = Object.getOwnPropertyDescriptor(cursor, 'snapshotToken')
+    const generation = Object.getOwnPropertyDescriptor(cursor, 'ownerGeneration')
+    entries.push([
+      transportId,
+      {
+        appliedRevision: applied.value,
+        ...(token && !token.get && !token.set && typeof token.value === 'string' && token.value
+          ? { snapshotToken: token.value }
+          : {}),
+        ...(generation && !generation.get && !generation.set && recoveryNumber(generation.value)
+          ? { ownerGeneration: generation.value }
+          : {}),
+      },
+    ])
+  }
+  return entries.length ? Object.fromEntries(entries) : undefined
+}
+function validRecoveryEvent(event: AgentEvent): boolean {
+  const recovery = event.nativeRecovery
+  return (
+    recovery === undefined ||
+    (Boolean(recovery) &&
+      typeof recovery === 'object' &&
+      !Array.isArray(recovery) &&
+      typeof recovery.transportId === 'string' &&
+      Boolean(recovery.transportId) &&
+      typeof recovery.eventId === 'string' &&
+      Boolean(recovery.eventId) &&
+      recoveryNumber(recovery.revision) &&
+      recovery.revision > 0 &&
+      (recovery.ownerGeneration === undefined || recoveryNumber(recovery.ownerGeneration)) &&
+      (recovery.localTurn === undefined || recoveryNumber(recovery.localTurn)) &&
+      (recovery.emittedAt === undefined || recoveryNumber(recovery.emittedAt)) &&
+      (recovery.snapshotToken === undefined ||
+        (typeof recovery.snapshotToken === 'string' && Boolean(recovery.snapshotToken))))
+  )
+}
+export function acceptsAgentEvent(thread: Thread, event: AgentEvent): boolean {
+  if (event.sessionId !== thread.id || !validRecoveryEvent(event)) return false
+  const recovery = event.nativeRecovery
+  if (!recovery) return true
+  if (thread.nativeRecoveryAdmissionBlocked) return false
+  const prior = Object.hasOwn(thread.nativeRecovery || {}, recovery.transportId)
+    ? thread.nativeRecovery?.[recovery.transportId]
+    : undefined
+  return !prior || recovery.revision > prior.appliedRevision
+}
+function recoveryCursor(event: AgentEvent): NativeRecoveryCursor {
+  const recovery = event.nativeRecovery!
+  return admitRecoveryCursor({
+    appliedRevision: recovery.revision,
+    ...(recovery.snapshotToken ? { snapshotToken: recovery.snapshotToken } : {}),
+    ...(recovery.ownerGeneration !== undefined
+      ? { ownerGeneration: recovery.ownerGeneration }
+      : {}),
+  })
+}
+/** Delivery capabilities stay in private projection bindings, never pending/history JSON. */
+export function persistentAgentEvent(event: AgentEvent): AgentEvent {
+  if (
+    !event.nativeRecovery ||
+    (!Object.hasOwn(event.nativeRecovery, 'deliveryToken') &&
+      !Object.hasOwn(event.nativeRecovery, 'ownerStatus'))
+  )
+    return event
+  const {
+    deliveryToken: _deliveryToken,
+    ownerStatus: _ownerStatus,
+    ...nativeRecovery
+  } = event.nativeRecovery
+  return { ...event, nativeRecovery }
+}
+/** Drop replayed tails before a streaming batch can merge them with new output. */
+export function admitAgentEvents(thread: Thread, events: readonly AgentEvent[]): AgentEvent[] {
+  const accepted: AgentEvent[] = []
+  let admission = thread
+  for (const event of events) {
+    if (!acceptsAgentEvent(admission, event)) continue
+    accepted.push(event)
+    if (event.nativeRecovery) {
+      const transportId = event.nativeRecovery.transportId
+      admission = {
+        ...admission,
+        nativeRecovery: {
+          ...admission.nativeRecovery,
+          [transportId]: recoveryCursor(event),
+        },
+      }
+    }
+  }
+  return accepted
+}
+export function nativeRecoveryBlocksMutation(thread?: Thread): boolean {
+  return thread?.nativeRecoveryStatus === 'recovering' || thread?.nativeRecoveryStatus === 'unknown'
+}
+export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOwnerState): Thread {
+  if (thread.id !== owner.sessionId) return thread
+  const prior = thread.nativeRecovery?.[owner.transportId]
+  const acceptedCursor = normalizeNativeRecovery({
+    [owner.transportId]: owner.acceptedAppliedCursor,
+  })?.[owner.transportId]
+  const acceptedRevision =
+    acceptedCursor?.appliedRevision ??
+    (recoveryNumber(owner.acceptedAppliedRevision) ? owner.acceptedAppliedRevision : 0)
+  const privatelyAdmitted =
+    liveRecoveryCursors.has(prior!) || hasNativeProjectionCursor(thread, owner.transportId)
+  if (prior && !privatelyAdmitted && prior.appliedRevision > acceptedRevision)
+    return {
+      ...thread,
+      nativeRecoveryStatus: 'unknown',
+      nativeRecoveryAdmissionBlocked: true,
+      busy: false,
+      turnStatus: 'unknown',
+      statusText:
+        'Saved transcript progress could not be verified. Native recovery must reconcile this history before replay can continue.',
+    }
+  const projectionBefore = thread
+  if (owner.status === 'running' || owner.status === 'idle') {
+    for (const child of owner.currentChildren || []) {
+      if (
+        child.sessionId === thread.id &&
+        child.agentId &&
+        ['status', 'subagent'].includes(child.type)
+      ) {
+        const currentTurn = thread.turn
+        const childTurn = child.nativeRecovery?.localTurn
+        const hydrated = applyAdmittedEvent(
+          childTurn === undefined ? thread : { ...thread, turn: childTurn },
+          persistentAgentEvent(child),
+        )
+        thread = { ...hydrated, turn: currentTurn }
+      }
+    }
+    if (owner.pending)
+      thread = {
+        ...thread,
+        pending: owner.pending
+          .filter(
+            (request) =>
+              request.sessionId === thread.id &&
+              Boolean(request.requestId) &&
+              (request.type === 'approval' || request.type === 'question'),
+          )
+          .map(persistentAgentEvent),
+      }
+  }
+  const previous = thread.nativeRecovery?.[owner.transportId]
+  const recovered = {
+    ...thread,
+    nativeRecoveryStatus: owner.status,
+    nativeRecoveryAdmissionBlocked: undefined,
+    nativeRecoveryOwner: {
+      transportId: owner.transportId,
+      ...(owner.ownerGeneration !== undefined ? { ownerGeneration: owner.ownerGeneration } : {}),
+      ...(owner.snapshotToken ? { snapshotToken: owner.snapshotToken } : {}),
+    },
+    nativeRecovery: {
+      ...thread.nativeRecovery,
+      [owner.transportId]:
+        privatelyAdmitted && previous!.appliedRevision >= acceptedRevision
+          ? previous!
+          : admitRecoveryCursor(acceptedCursor || { appliedRevision: acceptedRevision }),
+    },
+    ...(owner.status === 'running'
+      ? { busy: true, turnStatus: 'running' as const }
+      : owner.status === 'recovering'
+        ? { busy: true, turnStatus: 'reconnecting' as const }
+        : owner.status === 'unknown'
+          ? { busy: false, turnStatus: 'unknown' as const }
+          : { busy: false }),
+  }
+  return registerNativeProjectionBaseline(
+    carryNativeProjectionOwnerSnapshot(
+      projectionBefore,
+      owner.status === 'running'
+        ? reconcileConversationLifecycle(recovered, ['busy', 'turnStatus'])
+        : owner.status === 'idle'
+          ? reconcileConversationLifecycle(recovered, ['busy'])
+          : recovered,
+    ),
+    owner.acceptedProjectionAdmission,
+  )
+}
+/** Repair the accepted user turn from native-owned evidence when history lagged its outbox. */
+export function restoreNativeMainOwner(
+  threads: readonly Thread[],
+  owner: NativeRecoveryOwnerState,
+): Thread[] {
+  const input = owner.originalInput
+  const recovery = input?.clientRecovery
+  if (!input || !recovery || typeof recovery !== 'object' || Array.isArray(recovery))
+    return [...threads]
+  const value = recovery as Record<string, unknown>
+  if (value.kind !== 'main' || input.sessionId !== owner.sessionId) return [...threads]
+  const user = value.userMessage
+  const seed = value.threadSeed
+  if (
+    !user ||
+    typeof user !== 'object' ||
+    Array.isArray(user) ||
+    !seed ||
+    typeof seed !== 'object' ||
+    Array.isArray(seed)
+  )
+    return [...threads]
+  const message = user as Record<string, unknown>
+  const original = seed as Record<string, unknown>
+  const localTurn = owner.localTurn ?? input.localTurn
+  if (
+    typeof message.id !== 'string' ||
+    !message.id ||
+    message.role !== 'user' ||
+    message.text !== input.prompt ||
+    !recoveryNumber(localTurn) ||
+    message.turn !== localTurn ||
+    original.id !== owner.sessionId ||
+    original.provider !== input.provider ||
+    typeof original.profileId !== 'string' ||
+    !original.profileId ||
+    (input.workspace !== undefined && original.workspace !== input.workspace) ||
+    !recoveryNumber(message.createdAt)
+  )
+    return [...threads]
+  const matching = threads.filter((thread) => thread.id === owner.sessionId)
+  if (matching.length > 1) return [...threads]
+  let thread = matching[0]
+  if (
+    thread &&
+    (thread.profileId !== original.profileId ||
+      thread.provider !== input.provider ||
+      (thread.workspace !== undefined &&
+        input.workspace !== undefined &&
+        thread.workspace !== input.workspace))
+  )
+    return [...threads]
+  if (!thread) thread = readThreads([{ ...original, messages: [] }])[0]
+  if (!thread) return [...threads]
+  const previous = thread.messages.find((candidate) => candidate.id === message.id)
+  if (
+    previous &&
+    (previous.role !== 'user' || previous.text !== input.prompt || previous.turn !== localTurn)
+  )
+    return [...threads]
+  const attachments =
+    message.attachments === undefined ? undefined : normalizeThreadAttachments(message.attachments)
+  if (Array.isArray(message.attachments) && attachments?.length !== message.attachments.length)
+    return [...threads]
+  const repaired: Thread = {
+    ...thread,
+    turn: Math.max(thread.turn, localTurn),
+    ...(owner.remoteId ? { remoteId: owner.remoteId } : {}),
+    messages: previous
+      ? thread.messages
+      : [
+          ...thread.messages,
+          {
+            id: message.id,
+            role: 'user',
+            text: input.prompt,
+            turn: localTurn,
+            createdAt: message.createdAt,
+            ...(attachments ? { attachments } : {}),
+          },
+        ],
+  }
+  const applied = applyNativeRecoveryOwner(repaired, owner)
+  return matching.length
+    ? threads.map((candidate) => (candidate === thread ? applied : candidate))
+    : [...threads, applied]
 }
 function validModelChoice(value: unknown): string {
   return typeof value === 'string' && value.length <= 100 && !/[\x00-\x1f\x7f-\x9f]/.test(value)
@@ -151,11 +460,93 @@ export function normalizeModelChoices(
         : serviceTier,
   }
 }
+/** The same admission policy is used by whole-history and bounded batch restoration. */
+export function readableThreadMessages(input: unknown): Message[] {
+  return Array.isArray(input)
+    ? input.filter(
+        (message: Partial<Message> | null) =>
+          message &&
+          typeof message.id === 'string' &&
+          ['user', 'assistant', 'tool', 'error'].includes(message.role || '') &&
+          typeof message.text === 'string',
+      )
+    : []
+}
+
+export function readThreadMessages(input: unknown): Message[] {
+  return readableThreadMessages(input).map((message: Message) => ({
+    ...message,
+    phase: undefined,
+    kind: undefined,
+    agentId: undefined,
+    agentName: undefined,
+    parentItemId: undefined,
+    turnId: undefined,
+    parentAgentId: undefined,
+    provider: undefined,
+    details: undefined,
+    submission: undefined,
+    ...normalizeMessageMetadata(message),
+    activityStateUnknown:
+      message.activityStateUnknown === true ||
+      message.agentId ||
+      message.parentItemId ||
+      message.kind === 'subagent' ||
+      isSubagentActivity(message)
+        ? (true as const)
+        : undefined,
+    createdAt:
+      typeof message.createdAt === 'number' &&
+      Number.isFinite(message.createdAt) &&
+      message.createdAt > 0
+        ? message.createdAt
+        : undefined,
+    finishedAt:
+      typeof message.finishedAt === 'number' &&
+      Number.isFinite(message.finishedAt) &&
+      message.finishedAt > 0
+        ? message.finishedAt
+        : undefined,
+    finishStatus: typeof message.finishStatus === 'string' ? message.finishStatus : undefined,
+    input: typeof message.input === 'string' ? message.input : undefined,
+    fileChanges: normalizeFileChanges(message.fileChanges),
+    sourceChange: normalizeSourceChange(message.sourceChange),
+    attachments: normalizeThreadAttachments(message.attachments),
+    title: typeof message.title === 'string' ? message.title : undefined,
+    status:
+      (message.role === 'tool' ||
+        message.agentId ||
+        message.parentItemId ||
+        message.kind === 'subagent') &&
+      [
+        'running',
+        'waiting',
+        'inprogress',
+        'spawning',
+        'initializing',
+        'pendinginit',
+        'pending',
+        'queued',
+        'started',
+      ].includes(
+        (typeof message.status === 'string' ? message.status : '')
+          .replace(/[_-]/g, '')
+          .toLowerCase(),
+      )
+        ? 'interrupted'
+        : typeof message.status === 'string'
+          ? message.status
+          : undefined,
+    turn: Number.isInteger(message.turn) ? message.turn : 0,
+  }))
+}
+
 export function readThreads(input?: unknown): Thread[] {
   try {
     const data: unknown =
       input === undefined ? JSON.parse(localStorage.getItem('relay.threads.v1') || '[]') : input
     if (!Array.isArray(data)) return []
+    const sourceGroup = {}
     return data
       .filter(
         (t) =>
@@ -165,152 +556,100 @@ export function readThreads(input?: unknown): Thread[] {
           ['codex', 'claude'].includes(t.provider) &&
           Array.isArray(t.messages),
       )
-      .map((t) => ({
-        id: t.id,
-        profileId: t.profileId,
-        ...(typeof t.workspace === 'string' &&
-        t.workspace.startsWith('/') &&
-        !/[\x00-\x1f]/.test(t.workspace)
-          ? { workspace: t.workspace }
-          : {}),
-        ...(t.workspaceUnknown === true ? { workspaceUnknown: true } : {}),
-        ...normalizeThreadMetadata(t),
-        ...normalizeThreadArrangement(t),
-        ...(t.purpose === 'research' || t.purpose === 'customization'
-          ? { purpose: t.purpose }
-          : {}),
-        ...(normalizeResearchThreadContext(t.researchContext)
-          ? { researchContext: normalizeResearchThreadContext(t.researchContext) }
-          : {}),
-        ...(normalizeImportedThreadHistory(t.importedHistory)
-          ? { importedHistory: normalizeImportedThreadHistory(t.importedHistory) }
-          : {}),
-        ...(t.settled === true ? { settled: true } : {}),
-        ...(typeof t.snoozedUntil === 'number' &&
-        Number.isFinite(t.snoozedUntil) &&
-        t.snoozedUntil > 0
-          ? { snoozedUntil: t.snoozedUntil }
-          : {}),
-        provider: t.provider as Provider,
-        title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled thread',
-        ...(t.titleSource === 'provider' || t.titleSource === 'manual'
-          ? { titleSource: t.titleSource }
-          : {}),
-        remoteId: typeof t.remoteId === 'string' ? t.remoteId : undefined,
-        messages: t.messages
-          .filter(
-            (message: Partial<Message> | null) =>
-              message &&
-              typeof message.id === 'string' &&
-              ['user', 'assistant', 'tool', 'error'].includes(message.role || '') &&
-              typeof message.text === 'string',
-          )
-          .map((message: Message) => ({
-            ...message,
-            phase: undefined,
-            kind: undefined,
-            agentId: undefined,
-            agentName: undefined,
-            parentItemId: undefined,
-            turnId: undefined,
-            parentAgentId: undefined,
-            provider: undefined,
-            details: undefined,
-            submission: undefined,
-            ...normalizeMessageMetadata(message),
-            activityStateUnknown:
-              message.agentId ||
-              message.parentItemId ||
-              message.kind === 'subagent' ||
-              isSubagentActivity(message)
-                ? (true as const)
-                : undefined,
-            createdAt:
-              typeof message.createdAt === 'number' &&
-              Number.isFinite(message.createdAt) &&
-              message.createdAt > 0
-                ? message.createdAt
-                : undefined,
-            finishedAt:
-              typeof message.finishedAt === 'number' &&
-              Number.isFinite(message.finishedAt) &&
-              message.finishedAt > 0
-                ? message.finishedAt
-                : undefined,
-            finishStatus:
-              typeof message.finishStatus === 'string' ? message.finishStatus : undefined,
-            input: typeof message.input === 'string' ? message.input : undefined,
-            fileChanges: normalizeFileChanges(message.fileChanges),
-            sourceChange: normalizeSourceChange(message.sourceChange),
-            attachments: normalizeThreadAttachments(message.attachments),
-            title: typeof message.title === 'string' ? message.title : undefined,
-            status:
-              (message.role === 'tool' ||
-                message.agentId ||
-                message.parentItemId ||
-                message.kind === 'subagent') &&
-              [
-                'running',
-                'waiting',
-                'inprogress',
-                'spawning',
-                'initializing',
-                'pendinginit',
-                'pending',
-                'queued',
-                'started',
-              ].includes(
-                (typeof message.status === 'string' ? message.status : '')
-                  .replace(/[_-]/g, '')
-                  .toLowerCase(),
-              )
-                ? 'interrupted'
-                : typeof message.status === 'string'
-                  ? message.status
-                  : undefined,
-            turn: Number.isInteger(message.turn) ? message.turn : 0,
-          })),
-        busy: false,
-        ...(t.turnStatus === 'completed' ||
-        t.turnStatus === 'interrupted' ||
-        t.turnStatus === 'failed'
-          ? { turnStatus: t.turnStatus }
-          : t.busy || t.turnStatus
-            ? { turnStatus: 'unknown' as const }
-            : {}),
-        ...(typeof t.agentStatus === 'string' ? { agentStatus: t.agentStatus } : {}),
-        ...(t.connectionStatus === 'connected' ||
-        t.connectionStatus === 'reconnecting' ||
-        t.connectionStatus === 'disconnected'
-          ? { connectionStatus: t.connectionStatus }
-          : {}),
-        ...(typeof t.statusText === 'string' ? { statusText: t.statusText } : {}),
-        ...(t.statusDetails &&
-        typeof t.statusDetails === 'object' &&
-        !Array.isArray(t.statusDetails)
-          ? { statusDetails: t.statusDetails }
-          : {}),
-        ...(t.agentSettings &&
-        typeof t.agentSettings === 'object' &&
-        !Array.isArray(t.agentSettings)
-          ? { agentSettings: t.agentSettings }
-          : {}),
-        ...(normalizeAgentTurns(t.agentTurns)
-          ? { agentTurns: normalizeAgentTurns(t.agentTurns) }
-          : {}),
-        pending: [],
-        queue: normalizeQueuedMessages(t.queue),
-        ...(t.lifeScope === true ? { lifeScope: true } : {}),
-        turn: Number.isInteger(t.turn) && t.turn >= 0 ? t.turn : 0,
-        mode: permissionModes.includes(t.mode) ? (t.mode as PermissionMode) : ('review' as const),
-        model: typeof t.model === 'string' ? t.model : '',
-        ...(t.reasoningEffort !== undefined
-          ? { reasoningEffort: validModelChoice(t.reasoningEffort) }
-          : {}),
-        ...(t.serviceTier !== undefined ? { serviceTier: validModelChoice(t.serviceTier) } : {}),
-        updatedAt:
-          typeof t.updatedAt === 'number' && Number.isFinite(t.updatedAt) ? t.updatedAt : 0,
-      }))
+      .map((t, order) =>
+        attachConversationSource(
+          {
+            id: t.id,
+            profileId: t.profileId,
+            ...(typeof t.workspace === 'string' &&
+            t.workspace.startsWith('/') &&
+            !/[\x00-\x1f]/.test(t.workspace)
+              ? { workspace: t.workspace }
+              : {}),
+            ...(t.workspaceUnknown === true ? { workspaceUnknown: true } : {}),
+            ...normalizeThreadMetadata(t),
+            ...normalizeThreadArrangement(t),
+            ...(normalizeNativeRecovery(t.nativeRecovery)
+              ? { nativeRecovery: normalizeNativeRecovery(t.nativeRecovery) }
+              : {}),
+            ...(t.nativeRecovery &&
+            (t.busy ||
+              t.nativeRecoveryStatus === 'recovering' ||
+              t.nativeRecoveryStatus === 'unknown' ||
+              t.nativeRecoveryStatus === 'running')
+              ? { nativeRecoveryStatus: 'unknown' as const }
+              : {}),
+            ...(t.purpose === 'research' || t.purpose === 'customization'
+              ? { purpose: t.purpose }
+              : {}),
+            ...(normalizeResearchThreadContext(t.researchContext)
+              ? { researchContext: normalizeResearchThreadContext(t.researchContext) }
+              : {}),
+            ...(normalizeImportedThreadHistory(t.importedHistory)
+              ? { importedHistory: normalizeImportedThreadHistory(t.importedHistory) }
+              : {}),
+            ...(t.settled === true ? { settled: true } : {}),
+            ...(typeof t.snoozedUntil === 'number' &&
+            Number.isFinite(t.snoozedUntil) &&
+            t.snoozedUntil > 0
+              ? { snoozedUntil: t.snoozedUntil }
+              : {}),
+            provider: t.provider as Provider,
+            title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled thread',
+            ...(t.titleSource === 'provider' || t.titleSource === 'manual'
+              ? { titleSource: t.titleSource }
+              : {}),
+            remoteId: typeof t.remoteId === 'string' ? t.remoteId : undefined,
+            messages: readThreadMessages(t.messages),
+            busy: false,
+            ...(t.turnStatus === 'completed' ||
+            t.turnStatus === 'interrupted' ||
+            t.turnStatus === 'failed'
+              ? { turnStatus: t.turnStatus }
+              : t.busy || t.turnStatus
+                ? { turnStatus: 'unknown' as const }
+                : {}),
+            ...(typeof t.agentStatus === 'string' ? { agentStatus: t.agentStatus } : {}),
+            ...(t.connectionStatus === 'connected' ||
+            t.connectionStatus === 'reconnecting' ||
+            t.connectionStatus === 'disconnected'
+              ? { connectionStatus: t.connectionStatus }
+              : {}),
+            ...(typeof t.statusText === 'string' ? { statusText: t.statusText } : {}),
+            ...(t.statusDetails &&
+            typeof t.statusDetails === 'object' &&
+            !Array.isArray(t.statusDetails)
+              ? { statusDetails: t.statusDetails }
+              : {}),
+            ...(t.agentSettings &&
+            typeof t.agentSettings === 'object' &&
+            !Array.isArray(t.agentSettings)
+              ? { agentSettings: t.agentSettings }
+              : {}),
+            ...(normalizeAgentTurns(t.agentTurns)
+              ? { agentTurns: normalizeAgentTurns(t.agentTurns) }
+              : {}),
+            pending: [],
+            queue: normalizeQueuedMessages(t.queue),
+            ...(t.lifeScope === true ? { lifeScope: true } : {}),
+            turn: Number.isInteger(t.turn) && t.turn >= 0 ? t.turn : 0,
+            mode: permissionModes.includes(t.mode)
+              ? (t.mode as PermissionMode)
+              : ('review' as const),
+            model: typeof t.model === 'string' ? t.model : '',
+            ...(t.reasoningEffort !== undefined
+              ? { reasoningEffort: validModelChoice(t.reasoningEffort) }
+              : {}),
+            ...(t.serviceTier !== undefined
+              ? { serviceTier: validModelChoice(t.serviceTier) }
+              : {}),
+            updatedAt:
+              typeof t.updatedAt === 'number' && Number.isFinite(t.updatedAt) ? t.updatedAt : 0,
+          },
+          t,
+          { group: sourceGroup, order },
+        ),
+      )
       .sort((a, b) => b.updatedAt - a.updatedAt)
   } catch {
     return []
@@ -322,7 +661,8 @@ export function bindLegacyThreadWorkspace(thread: Thread, connection: Connection
     thread.profileId !== connection.profile?.id ||
     !thread.remoteId ||
     thread.workspace ||
-    thread.workspaceUnknown
+    thread.workspaceUnknown ||
+    conversationSourceHasPersistedField(thread, 'workspace')
   )
     return thread
   return connection.lastWorkspace
@@ -330,7 +670,7 @@ export function bindLegacyThreadWorkspace(thread: Thread, connection: Connection
     : { ...thread, workspaceUnknown: true }
 }
 export function finishThreadTurn(thread: Thread, status: string, at = Date.now()): Thread {
-  return {
+  return carryNativeProjectionAuthoredTransition(thread, {
     ...thread,
     messages: thread.messages.map((message) => {
       if (message.turn !== thread.turn || message.agentId || message.kind === 'subagent')
@@ -366,7 +706,7 @@ export function finishThreadTurn(thread: Thread, status: string, at = Date.now()
         }
       return message
     }),
-  }
+  })
 }
 export function resolveAgentRequest(
   thread: Thread,
@@ -374,6 +714,7 @@ export function resolveAgentRequest(
   accepted: boolean,
   answers?: Record<string, string[]>,
   at = Date.now(),
+  choice?: import('../shared/approval-decisions').ApprovalChoice,
 ): Thread {
   let requestIndex = -1
   for (let index = thread.messages.length - 1; index >= 0; index--) {
@@ -405,37 +746,61 @@ export function resolveAgentRequest(
         ]),
       )
     : undefined
-  return {
+  const approved = choice ? choice.outcome === 'approved' : accepted
+  return carryNativeProjectionAuthoredTransition(thread, {
     ...thread,
     pending: thread.pending.filter((request) => request.requestId !== requestId),
     messages: thread.messages.map((message, index) =>
       index === requestIndex
         ? {
             ...message,
-            status: accepted
-              ? message.details?.requestType === 'question'
-                ? 'answered'
-                : 'approved'
-              : 'declined',
+            status:
+              choice?.outcome === 'cancelled'
+                ? 'cancelled'
+                : approved
+                  ? message.details?.requestType === 'question'
+                    ? 'answered'
+                    : 'approved'
+                  : 'declined',
             finishedAt: at,
             details: {
               ...message.details,
-              response: { accepted, ...(recordedAnswers ? { answers: recordedAnswers } : {}) },
+              response: {
+                accepted: approved,
+                ...(recordedAnswers ? { answers: recordedAnswers } : {}),
+                ...(choice
+                  ? { decisionId: choice.id, outcome: choice.outcome, label: choice.label }
+                  : {}),
+              },
             },
           }
         : message,
     ),
-  }
-}
-function eventMetadata(event: AgentEvent): MessageMetadata {
-  return normalizeMessageMetadata({
-    ...event,
-    details:
-      event.type === 'plan' && Array.isArray(event.details)
-        ? { plan: event.details }
-        : eventDetails(event.details),
-    kind: ['reasoning', 'plan', 'subagent', 'status'].includes(event.type) ? event.type : undefined,
   })
+}
+function eventMetadata(event: AgentEvent): MessageMetadata & Pick<Message, 'nativeRecovery'> {
+  return {
+    ...normalizeMessageMetadata({
+      ...event,
+      details:
+        event.type === 'plan' && Array.isArray(event.details)
+          ? { plan: event.details }
+          : eventDetails(event.details),
+      kind: ['reasoning', 'plan', 'subagent', 'status'].includes(event.type)
+        ? event.type
+        : undefined,
+    }),
+    ...(event.nativeRecovery
+      ? {
+          nativeRecovery: {
+            transportId: event.nativeRecovery.transportId,
+            ...(event.nativeRecovery.ownerGeneration !== undefined
+              ? { ownerGeneration: event.nativeRecovery.ownerGeneration }
+              : {}),
+          },
+        }
+      : {}),
+  }
 }
 function eventDetails(value: unknown): Record<string, unknown> | undefined {
   if (value === undefined || value === null) return undefined
@@ -500,7 +865,98 @@ function confirmsChildActivity(event: AgentEvent, details?: Record<string, unkno
   })
 }
 export function applyEvent(thread: Thread, event: AgentEvent): Thread {
-  if (event.sessionId !== thread.id) return thread
+  if (!acceptsAgentEvent(thread, event)) return thread
+  const deliveredEvent = event
+  event = persistentAgentEvent(event)
+  const eventTurn = event.nativeRecovery?.localTurn
+  const currentGeneration =
+    thread.nativeRecoveryOwner?.transportId === event.nativeRecovery?.transportId
+      ? thread.nativeRecoveryOwner?.ownerGeneration
+      : undefined
+  const historicalGeneration =
+    event.nativeRecovery?.ownerGeneration !== undefined &&
+    currentGeneration !== undefined &&
+    event.nativeRecovery.ownerGeneration < currentGeneration
+  const historicalRoot =
+    !event.agentId && ((eventTurn !== undefined && eventTurn < thread.turn) || historicalGeneration)
+  const projected = applyAdmittedEvent(
+    eventTurn === undefined || eventTurn === thread.turn ? thread : { ...thread, turn: eventTurn },
+    event,
+    !historicalRoot,
+  )
+  const applied =
+    !historicalRoot && (eventTurn === undefined || eventTurn === thread.turn)
+      ? projected
+      : {
+          ...projected,
+          turn: Math.max(thread.turn, eventTurn ?? thread.turn),
+          ...(historicalRoot
+            ? {
+                busy: thread.busy,
+                turnStatus: thread.turnStatus,
+                agentStatus: thread.agentStatus,
+                connectionStatus: thread.connectionStatus,
+                statusText: thread.statusText,
+                statusDetails: thread.statusDetails,
+                remoteId: thread.remoteId,
+                title: thread.title,
+                titleSource: thread.titleSource,
+                completedAt: thread.completedAt,
+                attentionAt: thread.attentionAt,
+                lastReadAt: thread.lastReadAt,
+                pending: thread.pending,
+                queue: thread.queue,
+                ...(historicalGeneration
+                  ? {
+                      messages: projected.messages.map((message, index) => {
+                        const prior = thread.messages[index]
+                        return prior &&
+                          prior.id === message.id &&
+                          (prior.nativeRecovery?.transportId !==
+                            event.nativeRecovery?.transportId ||
+                            prior.nativeRecovery?.ownerGeneration !==
+                              event.nativeRecovery?.ownerGeneration)
+                          ? prior
+                          : message
+                      }),
+                    }
+                  : {}),
+              }
+            : {}),
+        }
+  if (!event.nativeRecovery) return carryNativeProjectionAuthoredTransition(thread, applied)
+  const transportId = event.nativeRecovery.transportId
+  const owner =
+    !event.agentId &&
+    (applied.nativeRecoveryOwner?.transportId !== transportId ||
+      (event.nativeRecovery.ownerGeneration ?? 0) >
+        (applied.nativeRecoveryOwner.ownerGeneration ?? 0))
+      ? {
+          transportId,
+          ownerGeneration: event.nativeRecovery.ownerGeneration,
+          snapshotToken: event.nativeRecovery.snapshotToken,
+        }
+      : applied.nativeRecoveryOwner
+  return registerNativeProjectionDelivery(
+    {
+      ...applied,
+      ...(owner ? { nativeRecoveryOwner: owner } : {}),
+      nativeRecovery: {
+        ...applied.nativeRecovery,
+        [transportId]: recoveryCursor(event),
+      },
+    },
+    deliveredEvent,
+  )
+}
+function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle = true): Thread {
+  const reconcileLifecycle = authorLifecycle
+    ? reconcileConversationLifecycle
+    : (value: Thread) => value
+  const at = event.nativeRecovery?.emittedAt ?? Date.now()
+  const errorId = event.nativeRecovery
+    ? `native-event:${JSON.stringify([event.nativeRecovery.transportId, event.nativeRecovery.eventId])}`
+    : undefined
   const recoverableError =
     event.type === 'error' && eventDetails(event.details)?.recoverable === true
   if (event.agentId && (event.type === 'complete' || (event.type === 'error' && !recoverableError)))
@@ -566,8 +1022,27 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     }
     const pending = thread.pending.filter((request) => request.requestId !== event.requestId)
     if (requestIndex < 0 && pending.length === thread.pending.length) return thread
+    const decisionId = eventDetails(event.details)?.decisionId
+    const choice = thread.pending
+      .find((request) => request.requestId === event.requestId)
+      ?.approvalChoices?.find((choice) => choice.id === decisionId)
+    if (choice)
+      return resolveAgentRequest(
+        thread,
+        event.requestId,
+        choice.outcome === 'approved',
+        undefined,
+        at,
+        choice,
+      )
     if (['approved', 'answered', 'declined'].includes(event.status || ''))
-      return resolveAgentRequest(thread, event.requestId, event.status !== 'declined')
+      return resolveAgentRequest(
+        thread,
+        event.requestId,
+        event.status !== 'declined',
+        undefined,
+        at,
+      )
     const status = ['cancelled', 'canceled', 'interrupted'].includes(event.status || '')
       ? 'cancelled'
       : 'completed'
@@ -578,7 +1053,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         requestIndex < 0
           ? thread.messages
           : thread.messages.map((message, index) =>
-              index === requestIndex ? { ...message, status, finishedAt: Date.now() } : message,
+              index === requestIndex ? { ...message, status, finishedAt: at } : message,
             ),
     }
   }
@@ -591,10 +1066,9 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
           : event.status === 'completed' || !event.status
             ? 'completed'
             : 'unknown'
-    const at = Date.now()
     const alreadyFinished = !thread.busy && thread.turnStatus === status
     const finished = finishThreadTurn(thread, status, at)
-    return {
+    return reconcileLifecycle({
       ...(alreadyFinished || status === 'unknown' ? finished : raiseThreadAttention(finished, at)),
       ...(status === 'completed' && !alreadyFinished
         ? { completedAt: at, lastReadAt: thread.lastReadAt ?? Math.max(0, at - 1) }
@@ -604,7 +1078,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       agentStatus: status,
       pending: thread.pending.filter((request) => Boolean(request.agentId)),
       queue: status === 'completed' ? thread.queue : pauseQueuedMessages(thread.queue),
-    }
+    })
   }
   if (event.type === 'approval' || event.type === 'question') {
     const pending = thread.pending.find((request) => request.requestId === event.requestId)
@@ -644,7 +1118,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         '',
       input: event.input ?? previous?.input,
       status: 'waiting',
-      createdAt: previous?.createdAt ?? Date.now(),
+      createdAt: previous?.createdAt ?? at,
       turn: requestTurn,
       details: {
         ...previous?.details,
@@ -655,7 +1129,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       },
     }
     return {
-      ...(pending ? thread : raiseThreadAttention(thread)),
+      ...(pending ? thread : raiseThreadAttention(thread, at)),
       pending: [...thread.pending.filter((p) => p.requestId !== event.requestId), mergedEvent],
       messages: previous
         ? thread.messages.map((message) => (message.id === id ? request : message))
@@ -708,35 +1182,38 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
           ...thread.messages,
           {
             ...eventMetadata(event),
-            id: crypto.randomUUID(),
+            id: errorId ?? crypto.randomUUID(),
             role: 'error',
             text: event.text || 'The agent encountered a temporary error and is retrying.',
             turn,
-            createdAt: Date.now(),
+            createdAt: at,
           },
         ],
       }
     }
-    const failed = raiseThreadAttention(finishThreadTurn(thread, 'failed'))
-    return {
-      ...failed,
-      busy: false,
-      turnStatus: 'failed',
-      agentStatus: 'failed',
-      pending: thread.pending.filter((request) => Boolean(request.agentId)),
-      queue: pauseQueuedMessages(thread.queue),
-      messages: [
-        ...failed.messages,
-        {
-          ...eventMetadata(event),
-          id: crypto.randomUUID(),
-          role: 'error',
-          text: event.text || 'The agent could not finish this turn.',
-          turn: thread.turn,
-          createdAt: Date.now(),
-        },
-      ],
-    }
+    const failed = raiseThreadAttention(finishThreadTurn(thread, 'failed', at), at)
+    return carryNativeProjectionAuthoredTransition(
+      failed,
+      reconcileLifecycle({
+        ...failed,
+        busy: false,
+        turnStatus: 'failed',
+        agentStatus: 'failed',
+        pending: thread.pending.filter((request) => Boolean(request.agentId)),
+        queue: pauseQueuedMessages(thread.queue),
+        messages: [
+          ...failed.messages,
+          {
+            ...eventMetadata(event),
+            id: errorId ?? crypto.randomUUID(),
+            role: 'error',
+            text: event.text || 'The agent could not finish this turn.',
+            turn: thread.turn,
+            createdAt: at,
+          },
+        ],
+      }),
+    )
   }
   const metadata = eventMetadata(event)
   const savedAgentTurn =
@@ -771,7 +1248,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       // A delayed completion for an earlier native run must not settle its successor.
       if (latestRun && childNativeRun(latestRun.details) !== nativeRun) return thread
     }
-    const finishedAt = Date.now()
+    const finishedAt = at
     thread = {
       ...thread,
       pending: thread.pending.filter(
@@ -813,13 +1290,29 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   const baseId = `${eventTurn}:${scopedItem || fallbackItem}`
   let id = `${baseId}${nativeRun ? `:native-run:${nativeRun}` : ''}${metadata.phase ? `:${metadata.phase}` : ''}`
   let index = thread.messages.findIndex((m) => m.id === id)
+  const sameGeneration = (message: Message) =>
+    !event.nativeRecovery ||
+    !message.nativeRecovery ||
+    (message.nativeRecovery.transportId === event.nativeRecovery.transportId &&
+      message.nativeRecovery.ownerGeneration === event.nativeRecovery.ownerGeneration)
+  if (
+    event.nativeRecovery &&
+    index >= 0 &&
+    thread.messages[index].nativeRecovery?.transportId === event.nativeRecovery.transportId &&
+    thread.messages[index].nativeRecovery?.ownerGeneration !== event.nativeRecovery.ownerGeneration
+  ) {
+    id += `:native-generation:${event.nativeRecovery.ownerGeneration ?? 'unknown'}`
+    index = thread.messages.findIndex((message) => message.id === id)
+  }
   if (index < 0 && ['text', 'reasoning', 'plan'].includes(event.type)) {
     // Some providers reveal the phase only on their final item snapshot.
-    index = thread.messages.findIndex((message) => message.id === baseId && !message.phase)
+    index = thread.messages.findIndex(
+      (message) => message.id === baseId && !message.phase && sameGeneration(message),
+    )
     if (index < 0 && !metadata.phase) {
       for (let candidate = thread.messages.length - 1; candidate >= 0; candidate--) {
         const message = thread.messages[candidate]
-        if (message.id.startsWith(`${baseId}:`) && message.phase) {
+        if (message.id.startsWith(`${baseId}:`) && message.phase && sameGeneration(message)) {
           index = candidate
           break
         }
@@ -835,8 +1328,13 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     previous.status !== 'unknown'
   )
     return thread
-  const text =
-    event.status === 'replace'
+  const appendsText =
+    event.status !== 'replace' &&
+    !['tool', 'subagent', 'status'].includes(event.type) &&
+    (event.type !== 'tool-output' || previous?.text !== previous?.input)
+  const text = appendsText
+    ? ''
+    : event.status === 'replace'
       ? event.text || ''
       : event.type === 'tool'
         ? completedToolText(previous, event.text)
@@ -863,9 +1361,9 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         ? true
         : undefined,
     id,
-    createdAt: previous?.createdAt ?? Date.now(),
+    createdAt: previous?.createdAt ?? at,
     finishedAt: terminalTool
-      ? (previous?.finishedAt ?? Date.now())
+      ? (previous?.finishedAt ?? at)
       : status === 'running' && previous?.status === 'unknown'
         ? undefined
         : previous?.finishedAt,
@@ -882,12 +1380,15 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
       : {}),
     turn: eventTurn,
   }
+  const nextMessage = appendsText
+    ? appendConversationMessageText(previous, message, event.text || '')
+    : message
   return {
     ...thread,
     messages:
       index >= 0
-        ? thread.messages.map((m, i) => (i === index ? message : m))
-        : [...thread.messages, message],
+        ? thread.messages.map((m, i) => (i === index ? nextMessage : m))
+        : [...thread.messages, nextMessage],
   }
 }
 export const profileName = (profile?: ConnectionProfile) => profile?.name || 'Remote workspace'

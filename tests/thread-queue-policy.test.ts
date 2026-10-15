@@ -4,9 +4,10 @@ import {
   normalizeQueuedMessages,
   pauseQueuedMessages,
   queueConnectionMatches,
+  threadAttachmentIds,
   type QueuedMessage,
 } from '../src/renderer/thread-queue'
-import { applyEvent, type Thread } from '../src/renderer/state'
+import { applyEvent, readThreads, type Thread } from '../src/renderer/state'
 import type { ConnectionProfile, ConnectionState } from '../src/shared/types'
 import { researchOperations } from '../src/shared/research-method'
 
@@ -356,5 +357,129 @@ describe('queued research operation snapshots', () => {
     expect(completed.queue?.[0].text).toBe(queued.text)
     expect(canAutoSendQueuedMessage(completed, connection)).toBe(true)
     expect(active.queue?.[0].researchOperation).toBe('ground')
+  })
+})
+
+describe('attachment retention across lossless history restoration', () => {
+  const attachment = (id: string) => ({
+    id,
+    name: `${id}.txt`,
+    mime: 'text/plain',
+    size: 12,
+  })
+
+  it('protects attachments belonging to opaque messages and nested queued records', () => {
+    const restored = readThreads([
+      {
+        ...thread(),
+        messages: [
+          {
+            id: 'visible',
+            role: 'user',
+            text: 'Readable history',
+            attachments: [attachment('visible-file')],
+          },
+          null,
+          false,
+          42,
+          'legacy record',
+          {
+            id: 'future-message',
+            role: 'future-provider-role',
+            text: { format: 'future' },
+            attachments: [{ id: 'opaque-file' }],
+            payload: { parts: [{ attachments: [{ id: 'nested-message-file' }] }] },
+          },
+        ],
+        queue: [
+          { ...queued, attachments: [attachment('queued-file')] },
+          null,
+          'legacy queued record',
+          {
+            id: 'future-queue',
+            text: null,
+            payload: { parts: [{ attachments: [{ id: 'nested-queue-file' }] }] },
+          },
+        ],
+      },
+    ])[0]
+
+    expect(restored.messages.map((message) => message.id)).toEqual(['visible'])
+    expect(restored.queue?.map((message) => message.id)).toEqual([queued.id])
+    expect(threadAttachmentIds(restored).sort()).toEqual(
+      [
+        'visible-file',
+        'opaque-file',
+        'nested-message-file',
+        'queued-file',
+        'nested-queue-file',
+      ].sort(),
+    )
+  })
+
+  it('deduplicates an attachment shared by rendered, queued, and opaque history', () => {
+    const restored = readThreads([
+      {
+        ...thread(),
+        messages: [
+          {
+            id: 'visible',
+            role: 'user',
+            text: 'Shared attachment',
+            attachments: [attachment('shared-file')],
+          },
+          { id: 'opaque', role: 'future-role', attachments: [{ id: 'shared-file' }] },
+        ],
+        queue: [
+          { ...queued, attachments: [attachment('shared-file')] },
+          { payload: { attachments: [{ id: 'shared-file' }] } },
+        ],
+      },
+    ])[0]
+
+    expect(threadAttachmentIds(restored)).toEqual(['shared-file'])
+  })
+
+  it('releases an explicitly removed readable attachment while retaining an opaque reference', () => {
+    const restored = readThreads([
+      {
+        ...thread(),
+        messages: [
+          {
+            id: 'visible',
+            role: 'user',
+            text: 'Files attached before the edit',
+            attachments: [attachment('removed-file'), attachment('shared-file')],
+          },
+          { id: 'opaque', role: 'future-role', attachments: [{ id: 'shared-file' }] },
+        ],
+      },
+    ])[0]
+    const edited = {
+      ...restored,
+      messages: restored.messages.map((message) => ({ ...message, attachments: [] })),
+    }
+
+    expect(threadAttachmentIds(edited)).toEqual(['shared-file'])
+    expect(threadAttachmentIds(restored).sort()).toEqual(['removed-file', 'shared-file'])
+  })
+
+  it('releases a deleted readable message without collecting a surviving hidden reference', () => {
+    const restored = readThreads([
+      {
+        ...thread(),
+        messages: [
+          {
+            id: 'removed-message',
+            role: 'user',
+            text: 'Delete this message',
+            attachments: [attachment('removed-file'), attachment('shared-file')],
+          },
+          { id: 'opaque', role: 'future-role', attachments: [{ id: 'shared-file' }] },
+        ],
+      },
+    ])[0]
+
+    expect(threadAttachmentIds({ ...restored, messages: [] })).toEqual(['shared-file'])
   })
 })

@@ -1,19 +1,30 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, open, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { DateTime, Effect, Layer, Option, Schema } from 'effect'
 import type { ConnectionState, Provider } from '../shared/types'
 import {
   compareProviderVersions,
-  PROVIDER_UPDATES,
   providerUpdateMachineId,
   providerVersion,
-  providerVersionIsPrerelease,
   type ProviderUpdateInfo,
   type ProviderUpdatesState,
 } from '../shared/provider-updates'
+import { runEffect } from './effect-runtime'
+import { ProviderReleaseRegistry, StableProviderVersion } from './provider-release-registry'
 
 const DAY = 24 * 60 * 60 * 1000
 const RETRY_DELAY = 60 * 1000
 const PROVIDERS: Provider[] = ['codex', 'claude']
+const CachedRelease = Schema.Struct({
+  version: StableProviderVersion,
+  checkedAt: Schema.String.check(
+    Schema.makeFilter((checkedAt) => Option.isSome(DateTime.make(checkedAt))),
+  ),
+})
+const decodeCache = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+)
+const decodeCachedRelease = Schema.decodeUnknownOption(CachedRelease)
 
 interface RegistryEntry {
   version?: string
@@ -33,7 +44,7 @@ export interface ProviderUpdatesOptions {
 /** Tracks public releases and read-only CLI discovery without starting a model or changing an installation. */
 export class ProviderUpdateController {
   private readonly entries: Partial<Record<Provider, RegistryEntry>> = {}
-  private readonly fetch: typeof fetch
+  private readonly registryLayer: Layer.Layer<ProviderReleaseRegistry>
   private readonly now: () => number
   private readonly timeoutMs: number
   private readonly ready: Promise<void>
@@ -45,17 +56,17 @@ export class ProviderUpdateController {
   private installedError?: { machineId: string; message: string; attemptedAt: number }
   private disposed = false
   private refreshTimer?: ReturnType<typeof setTimeout>
-  private readonly abortControllers = new Set<AbortController>()
+  private readonly lifetime = new AbortController()
 
   constructor(
     private readonly connection: () => ConnectionState,
     private readonly emit: (state: ProviderUpdatesState) => void,
     private readonly options: ProviderUpdatesOptions = {},
   ) {
-    this.fetch = options.fetch || fetch
+    this.registryLayer = ProviderReleaseRegistry.layer(options.fetch || fetch)
     this.now = options.now || Date.now
     this.timeoutMs = options.timeoutMs ?? 8000
-    this.ready = this.loadCache()
+    this.ready = runEffect(this.loadCache())
   }
 
   getState(): ProviderUpdatesState {
@@ -68,7 +79,9 @@ export class ProviderUpdateController {
       machineId,
       machineLabel:
         connected && connection.profile
-          ? `${connection.profile.name || connection.profile.host} · ${connection.profile.username}@${connection.profile.host}${connection.profile.port === 22 ? '' : `:${connection.profile.port}`}`
+          ? connection.profile.transport === 'local'
+            ? 'Local · This computer'
+            : `${connection.profile.name || connection.profile.host} · ${connection.profile.username}@${connection.profile.host}${connection.profile.port === 22 ? '' : `:${connection.profile.port}`}`
           : undefined,
       providers: PROVIDERS.map((provider): ProviderUpdateInfo => {
         const entry = this.entries[provider]
@@ -174,10 +187,17 @@ export class ProviderUpdateController {
   private checkRegistry(force = false): Promise<ProviderUpdatesState> {
     if (this.checking) return this.checking
     const run = this.ready
-      .then(async () => {
+      .then(() => {
         if (this.disposed) return
-        await Promise.all(PROVIDERS.map((provider) => this.lookup(provider, force)))
-        await this.saveCache()
+        return runEffect(
+          Effect.forEach(PROVIDERS, (provider) => this.lookup(provider, force), {
+            concurrency: PROVIDERS.length,
+            discard: true,
+          }).pipe(Effect.andThen(this.saveCache()), Effect.provide(this.registryLayer)),
+          { signal: this.lifetime.signal },
+        ).catch((error) => {
+          if (!this.disposed) throw error
+        })
       })
       .finally(() => {
         if (this.checking === run) this.checking = undefined
@@ -196,11 +216,14 @@ export class ProviderUpdateController {
     this.disposed = true
     if (this.refreshTimer) clearTimeout(this.refreshTimer)
     this.refreshTimer = undefined
-    for (const controller of this.abortControllers) controller.abort()
-    this.abortControllers.clear()
+    this.lifetime.abort()
   }
 
-  private async lookup(provider: Provider, force: boolean): Promise<void> {
+  private readonly lookup = Effect.fn('ProviderUpdateController.lookup')(function* (
+    this: ProviderUpdateController,
+    provider: Provider,
+    force: boolean,
+  ) {
     const existing = this.entries[provider]
     const now = this.now()
     const successfulAt = existing?.checkedAt ? Date.parse(existing.checkedAt) : 0
@@ -214,75 +237,30 @@ export class ProviderUpdateController {
     ) {
       return
     }
-    const controller = new AbortController()
-    this.abortControllers.add(controller)
-    let timeout: ReturnType<typeof setTimeout> | undefined
-    try {
-      const metadata = await Promise.race([
-        this.fetch(PROVIDER_UPDATES[provider].registryUrl, {
-          signal: controller.signal,
-          redirect: 'error',
-          credentials: 'omit',
-          headers: { Accept: 'application/json' },
-        }).then(async (response) => {
-          if (!response.ok) throw new Error(`Release registry returned HTTP ${response.status}.`)
-          const reader = response.body?.getReader()
-          if (!reader) throw new Error('Release registry returned no metadata.')
-          const chunks: Uint8Array[] = []
-          let length = 0
-          try {
-            while (true) {
-              const { done, value } = await reader.read()
-              if (done) break
-              length += value.byteLength
-              if (length > 256 * 1024) {
-                void reader.cancel().catch(() => {})
-                throw new Error('Release metadata exceeded the size limit.')
-              }
-              chunks.push(value)
+    const registry = yield* ProviderReleaseRegistry
+    yield* registry.latest(provider, this.timeoutMs).pipe(
+      Effect.match({
+        onSuccess: (version) => {
+          if (!this.disposed) {
+            this.entries[provider] = {
+              version,
+              checkedAt: DateTime.formatIso(DateTime.makeUnsafe(this.now())),
+              attemptedAt: now,
             }
-          } finally {
-            reader.releaseLock()
           }
-          const body = Buffer.concat(chunks).toString('utf8')
-          const result: unknown = JSON.parse(body)
-          const rawVersion =
-            typeof result === 'object' && result !== null && 'version' in result
-              ? (result as { version: unknown }).version
-              : undefined
-          const version = typeof rawVersion === 'string' ? providerVersion(rawVersion) : undefined
-          if (!version || version !== rawVersion || providerVersionIsPrerelease(version)) {
-            throw new Error('Release registry did not return a stable version.')
+        },
+        onFailure: (error) => {
+          if (!this.disposed) {
+            this.entries[provider] = {
+              ...existing,
+              attemptedAt: now,
+              error: error.message.slice(0, 400),
+            }
           }
-          return version
-        }),
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            controller.abort()
-            reject(new Error('Release check timed out. Try again when the network is available.'))
-          }, this.timeoutMs)
-        }),
-      ])
-      if (!this.disposed) {
-        this.entries[provider] = {
-          version: metadata,
-          checkedAt: new Date(this.now()).toISOString(),
-          attemptedAt: now,
-        }
-      }
-    } catch (error) {
-      if (!this.disposed) {
-        this.entries[provider] = {
-          ...existing,
-          attemptedAt: now,
-          error: error instanceof Error ? error.message.slice(0, 400) : 'Release check failed.',
-        }
-      }
-    } finally {
-      if (timeout) clearTimeout(timeout)
-      this.abortControllers.delete(controller)
-    }
-  }
+        },
+      }),
+    )
+  })
 
   private scheduleRefresh(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer)
@@ -312,7 +290,7 @@ export class ProviderUpdateController {
       () => {
         this.refreshTimer = undefined
         this.background = Promise.resolve()
-          .then(() => this.refreshBackground())
+          .then(() => runEffect(this.refreshBackground(), { signal: this.lifetime.signal }))
           .finally(() => {
             this.background = undefined
             if (!this.disposed) {
@@ -328,79 +306,87 @@ export class ProviderUpdateController {
     this.refreshTimer.unref()
   }
 
-  private async refreshBackground(): Promise<void> {
-    const machineId = providerUpdateMachineId(this.connection())
-    if (this.disposed || !machineId) return
-    const revision = this.connectionRevision
-    try {
-      await this.options.refreshInstalled?.()
-    } catch (error) {
-      if (
-        !this.disposed &&
-        providerUpdateMachineId(this.connection()) === machineId &&
-        revision === this.connectionRevision
-      ) {
-        this.installedError = {
-          machineId,
-          attemptedAt: this.now(),
-          message: `Installed version check failed: ${error instanceof Error ? error.message.slice(0, 300) : 'Try again.'}`,
-        }
-      }
-      return
-    }
-    if (this.disposed || providerUpdateMachineId(this.connection()) !== machineId) return
-    this.installedError = undefined
-    await this.checkRegistry()
-  }
-
-  private async loadCache(): Promise<void> {
-    if (!this.options.cachePath) return
-    try {
-      const raw = await readFile(this.options.cachePath, 'utf8')
-      if (raw.length > 4096) return
-      const result: unknown = JSON.parse(raw)
-      if (typeof result !== 'object' || result === null) return
-      for (const provider of PROVIDERS) {
-        const entry = (result as Record<string, unknown>)[provider]
-        if (typeof entry !== 'object' || entry === null) continue
-        const value = entry as Record<string, unknown>
-        const version =
-          typeof value.version === 'string' ? providerVersion(value.version) : undefined
-        const checkedAt = typeof value.checkedAt === 'string' ? value.checkedAt : undefined
-        const time = checkedAt ? Date.parse(checkedAt) : NaN
+  private readonly refreshBackground = Effect.fn('ProviderUpdateController.refreshBackground')(
+    function* (this: ProviderUpdateController) {
+      const machineId = providerUpdateMachineId(this.connection())
+      if (this.disposed || !machineId) return
+      const revision = this.connectionRevision
+      const refreshed = yield* Effect.tryPromise({
+        try: () => this.options.refreshInstalled?.() || Promise.resolve(),
+        catch: (error) => error,
+      }).pipe(Effect.result)
+      if (refreshed._tag === 'Failure') {
+        const error = refreshed.failure
         if (
-          version === value.version &&
-          version &&
-          !providerVersionIsPrerelease(version) &&
-          checkedAt &&
-          Number.isFinite(time) &&
-          time <= this.now()
+          !this.disposed &&
+          providerUpdateMachineId(this.connection()) === machineId &&
+          revision === this.connectionRevision
         ) {
-          this.entries[provider] = { version, checkedAt }
+          this.installedError = {
+            machineId,
+            attemptedAt: this.now(),
+            message: `Installed version check failed: ${error instanceof Error ? error.message.slice(0, 300) : 'Try again.'}`,
+          }
+        }
+        return
+      }
+      if (this.disposed || providerUpdateMachineId(this.connection()) !== machineId) return
+      this.installedError = undefined
+      yield* Effect.tryPromise(() => this.checkRegistry())
+    },
+  )
+
+  private readonly loadCache = Effect.fn('ProviderUpdateController.loadCache')(
+    function* (this: ProviderUpdateController) {
+      const cachePath = this.options.cachePath
+      if (!cachePath) return
+      const file = yield* Effect.acquireRelease(
+        Effect.tryPromise(() => open(cachePath, 'r')),
+        (file) => Effect.promise(() => file.close().catch(() => {})),
+      )
+      // The optional cache is bounded before allocating or decoding its contents.
+      const buffer = Buffer.alloc(4097)
+      const { bytesRead } = yield* Effect.tryPromise(() => file.read(buffer, 0, buffer.length, 0))
+      if (bytesRead > 4096) return
+      const result = yield* decodeCache(buffer.subarray(0, bytesRead).toString('utf8'))
+      for (const provider of PROVIDERS) {
+        const entry = decodeCachedRelease(result[provider])
+        if (
+          Option.isSome(entry) &&
+          DateTime.toEpochMillis(DateTime.makeUnsafe(entry.value.checkedAt)) <= this.now()
+        ) {
+          this.entries[provider] = entry.value
         }
       }
-    } catch {
-      // The cache is optional: malformed or unavailable metadata is checked again online.
-    }
-  }
+    },
+    Effect.scoped,
+    Effect.ignore,
+  )
 
-  private async saveCache(): Promise<void> {
-    if (!this.options.cachePath || this.disposed) return
-    const data = Object.fromEntries(
-      PROVIDERS.flatMap((provider) => {
-        const entry = this.entries[provider]
-        return entry?.version && entry.checkedAt
-          ? [[provider, { version: entry.version, checkedAt: entry.checkedAt }]]
-          : []
-      }),
-    )
-    try {
-      await mkdir(dirname(this.options.cachePath), { recursive: true })
-      const temporary = `${this.options.cachePath}.${process.pid}.tmp`
-      await writeFile(temporary, JSON.stringify(data) + '\n', { mode: 0o600 })
-      await rename(temporary, this.options.cachePath)
-    } catch {
-      // A read-only cache directory must not prevent an update status reaching the renderer.
-    }
-  }
+  private readonly saveCache = Effect.fn('ProviderUpdateController.saveCache')(
+    function* (this: ProviderUpdateController) {
+      const cachePath = this.options.cachePath
+      if (!cachePath || this.disposed) return
+      const data = Object.fromEntries(
+        PROVIDERS.flatMap((provider) => {
+          const entry = this.entries[provider]
+          return entry?.version && entry.checkedAt
+            ? [[provider, { version: entry.version, checkedAt: entry.checkedAt }]]
+            : []
+        }),
+      )
+      yield* Effect.tryPromise(() => mkdir(dirname(cachePath), { recursive: true }))
+      const temporary = yield* Effect.acquireRelease(
+        Effect.succeed(`${cachePath}.${process.pid}.tmp`),
+        (temporary) => Effect.promise(() => rm(temporary, { force: true }).catch(() => {})),
+      )
+      yield* Effect.tryPromise(() =>
+        writeFile(temporary, JSON.stringify(data) + '\n', { mode: 0o600 }),
+      )
+      yield* Effect.tryPromise(() => rename(temporary, cachePath))
+    },
+    Effect.scoped,
+    Effect.uninterruptible,
+    Effect.ignore,
+  )
 }

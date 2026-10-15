@@ -1,6 +1,6 @@
 /** Build a content-addressed manifest from the exact target-platform ASAR payload. */
 const { createHash } = require('node:crypto')
-const { stat, writeFile } = require('node:fs/promises')
+const { chmod, stat, writeFile } = require('node:fs/promises')
 const { createRequire } = require('node:module')
 const { join } = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -9,12 +9,26 @@ module.exports = async function packageDependencies(context) {
   const builderRequire = createRequire(require.resolve('app-builder-lib'))
   const asar = await import(pathToFileURL(builderRequire.resolve('@electron/asar')).href)
   const resources = context.packager.getResourcesDir(context.appOutDir)
+  if (context.electronPlatformName === 'darwin') await prepareMacPtyHelpers(resources)
   const archive = join(resources, 'app.asar')
   const manifest = await collectDependencyManifest(archive, asar)
   await writeFile(join(resources, 'life-dependencies.json'), JSON.stringify(manifest), 'utf8')
   console.log(
     `  • compiler dependencies archived: ${manifest.files.length} files, cache ${manifest.key.slice(0, 12)}`,
   )
+}
+
+/** node-pty's npm prebuild helpers arrive without their executable bits. */
+async function prepareMacPtyHelpers(resources) {
+  const root = join(resources, 'app.asar.unpacked', 'node_modules', 'node-pty')
+  for (const directory of ['build/Release', 'prebuilds/darwin-arm64', 'prebuilds/darwin-x64']) {
+    const helper = join(root, directory, 'spawn-helper')
+    try {
+      await chmod(helper, 0o755)
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
 }
 
 async function collectDependencyManifest(archive, asar, filesystem = {}) {
@@ -57,3 +71,4 @@ async function collectDependencyManifest(archive, asar, filesystem = {}) {
 }
 
 module.exports.collectDependencyManifest = collectDependencyManifest
+module.exports.prepareMacPtyHelpers = prepareMacPtyHelpers

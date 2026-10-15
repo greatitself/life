@@ -19,6 +19,8 @@ const { createServer } = require('node:http')
 const { spawn, spawnSync } = require('node:child_process')
 const { _electron: electron } = require('playwright')
 const { build } = require('esbuild')
+const { readSavedThreads } = require('./helpers/desktop-history.cjs')
+const { runNativeApprovalChecks } = require('./helpers/desktop-native-approval-steps.cjs')
 
 const repository = resolve(__dirname, '..')
 const artifacts = resolve(repository, process.env.LIFE_TEST_ARTIFACTS_DIR || 'output/playwright')
@@ -71,6 +73,27 @@ async function run() {
   const { SSHFixture } = require(bundledFixture)
   const configurationRoot = await mkdtemp(join(tmpdir(), 'life-desktop-smoke-'))
   const fixture = await new SSHFixture(join(repository, 'tests/fixtures/fake-provider.cjs')).start()
+  const bundledLocalFixture = join(artifacts, 'desktop-local-fixture.cjs')
+  await build({
+    entryPoints: [join(repository, 'tests/helpers/local-fixture.ts')],
+    outfile: bundledLocalFixture,
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    packages: 'external',
+  })
+  const { LocalFixture } = require(bundledLocalFixture)
+  const localFixture = await new LocalFixture().start(
+    join(repository, 'tests/fixtures/fake-provider.cjs'),
+  )
+  const privateUserData = join(configurationRoot, 'chromium')
+  await mkdir(privateUserData)
+  // Exercise fresh default Local with native-protocol stand-ins, never host CLIs.
+  await writeFile(
+    join(privateUserData, 'connections.json'),
+    JSON.stringify({ profiles: [], knownHosts: {}, localWorkspace: localFixture.workspace }),
+    { flag: 'wx' },
+  )
   const activityBase = `export interface ThreadActivity {
   id: string
   kind: 'message' | 'tool' | 'reasoning'
@@ -175,6 +198,7 @@ export function activityLabel(activity: ThreadActivity): string {
     ...(selectedBinary ? [] : [repository]),
     ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     '--disable-dev-shm-usage',
+    `--user-data-dir=${privateUserData}`,
   ]
   const rendererErrors = []
   const rendererErrorDetails = []
@@ -193,7 +217,7 @@ export function activityLabel(activity: ThreadActivity): string {
       args: smokeLaunchArgs,
       cwd: repository,
       env: {
-        ...process.env,
+        ...localFixture.env,
         XDG_CONFIG_HOME: configurationRoot,
         ...(process.platform === 'win32' ? { APPDATA: configurationRoot } : {}),
       },
@@ -349,6 +373,7 @@ export function activityLabel(activity: ThreadActivity): string {
     const labels = {
       review: 'Manual',
       edit: 'Accept edits',
+      plan: 'Plan',
       'ask-for-approval': 'Ask for approval',
       'read-only': 'Read-only',
       'auto-review': 'Approve for me',
@@ -514,8 +539,7 @@ export function activityLabel(activity: ThreadActivity): string {
   }
 
   const checks = []
-  const readThreads = () =>
-    page.evaluate(() => JSON.parse(localStorage.getItem('relay.threads.v1') || '[]'))
+  const readThreads = () => readSavedThreads(page)
   const promptFrom = (entry) => {
     if (entry.kind === 'title-metadata') return undefined
     return entry.message?.method === 'turn/start' || entry.message?.method === 'turn/steer'
@@ -563,11 +587,11 @@ export function activityLabel(activity: ThreadActivity): string {
   }
   const reconnect = async () => {
     if ((await page.evaluate(() => window.relay.connection.state())).status === 'connected') return
-    let dialog = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
-    if (!(await dialog.isVisible())) {
+    let dialog = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
+    const loading = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    if (!(await dialog.isVisible()) && !(await loading.isVisible()))
       await page.getByRole('button', { name: 'Connections', exact: true }).click()
-      await dialog.waitFor()
-    }
+    await dialog.waitFor()
     const profiles = await page.evaluate(() => window.relay.profiles.list())
     const profile = profiles.find(
       (profile) => profile.host === input.host && profile.port === input.port,
@@ -658,6 +682,21 @@ export function activityLabel(activity: ThreadActivity): string {
     phase = 'new thread environment and platform window controls'
     assert.match(await page.title(), /^Life/)
     assert.equal(await page.evaluate(() => window.relay.platform), process.platform)
+    const initialLocal = (await page.evaluate(() => window.relay.profiles.list())).find(
+      (profile) => profile.transport === 'local',
+    )
+    if (initialLocal) {
+      await waitUntil(
+        async () =>
+          (await page.evaluate(() => window.relay.connection.state())).status === 'connected',
+        'the built-in Local environment is ready before explicitly choosing SSH',
+      )
+      assert.equal(
+        (await page.evaluate(() => window.relay.connection.state())).profile.id,
+        initialLocal.id,
+      )
+      await page.evaluate(() => window.relay.connection.disconnect())
+    }
     await page.getByRole('region', { name: 'New thread', exact: true }).waitFor()
     await page.getByRole('heading', { name: 'Connect your environment', exact: true }).waitFor()
     const environmentButton = page.getByRole('button', { name: /^Current Active Environment/ })
@@ -737,8 +776,10 @@ export function activityLabel(activity: ThreadActivity): string {
         '',
       ].join('\n'),
     )
-    await page.getByRole('button', { name: 'Connect environment', exact: true }).click()
-    const connection = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    await page.getByRole('button', { name: 'Connections', exact: true }).click()
+    const connection = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
+    const addSSH = connection.getByRole('button', { name: 'Add SSH machine', exact: true })
+    await addSSH.click()
     await connection.getByRole('textbox', { name: 'SSH config file path' }).fill(sshConfig)
     await connection.getByRole('button', { name: 'Reload SSH config', exact: true }).click()
     await waitUntil(
@@ -775,9 +816,15 @@ export function activityLabel(activity: ThreadActivity): string {
     assert.equal(machineOnly.home, fixture.root)
     await initialPicker.getByRole('button', { name: 'Choose later', exact: true }).click()
     const profiles = await page.evaluate(() => window.relay.profiles.list())
-    assert.equal(profiles.length, 1)
-    assert.equal(profiles[0].password, undefined)
-    assert.equal(profiles[0].sshConfig.alias, 'life-fixture')
+    const sshProfiles = profiles.filter((profile) => profile.transport !== 'local')
+    assert.equal(sshProfiles.length, 1)
+    assert.equal(sshProfiles[0].password, undefined)
+    assert.equal(sshProfiles[0].sshConfig.alias, 'life-fixture')
+    const savedLocal = profiles.filter((profile) => profile.transport === 'local')
+    if (initialLocal) {
+      assert.equal(savedLocal.length, 1)
+      assert.equal(savedLocal[0].id, initialLocal.id)
+    }
     checks.push(
       'OpenSSH config options, native host trust, password privacy and project selection after connection',
     )
@@ -961,11 +1008,28 @@ export function activityLabel(activity: ThreadActivity): string {
         assert.ok(mainRequests.length >= 1)
         assert.equal(mainRequests[0].cwd, input.workspace)
         await send('hello')
+        const greeting = `Hello from ${provider === 'codex' ? 'Codex' : 'Claude'} 👋`
         await page
+          .getByRole('region', { name: 'Turn 2', exact: true })
           .locator('.markdown')
-          .getByText(`Hello from ${provider === 'codex' ? 'Codex' : 'Claude'} 👋`, { exact: true })
+          .getByText(greeting, { exact: true })
           .waitFor()
         await waitForSend()
+        await waitUntil(async () => {
+          const saved = await ordinaryThread(exactPrompt, provider)
+          const hello = saved.messages.find(
+            (message) => message.role === 'user' && message.text === 'hello',
+          )
+          if (!hello) return false
+          const replies = saved.messages.filter(
+            (message) =>
+              message.role === 'assistant' &&
+              message.turn === hello.turn &&
+              message.text === greeting,
+          )
+          assert.ok(replies.length <= 1, `${provider} must retain one greeting for the hello turn`)
+          return replies.length === 1
+        }, `${provider} persists the exact greeting in the hello turn`)
         await send('approval')
         await page
           .locator('.approval-card')
@@ -1065,6 +1129,10 @@ export function activityLabel(activity: ThreadActivity): string {
           `${provider} ordinary /life remains exact project text; approvals and questions; independent provider-generated title`,
         )
       }
+
+      phase = 'native advertised approval choices and exact permission policies'
+      await runNativeApprovalChecks(context)
+      await newThread('claude')
 
       phase = 'project creation stress and automatic saved thread restoration'
       const original = await ordinaryThread(exactPrompt, 'claude')
@@ -1600,6 +1668,7 @@ export function activityLabel(activity: ThreadActivity): string {
     clearInterval(progressTimer)
     if (application) await application.close().catch(() => {})
     await fixture.close()
+    await localFixture.close()
     await new Promise((resolveClose) => remoteService.close(resolveClose))
     if (!failed) await rm(configurationRoot, { recursive: true, force: true })
   }

@@ -21,6 +21,7 @@ import {
 import { arrangementStorageKey, readSidebarArrangement } from '../sidebar-ordering'
 import { threadSection } from '../thread-management'
 import { useSidebarMinute } from '../sidebar-clock'
+import { sidebarHistoryMatches } from '../sidebar-history'
 import type { ThreadActionHandler } from './ThreadActionsMenu'
 import './sidebar-navigation.css'
 import './thread-inbox.css'
@@ -188,8 +189,7 @@ export function SidebarProjects({
         if (!query) return true
         const description = `${thread.title} ${thread.workspace || ''} ${profileNames.get(thread.profileId) || ''}`
         return (
-          description.toLowerCase().includes(query) ||
-          thread.messages.some((message) => message.text.toLowerCase().includes(query))
+          description.toLowerCase().includes(query) || sidebarHistoryMatches(thread.messages, query)
         )
       }),
     [threads, profileNames, query, filters.provider, filters.status],

@@ -52,7 +52,7 @@ jobs:
         run: node .release-verification/scripts/release-baselines.cjs package.json >> "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - run: npm test -- --maxWorkers=1
       - run: npm run format:check
       - run: npm run build
       - run: npx playwright install chromium --with-deps

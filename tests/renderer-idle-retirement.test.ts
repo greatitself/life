@@ -516,7 +516,8 @@ describe('production source reload waits for idle native writers', () => {
       expect(secondAttempt.liveWriters).toEqual([provider])
       expect(secondAttempt.documentRevision).toBe(unconfirmed.documentRevision)
       expect(secondAttempt.permitsNewWork).toBe(false)
-      expect(secondAttempt.permitsCheckpoint).toBe(true)
+      // Retrying the same unconfirmed retirement cannot reopen its sealed history.
+      expect(secondAttempt.permitsCheckpoint).toBe(false)
       expect(secondAttempt.events).not.toContain('agents:close')
       expect(secondAttempt.events).not.toContain('renderer:reload')
       expect(secondAttempt.events).not.toContain('renderer:cold-resume-before-writer-exit')

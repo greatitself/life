@@ -94,6 +94,11 @@ async function runRecoveryChecks(context) {
     const active = await page().evaluate(() => localStorage.getItem('life.active-thread.v1'))
     return (await history()).some((thread) => thread.id === active && thread.remoteId)
   }, 'busy conversation identity persists before native Retry')
+  await waitUntil(
+    async () =>
+      (await fixture.log()).slice(retryLogStart).some((entry) => promptFrom(entry) === 'hang'),
+    'the original provider consumes its exact native turn before Retry',
+  )
   const activeBeforeRetry = await page().evaluate(() =>
     localStorage.getItem('life.active-thread.v1'),
   )

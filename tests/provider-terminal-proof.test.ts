@@ -116,9 +116,9 @@ request = json.load(sys.stdin)
 outer = ast.parse(request["source"])
 program = next(node.value.value for node in outer.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_LIFE_BROKER_PROGRAM" for target in node.targets))
 daemon = next(node for node in ast.parse(program).body if isinstance(node, ast.FunctionDef) and node.name == "daemon")
-functions = [node for node in daemon.body if isinstance(node, ast.FunctionDef) and node.name in ("shutdown", "finish_provider", "wait_provider")]
-assert len(functions) == 3
-timers, frames, kills = [], [], []
+functions = [node for node in daemon.body if isinstance(node, ast.FunctionDef) and node.name in ("shutdown", "finish_provider", "wait_provider", "settle_inputs", "cancel_inputs")]
+assert len(functions) == 5
+timers, frames, kills, durable_commits = [], [], [], []
 code = {"unobserved": None, "clean": 0, "signal": -15}[request["observation"]]
 class Timer:
     def __init__(self, seconds, callback): self.seconds, self.callback = seconds, callback
@@ -127,11 +127,14 @@ class Condition:
     def __enter__(self): return self
     def __exit__(self, *args): pass
     def notify_all(self): pass
+def publish_many(batch, durable=False):
+    if durable: durable_commits.append(batch)
+    for frame in batch: frames.append({**frame, "cursor": len(frames) + 1})
 namespace = {
     "mutex": threading.RLock(), "status": {"ended": False, "closing": False, "queuedBytes": 0},
-    "queued": {}, "inputs": [], "input_bytes": [0], "input_condition": Condition(),
-    "kill_provider": lambda name: kills.append(name), "provider": types.SimpleNamespace(poll=lambda: code, wait=lambda: code),
-    "threading": types.SimpleNamespace(Timer=Timer), "publish": lambda frame: frames.append({**frame, "cursor": len(frames) + 1}),
+    "queued": {}, "inputs": [], "input_bytes": [0], "input_condition": Condition(), "active_input": [None],
+    "kill_provider": lambda name: kills.append(name), "provider": types.SimpleNamespace(poll=lambda: code, wait=lambda: code, stdin=types.SimpleNamespace(close=lambda: None)),
+    "threading": types.SimpleNamespace(Timer=Timer), "publish_many": publish_many,
     "signal": signal, "os": types.SimpleNamespace(fsync=lambda _: None), "journal_fd": 1,
     "state": {}, "state_path": "fixture", "save_json": lambda *_: None,
     "time": types.SimpleNamespace(monotonic=lambda: 0), "clients": set(),
@@ -146,6 +149,7 @@ else:
     namespace["wait_provider"]([types.SimpleNamespace(join=lambda: None)])
 assert namespace["status"]["ended"] and namespace["state"]["exited"]
 assert len(frames) == 1
+assert len(durable_commits) == 1 and durable_commits[0][0]["type"] == "exit"
 print(json.dumps(frames[0]))
 `
 
@@ -198,7 +202,15 @@ class Host extends EventEmitter {
   }
   readonly attachment = new Attachment()
   async channel() {
-    setImmediate(() => this.attachment.frame({ type: 'ready', cursor: 0 }))
+    setImmediate(() =>
+      this.attachment.frame({
+        type: 'ready',
+        protocol: 2,
+        cursor: 0,
+        lastInputSequence: 0,
+        writerLease: { epoch: 1, token: 'terminal-proof-writer' },
+      }),
+    )
     return this.attachment as unknown as ClientChannel
   }
 }
@@ -207,7 +219,9 @@ async function parsedTerminal(frame: ExitFrame) {
   const host = new Host()
   const channel = await DurableRemoteChannel.open(host, 'fixture-provider')
   const exits = vi.fn()
+  const errors = vi.fn()
   channel.on('exit', exits)
+  channel.on('error', errors)
   let settled = false
   const released = Effect.runPromise(channel.closeAndWaitEffect()).then((value) => {
     settled = true
@@ -223,6 +237,13 @@ async function parsedTerminal(frame: ExitFrame) {
   expect(channel.transportState).toBe('closed')
   expect(host.listenerCount('state')).toBe(0)
   expect(host.listenerCount('disconnected')).toBe(0)
+  if (frame.nativeExitConfirmed === false) {
+    expect(errors).toHaveBeenCalledTimes(1)
+    expect(errors.mock.calls[0][0]).toMatchObject({
+      operation: 'native-exit',
+      reason: 'uncertain',
+    })
+  } else expect(errors).not.toHaveBeenCalled()
   return { confirmed, secondConfirmation, exits: exits.mock.calls }
 }
 

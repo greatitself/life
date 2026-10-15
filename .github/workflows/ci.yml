@@ -5,12 +5,19 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: 'Run only packaged Windows compatibility while diagnosing that gate'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    if: inputs.windows_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

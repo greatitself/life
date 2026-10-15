@@ -719,6 +719,14 @@ async function connect(page, fixture) {
     fixture.workspace,
   )
   assert.equal(selected.workspace, fixture.workspace)
+  const project = page.getByRole('dialog', { name: 'Select a project', exact: true })
+  if (await project.isVisible()) {
+    await project.getByLabel('Project directory', { exact: true }).fill(fixture.workspace)
+    await project.getByRole('button', { name: 'Open project', exact: true }).click()
+    await project.waitFor({ state: 'hidden' })
+    const current = await page.evaluate(() => window.relay.connection.state())
+    assert.equal(current.workspace, fixture.workspace)
+  }
 }
 
 async function expectRejected(page, operation, description) {

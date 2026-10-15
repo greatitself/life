@@ -269,10 +269,73 @@ export function activityLabel(activity: ThreadActivity): string {
         2,
       ),
     )
-    await application.evaluate(({ app, BrowserWindow }) => {
+    await application.evaluate(({ app, BrowserWindow, ipcMain }) => {
       const events = []
       const windows = []
-      globalThis.__lifeRendererProof = { events, windows, expected: false }
+      const nativeIPC = []
+      globalThis.__lifeRendererProof = { events, windows, nativeIPC, expected: false }
+      // Observe actual fixture IPC without replacing native ownership or provider behavior.
+      for (const channel of [
+        'agent:attest-loaded-history',
+        'agent:attest-recovery-cache',
+        'agent:recover',
+      ]) {
+        const original = ipcMain._invokeHandlers?.get(channel)
+        if (!original) continue
+        ipcMain._invokeHandlers.set(channel, async (event, ...args) => {
+          const input = args[0]
+          const record = {
+            channel,
+            startedAt: Date.now(),
+            hash: input?.hash,
+            consumers: input?.consumers?.map((consumer) => ({
+              kind: consumer.kind,
+              sessionId: consumer.sessionId,
+              applied: consumer.applied,
+              admissions: consumer.projectionAdmissions?.map(
+                ({ transportId, snapshotToken, ownerGeneration, appliedRevision }) => ({
+                  transportId,
+                  snapshotToken,
+                  ownerGeneration,
+                  appliedRevision,
+                }),
+              ),
+            })),
+          }
+          nativeIPC.push(record)
+          if (nativeIPC.length > 300) nativeIPC.shift()
+          try {
+            const result = await original(event, ...args)
+            record.finishedAt = Date.now()
+            if (channel === 'agent:attest-loaded-history')
+              record.admissions = result?.map(
+                ({ transportId, sessionId, snapshotToken, ownerGeneration, appliedRevision }) => ({
+                  transportId,
+                  sessionId,
+                  snapshotToken,
+                  ownerGeneration,
+                  appliedRevision,
+                }),
+              )
+            else if (channel === 'agent:attest-recovery-cache')
+              record.admissionCount = result?.projectionAdmissions?.length
+            else
+              record.owners = result?.owners?.map((owner) => ({
+                sessionId: owner.sessionId,
+                transportId: owner.transportId,
+                status: owner.status,
+                ownerGeneration: owner.ownerGeneration,
+                acceptedAppliedCursor: owner.acceptedAppliedCursor,
+                hasProjectionAdmission: Boolean(owner.acceptedProjectionAdmission),
+              }))
+            return result
+          } catch (error) {
+            record.finishedAt = Date.now()
+            record.error = String(error?.message || error)
+            throw error
+          }
+        })
+      }
       const observe = (window) => {
         windows.push({ type: 'created', id: window.id })
         window.webContents.on('did-finish-load', () => {

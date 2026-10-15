@@ -679,6 +679,7 @@ async function init() {
         return false
       }
       try {
+        await agents.settleRendererHandoff()
         if (await agents.rendererHandoffAdmitted(reportBlocked)) return true
       } catch (error) {
         if (reportBlocked) console.error('[Life] Source reload ownership check failed:', error)

@@ -383,6 +383,36 @@ afterAll(() => {
 })
 
 describe('production source reload waits for idle native writers', () => {
+  it('reconciles original native exit evidence before source-reload admission', async () => {
+    const { context, coordinator, writers, events } = fixture(
+      'source preflight native exit reconciliation',
+    )
+    writers.codex.exit()
+    writers.claude.exit()
+    context.busy = true
+    let confirmed = false
+    let acknowledged = false
+    context.agents.settleRendererHandoff = async () => {
+      events.push('native:reconcile-original-exit')
+      if (confirmed) context.busy = false
+    }
+    const acknowledgement = coordinator.reloadSource().then(() => {
+      acknowledged = true
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    expect(acknowledged).toBe(false)
+    expect(events).not.toContain('renderer:reload')
+    confirmed = true
+    await vi.advanceTimersByTimeAsync(300)
+    await acknowledgement
+    expect(acknowledged).toBe(true)
+    expect(events).toContain('renderer:reload')
+    expect(events.indexOf('native:reconcile-original-exit')).toBeLessThan(
+      events.indexOf('renderer:reload'),
+    )
+    expect(events).not.toContain('renderer:cold-resume-before-writer-exit')
+  })
+
   it('suspends consumers and awaits both terminal exits before admitting a new document', async () => {
     const { coordinator, writers, events, snapshot } = fixture(
       'idle Codex and Claude terminal barrier',

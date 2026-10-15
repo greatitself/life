@@ -26,7 +26,7 @@ describe('Stop before a provider start is admitted', () => {
         mode: 'unsupported-clean',
         assertFreshSshStartEffect: () => guard,
         assertOrdinaryHistoryWriteEffect: () => Effect.void,
-      } as NativeRecoveryPlatformPolicy
+      } as unknown as NativeRecoveryPlatformPolicy
       const channel = vi.fn(async () => {
         throw new Error('Unexpected provider launch')
       })

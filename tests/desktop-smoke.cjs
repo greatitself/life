@@ -1711,6 +1711,61 @@ export function activityLabel(activity: ThreadActivity): string {
         ),
       ),
     )
+    proof.studioPlannerState = await capture(() =>
+      page?.evaluate(async () => {
+        const container = document.getElementById('root')
+        const key = Object.keys(container || {}).find((name) =>
+          name.startsWith('__reactContainer$'),
+        )
+        const root = key && container[key]
+        const pending = root ? [root.stateNode?.current || root] : []
+        const seen = new Set()
+        const planners = []
+        while (pending.length && seen.size < 10_000) {
+          const fiber = pending.pop()
+          if (!fiber || seen.has(fiber)) continue
+          seen.add(fiber)
+          if (fiber.child) pending.push(fiber.child)
+          if (fiber.sibling) pending.push(fiber.sibling)
+          let hook = fiber.memoizedState
+          for (let index = 0; hook && index < 1000; index++, hook = hook.next) {
+            const value = hook.memoizedState?.current
+            if (!(value instanceof Map)) continue
+            for (const [id, run] of value) {
+              if (!(run?.parts instanceof Map) || !run.input?.sessionId) continue
+              const writes = run.recoveryWrites
+                ? await Promise.race([
+                    run.recoveryWrites.then(
+                      () => 'fulfilled',
+                      (error) => String(error?.stack || error),
+                    ),
+                    new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+                  ])
+                : 'none'
+              planners.push({
+                id,
+                writes,
+                repairs: run.repairs,
+                reads: run.reads,
+                finishing: run.finishing,
+                awaitingGeneration: run.awaitingGeneration,
+                recoveryBlocked: run.recoveryBlocked,
+                ownerGeneration: run.ownerGeneration,
+                partsCursor: run.partsCursor,
+                phase: run.recovery?.phase,
+                iteration: run.recovery?.nativeIteration,
+                action: run.recovery?.action && {
+                  kind: run.recovery.action.kind,
+                  status: run.recovery.action.status,
+                },
+                bufferedEvents: run.nativeEvents?.length,
+              })
+            }
+          }
+        }
+        return planners
+      }),
+    )
     proof.nativeRegistry = await capture(async () => {
       const directory = join(privateUserData, 'native-recovery')
       const files = (await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.jsonl$/.test(name))

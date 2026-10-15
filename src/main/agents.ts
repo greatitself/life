@@ -7291,7 +7291,49 @@ export class Agents {
   }
   readonly rendererHandoffAdmittedEffect = Effect.fn('Agents.rendererHandoffAdmitted')(
     function* (this: Agents) {
-      if (this.hasUntrackedRunningSessions()) return false
+      const blocked = (reason: string) => {
+        if (this.rendererSuspended)
+          console.error('[Life] Native renderer handoff admission refused:', {
+            reason,
+            pending: {
+              operations: this.pendingNativeOperations.size,
+              ownerUpdates: this.pendingOwnerUpdates.size,
+              providerExits: this.pendingProviderExits.size,
+              codexAcquisitions: this.pendingCodexAcquisitions.size,
+              deferredAttachments: this.deferredRecoveryAttachments.size,
+              starts: this.pendingStartAdmissions.size,
+              permissions: this.pendingPermissionResponses.size,
+              durableOpening: this.durableOpening,
+              freshProviders: this.freshProviderChannels.size,
+              failedProviders: this.failedFreshProviders.size,
+              discoveries: this.discoveryChannels.size,
+              recoveryStarting: Boolean(this.recoveryStarting),
+              recoveryAdmissionDepth: this.recoveryAdmissionDepth,
+            },
+            sessions: [...this.sessions]
+              .filter(
+                ([, session]) =>
+                  session.busy ||
+                  session.startup ||
+                  session.stopping ||
+                  session.configuration ||
+                  session.recoveryUnknown,
+              )
+              .map(([sessionId, session]) => ({
+                sessionId,
+                generation: session.recoveryGeneration,
+                phase: session.phase,
+                busy: session.busy,
+                stopRequested: session.stopRequested,
+                startup: Boolean(session.startup),
+                stopping: Boolean(session.stopping),
+                configuration: Boolean(session.configuration),
+                unknown: session.recoveryUnknown,
+              })),
+          })
+        return false
+      }
+      if (this.hasUntrackedRunningSessions()) return blocked('Untracked work before recovery flush')
       yield* Effect.tryPromise({
         try: () => this.flushRecovery(),
         catch: (cause) =>
@@ -7301,7 +7343,7 @@ export class Agents {
             cause,
           ),
       })
-      if (this.hasUntrackedRunningSessions()) return false
+      if (this.hasUntrackedRunningSessions()) return blocked('Untracked work after recovery flush')
       if (!this.nativeRecovery) return !this.hasRunningSessions()
       yield* this.nativeRecovery.flushEffect()
       const snapshots = yield* this.nativeRecovery.listTransports()
@@ -7315,7 +7357,7 @@ export class Agents {
             !snapshot.outputs.some(isConfirmedNativeExit),
         )
       )
-        return false
+        return blocked('Unconfirmed native transport termination')
       for (const [sessionId, session] of this.sessions) {
         if (!(
           session.busy ||
@@ -7344,7 +7386,7 @@ export class Agents {
           ) ||
           (session.remoteId && session.remoteId !== (owner.nativeThreadId || owner.nativeSessionId))
         )
-          return false
+          return blocked('Active owner identity does not match its private transport')
         if (
           snapshot.inputs.some(
             (input) =>
@@ -7355,7 +7397,7 @@ export class Agents {
               ['user-prompt', 'initialize', 'settings'].includes(input.semantic.kind),
           )
         )
-          return false
+          return blocked('An original native input remains unresolved')
         const historicalOwners = snapshot.records.flatMap((record) =>
           record.kind === 'create'
             ? [...record.transport.owners]
@@ -7385,7 +7427,7 @@ export class Agents {
                 ['approval', 'question'].includes(string(stored.event.type)),
             )
           )
-            return false
+            return blocked('Native approval provenance is incomplete')
         for (const [agentId, child] of this.childThreads)
           if (
             child.sessionId === sessionId &&
@@ -7402,7 +7444,7 @@ export class Agents {
                       ))),
               ))
           )
-            return false
+            return blocked('Native Codex child provenance is incomplete')
         for (const [agentId, child] of session.claudeActiveChildren || [])
           if (
             !owns(child.owner) ||
@@ -7410,9 +7452,12 @@ export class Agents {
               (stored) => stored.event.sessionId === sessionId && stored.event.agentId === agentId,
             )
           )
-            return false
+            return blocked('Native Claude child provenance is incomplete')
       }
-      return !this.hasUntrackedRunningSessions()
+      return (
+        !this.hasUntrackedRunningSessions() ||
+        blocked('Untracked work appeared during verification')
+      )
     }.bind(this),
   )
   rendererHandoffAdmitted(): Promise<boolean> {

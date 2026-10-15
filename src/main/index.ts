@@ -1433,7 +1433,9 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
     sourceStartupTimer.unref()
   }
   owner.webContents.on('did-start-navigation', (navigation) => {
-    if (owner !== window || quitting) return
+    // Window close already owns the history handoff and native exit barrier.
+    // A programmatic reload must not start a competing handoff during shutdown.
+    if (owner !== window || quitting || closePending) return
     const currentURL = owner.webContents.getURL()
     // Renderer attempts reach will-navigate after this event. They must not
     // retire work before that attempt is blocked or deferred through the idle path.

@@ -43,3 +43,5 @@ Automatic development reloads wait until active native turns are idle, preservin
 Disconnected documents load their original committed native ledger before replay delivery, so viewing saved history does not require attaching a provider. An unadmitted ordinary startup remains protected without a privately proven startup intent.
 
 Studio can rebuild a missing cache from the current document’s exact native replay deliveries. Saved cursors, stale document tokens, and mismatched cache hashes cannot authorize reconstruction.
+
+Studio waits for its native owner before checkpointing a restored cache and resumes a planner that was waiting for reconnect. A programmatic renderer reload during window close joins the existing shutdown boundary, preserving orderly native exit.

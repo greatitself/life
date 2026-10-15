@@ -84,7 +84,7 @@ const writerStarts = (harness, provider) =>
           : entry.argv?.includes('--include-partial-messages')),
     )
 
-async function reloadDocument(harness) {
+async function reloadDocument(harness, { allowPaused = false } = {}) {
   const original = `reload-${Date.now()}-${randomInt(0, 1e8)}`
   await harness.page.evaluate((token) => {
     window.__lifeReloadDocumentToken = token
@@ -102,8 +102,11 @@ async function reloadDocument(harness) {
     BrowserWindow.getAllWindows()[0].webContents.reload(),
   )
   await harness.page.waitForFunction(
-    () => !window.__lifeReloadDocumentToken && window.relay && document.querySelector('.app-shell'),
-    undefined,
+    (paused) =>
+      !window.__lifeReloadDocumentToken &&
+      window.relay &&
+      (paused || document.querySelector('.app-shell')),
+    allowPaused,
     { timeout: 3500 },
   )
   await harness.observeEvents()
@@ -119,7 +122,13 @@ async function reloadDocument(harness) {
   assert.equal(after.nativePID, before.nativePID)
   assert.equal(after.contentsId, before.contentsId)
   assert.equal(after.url, before.url)
-  return { before, after, discardedDocumentToken: original, actualWebContentsReload: true }
+  return {
+    before,
+    after,
+    discardedDocumentToken: original,
+    actualWebContentsReload: true,
+    documentShellVisible: await harness.page.locator('.app-shell').isVisible(),
+  }
 }
 
 function assertJournalInputReceipt(frame, transport, inputs, receipts) {
@@ -484,24 +493,12 @@ async function slowExitReload(harness) {
       0,
     )
     assertWrittenCloseReceipt(observed.journal)
-    await harness.application.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.reload()
-    })
-    await waitUntil(
-      () =>
-        harness.nativeLogs
-          .flat()
-          .some((line) => line.includes('Native renderer handoff admission refused')),
-      'the actual native reload refuses document admission before the original provider exits',
-      2000,
+    reload = await reloadDocument(harness, { allowPaused: true })
+    assert.equal(
+      reload.documentShellVisible,
+      false,
+      'A closing window never admits the replacement interface before native exit',
     )
-    reload = {
-      actualWebContentsReload: true,
-      admitted: false,
-      nativeHandoffRefused: true,
-      pendingNativeExit: true,
-      observedAt: Date.now(),
-    }
     assert.equal(alive(record.started.pid), true)
     assert.equal(harness.log().filter((entry) => entry.kind === 'turn-started').length, 1)
     assert.ok(

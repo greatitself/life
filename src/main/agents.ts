@@ -265,6 +265,7 @@ interface Session {
   codexRPC?: RPC
   remoteId?: string
   turnId?: string
+  completedNativeTurnId?: string
   channel?: ClientChannel
   busy: boolean
   messageId?: string
@@ -1334,6 +1335,7 @@ export class Agents {
       phase: 'initializing',
       remoteId: undefined,
       turnId: undefined,
+      completedNativeTurnId: undefined,
       messageId: undefined,
       claudeResult: undefined,
       claudeReply: undefined,
@@ -1348,12 +1350,19 @@ export class Agents {
     session.recoverySnapshotToken = owner.snapshotToken
     session.recoveryUnknown = owner.state === 'unknown'
     if (owner.state !== 'unknown')
-      session.busy = owner.state === 'starting' || owner.state === 'active'
+      session.busy =
+        (owner.state === 'starting' || owner.state === 'active') &&
+        !(same && owner.nativeTurnId && session.completedNativeTurnId === owner.nativeTurnId)
     session.stopRequested = owner.stopRequested ?? false
     session.claudeRestartForSettings = owner.claudeRestartForSettings
     session.nativeStartIntentId = owner.nativeStartIntentId
     session.nativeStartPlan = owner.nativeStartPlan as Wire | undefined
-    session.ignoredTurns = new Set(owner.ignoredTurns || session.ignoredTurns)
+    // Sibling checkpoints can repeat an older active owner after native completion.
+    // Keep observed terminal turns within this exact owner generation and token.
+    session.ignoredTurns = new Set([
+      ...(same ? session.ignoredTurns : []),
+      ...(owner.ignoredTurns || []),
+    ])
     session.phase = owner.phase || session.phase
     session.input = owner.input as unknown as StartInput
     if (owner.clientRecovery !== undefined)
@@ -5286,6 +5295,8 @@ export class Agents {
         session.phase = 'running'
       }
     }
+    if (method === 'turn/completed' && !isChild && turnId && session.turnId === turnId)
+      session.completedNativeTurnId = turnId
     if (method === 'turn/completed' && session.stopRequested) {
       if (isChild && child && child.turnId && child.turnId === turnId) child.busy = false
       if (!isChild && session.turnId && session.turnId === turnId) session.busy = false

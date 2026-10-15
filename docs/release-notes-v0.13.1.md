@@ -29,3 +29,5 @@ A failed provider opening can finish renderer handoff once its exact original na
 Cancelled Claude openings retain retirement ownership until native exit is confirmed. An opening cancelled before owner admission sends neither initialization nor a user prompt. A provider that has already confirmed exit no longer waits for a close receipt when no close envelope was issued.
 
 Studio now reconciles a native source generation’s recorded startup failure and uses its bounded repair flow. Explicit disable, rollback, unverified readiness, and stopped requests do not authorize a new repair.
+
+Cold replay preserves an observed Codex turn completion when a later checkpoint on the shared provider process repeats an older active owner. Completed conversations no longer acquire a false process-exit error after restart; an incomplete turn still reports its native exit.

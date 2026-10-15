@@ -849,6 +849,54 @@ function installClaudeMetadata(fixture: Fixture) {
 }
 
 describe('Agents native recovery boundaries', () => {
+  it.each([true, false])(
+    'preserves an observed Codex completion across stale sibling checkpoints before native exit: completed=%s',
+    async (completed) => {
+      await withFixture('codex', async (fixture) => {
+        await admitOriginalPrompt(fixture)
+        if (completed)
+          await appendMessages(fixture, [
+            {
+              method: 'turn/completed',
+              params: { threadId: nativeThread, turn: { id: nativeTurn, status: 'completed' } },
+            },
+          ])
+        const before = await run(fixture.store.readTransport(fixture.transport.id))
+        // A sibling update republishes its older active owner list after the native output.
+        await run(
+          fixture.store.updateTransport(fixture.transport.id, {
+            owners: before.transport.owners,
+          }),
+        )
+        const stale = await run(fixture.store.readTransport(fixture.transport.id))
+        await run(
+          fixture.store.appendOutputs(fixture.transport.id, [
+            {
+              type: 'exit',
+              cursor: stale.outputCursor + 1,
+              code: 0,
+              nativeExitConfirmed: true,
+            },
+          ]),
+        )
+        const result = await fixture.agents.recover({ consumers: [consumer()] })
+        expect(result.owners[0]).toMatchObject({ status: 'idle', remoteId: nativeThread })
+        expect(fixture.events.filter((event) => event.type === 'complete')).toHaveLength(
+          completed ? 1 : 0,
+        )
+        expect(fixture.events.filter((event) => event.type === 'error')).toHaveLength(
+          completed ? 0 : 1,
+        )
+        expect((await run(fixture.store.readTransport(fixture.transport.id))).inputs).toEqual(
+          stale.inputs,
+        )
+        expect(fixture.open).not.toHaveBeenCalled()
+        expect(fixture.ssh.channel).not.toHaveBeenCalled()
+        expect(fixture.ssh.exec).not.toHaveBeenCalled()
+      })
+    },
+  )
+
   it('keeps Claude cumulative usage on its original process identity across recovered turn generations', async () => {
     await withFixture('claude', async (fixture) => {
       await admitOriginalPrompt(fixture)

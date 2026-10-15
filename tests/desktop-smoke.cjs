@@ -11,7 +11,7 @@
  */
 const assert = require('node:assert/strict')
 const { existsSync } = require('node:fs')
-const { mkdtemp, mkdir, readFile, readdir, rm, writeFile } = require('node:fs/promises')
+const { mkdtemp, mkdir, open, readFile, readdir, rm, writeFile } = require('node:fs/promises')
 const { dirname, join, resolve } = require('node:path')
 const { createHash } = require('node:crypto')
 const { tmpdir } = require('node:os')
@@ -279,6 +279,7 @@ export function activityLabel(activity: ThreadActivity): string {
         'agent:attest-loaded-history',
         'agent:attest-recovery-cache',
         'agent:recover',
+        'agent:start',
       ]) {
         const original = ipcMain._invokeHandlers?.get(channel)
         if (!original) continue
@@ -288,6 +289,17 @@ export function activityLabel(activity: ThreadActivity): string {
             channel,
             startedAt: Date.now(),
             hash: input?.hash,
+            ...(channel === 'agent:start'
+              ? {
+                  sessionId: input?.sessionId,
+                  remoteId: input?.remoteId,
+                  planner: input?.clientRecovery && {
+                    nativeIteration: input.clientRecovery.nativeIteration,
+                    applied: input.clientRecovery.applied,
+                    preparedCache: input.clientRecovery.preparedCache,
+                  },
+                }
+              : {}),
             consumers: input?.consumers?.map((consumer) => ({
               kind: consumer.kind,
               sessionId: consumer.sessionId,
@@ -1852,18 +1864,38 @@ export function activityLabel(activity: ThreadActivity): string {
         ),
       ),
     )
+    proof.nativeEvents = await capture(() =>
+      application?.evaluate(() => globalThis.__lifeRendererProof),
+    )
+    await writeFile(proofPath, JSON.stringify(proof, null, 2))
     proof.nativeRegistry = await capture(async () => {
       const directory = join(privateUserData, 'native-recovery')
       const files = (await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.jsonl$/.test(name))
       return Object.fromEntries(
         await Promise.all(
-          files.map(async (name) => [name, await readFile(join(directory, name), 'utf8')]),
+          files.map(async (name) => {
+            const file = await open(join(directory, name), 'r')
+            try {
+              const { size } = await file.stat()
+              const bytes = Buffer.alloc(Math.min(size, 262_144))
+              await file.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length))
+              return [
+                name,
+                size <= bytes.length
+                  ? bytes.toString('utf8')
+                  : {
+                      size,
+                      truncated: true,
+                      tail: bytes.toString('utf8'),
+                    },
+              ]
+            } finally {
+              await file.close()
+            }
+          }),
         ),
       )
     })
-    proof.nativeEvents = await capture(() =>
-      application?.evaluate(() => globalThis.__lifeRendererProof),
-    )
     await writeFile(proofPath, JSON.stringify(proof, null, 2))
     await capture(() => page?.screenshot({ path: join(artifacts, 'desktop-failure.png') }))
     await capture(async () =>

@@ -1032,6 +1032,9 @@ export function useCustomizationStudio(options: StudioOptions) {
       ...run.recovery,
       nativeIteration: previousIteration + 1,
       action: undefined,
+      // A new iteration may own a different native transport after renderer recovery.
+      // Its empty response ledger cannot carry the previous transport's cache preparation.
+      preparedCache: undefined,
       continuation: Object.keys(extra).length ? extra : undefined,
     })
     run.awaitingGeneration = usesDurableRecovery() && Boolean(api.agent.recover)

@@ -69,8 +69,8 @@ describe('real SSH host verification and workspace connection', () => {
       status: 'connected',
       home: fixture.root,
       lastWorkspace: fixture.workspace,
-      codex: 'codex-cli test.0',
-      claude: '2.test.0 (Claude Code fixture)',
+      codex: 'codex-cli 0.162.1',
+      claude: '2.1.278 (Claude Code)',
     })
     expect(state.workspace).toBeUndefined()
     expect(state.profile).not.toHaveProperty('password')

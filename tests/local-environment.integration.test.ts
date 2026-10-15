@@ -83,8 +83,8 @@ describe('actual local environment', () => {
     expect(connection.state).toMatchObject({
       status: 'connected',
       workspace: fixture.workspace,
-      codex: 'codex-cli test.0',
-      claude: '2.test.0 (Claude Code fixture)',
+      codex: 'codex-cli 0.162.1',
+      claude: '2.1.278 (Claude Code)',
       profile: { id: store.localProfile().id, transport: 'local' },
     })
     expect(hostKey).not.toHaveBeenCalled()

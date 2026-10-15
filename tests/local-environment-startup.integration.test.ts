@@ -181,8 +181,8 @@ describe.skipIf(process.platform === 'win32')('local startup with a blocked opti
     expect(discovered).toMatchObject({
       status: 'connected',
       providerVersionsStatus: 'ready',
-      codex: 'codex-cli test.0',
-      claude: '2.test.0 (Claude Code fixture)',
+      codex: 'codex-cli 0.162.1',
+      claude: '2.1.278 (Claude Code)',
       workspace: value.fixture.workspace,
     })
     expect(await coalesced).toBe(discovered)

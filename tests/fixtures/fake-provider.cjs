@@ -413,7 +413,8 @@ function lifeThreadResponse(prompt, studio) {
 
 record({ argv, cwd: process.cwd() })
 if (argv.includes('--version')) {
-  console.log(provider === 'codex' ? 'codex-cli test.0' : '2.test.0 (Claude Code fixture)')
+  // Advertise the native versions this stand-in simulates so recovery uses its real version guard.
+  console.log(provider === 'codex' ? 'codex-cli 0.162.1' : '2.1.278 (Claude Code)')
   process.exit(0)
 }
 

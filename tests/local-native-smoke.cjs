@@ -410,8 +410,8 @@ async function run() {
       expectedInitialWorkspace,
       'Fresh Local defaults to the canonical project launch directory or OS home',
     )
-    assert.equal(initial.codex, 'codex-cli test.0')
-    assert.equal(initial.claude, '2.test.0 (Claude Code fixture)')
+    assert.equal(initial.codex, 'codex-cli 0.162.1')
+    assert.equal(initial.claude, '2.1.278 (Claude Code)')
     assert.equal(
       await page.getByRole('dialog', { name: 'Choose an environment', exact: true }).isVisible(),
       false,

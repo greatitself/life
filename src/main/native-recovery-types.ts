@@ -326,7 +326,7 @@ export interface NativeRecoverySnapshot {
   readonly historyAcks: readonly NativeRecoveryHistoryAck[]
   /** Durable pre-write authority only; preparations never imply history commit. */
   readonly historyPrepares: readonly NativeRecoveryHistoryPrepare[]
-  /** Exact committed chronology; reducers must replay owners and inputs with output. */
+  /** Reader-owned ordered prefix of immutable entries; replay owners and inputs with output. */
   readonly records: readonly NativeRecoveryJournalRecord[]
 }
 

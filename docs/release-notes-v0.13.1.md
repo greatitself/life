@@ -12,6 +12,10 @@ Life 0.13.1 fixes the release-blocking test failures from 0.13.0.
 
 - Stop cancels an ordinary turn still waiting for provider-start admission, including a follow-up after an earlier Stop. The new request cannot start later after being reported stopped, and a previous completion cannot acknowledge the new Stop. Renderer preparation is cancelled before a delayed connection reply can dispatch a stopped prompt. Both providers recheck Stop and session ownership after native owner checkpoints, before dispatching a prompt. Concurrent native Stop checks retain their follow-up observation when another check is already running.
 
+- Bind Studio follow-ups to the admitted native generation and advance repair attempts together with their saved intent. Cache preparations identify each exact session row and owner.
+
+- Reuse deeply immutable committed recovery entries across reads while keeping current ownership data and each reader’s ordered history prefix detached. Exact journal chronology, prompts, and recovery evidence remain intact.
+
 The release pipeline requires successful verification of the exact source commit before installer publication. Typecheck, unit/integration tests, the production build, browser/Electron workflows, native fixtures, packaged compatibility, and Windows upgrade results are recorded in GitHub Actions. Fixture checks do not establish authenticated upstream-provider behavior.
 
 The platform and experimental active-session-recovery limits described in 0.13.0 still apply. Windows supports SSH environments; native Local execution and active-session recovery require POSIX facilities. Windows and macOS packages use the existing unsigned policy.

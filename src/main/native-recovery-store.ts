@@ -167,6 +167,20 @@ const leaseSchema = Schema.Struct({ pid: positive, token: Schema.NonEmptyString 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const journalName = (id: string) => hash(id) + '.jsonl'
 const copy = <A>(value: A): A => JSON.parse(JSON.stringify(value)) as A
+
+/** Committed JSON entries never change; keep their chronology without copying its full payload. */
+function freezeCommitted(value: unknown): void {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return
+  for (const child of Object.values(value)) freezeCommitted(child)
+  Object.freeze(value)
+}
+function copySnapshot(snapshot: NativeRecoverySnapshot): NativeRecoverySnapshot {
+  const { records, ...current } = snapshot
+  const detached = copy(current)
+  for (const record of records) freezeCommitted(record)
+  // Each reader owns its ordered prefix. Only deeply immutable entries share identity.
+  return { ...detached, records: [...records] }
+}
 const eventIdsByArray = new WeakMap<readonly NativeRecoveryStoredEvent[], Set<string>>()
 const ownerScopesByRecords = new WeakMap<readonly NativeRecoveryJournalRecord[], Set<string>>()
 const historyClaimsByRecords = new WeakMap<
@@ -1318,12 +1332,12 @@ export class NativeRecoveryStore extends Context.Service<
             }
             yield* commit(journal, [{ kind: 'create', transport }], true)
             journals.set(transport.id, journal)
-            return copy(journal.snapshot)
+            return copySnapshot(journal.snapshot)
           }),
         ).pipe(Effect.uninterruptible)
       }),
       readTransport: Effect.fn('NativeRecoveryStore.readTransport')((id) =>
-        mutation(id, (journal) => Effect.sync(() => copy(journal.snapshot))),
+        mutation(id, (journal) => Effect.sync(() => copySnapshot(journal.snapshot))),
       ),
       listTransports: Effect.fn('NativeRecoveryStore.listTransports')(function* () {
         return yield* locked(
@@ -1338,7 +1352,7 @@ export class NativeRecoveryStore extends Context.Service<
               if (journal.poisoned) return yield* journal.poisoned
               yield* commit(journal, [])
               journals.set(journal.snapshot.transport.id, journal)
-              result.push(copy(journal.snapshot))
+              result.push(copySnapshot(journal.snapshot))
             }
             return result
           }),

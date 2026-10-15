@@ -572,6 +572,14 @@ jobs:
           node tests/transcript-performance.cjs v0131-a
           node tests/transcript-performance.cjs v0131-b
           (cd .performance-baseline && node tests/transcript-performance.cjs v0130-b)
+      - name: Measure native recovery reads with the same fixture and alternating source order
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/native-recovery-read-performance.cjs .performance-baseline v0130-a
+          node tests/native-recovery-read-performance.cjs . v0131-a
+          node tests/native-recovery-read-performance.cjs . v0131-b
+          node tests/native-recovery-read-performance.cjs .performance-baseline v0130-b
       - name: Retain both source measurements without treating fixture times as upstream provider evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -582,6 +590,7 @@ jobs:
           path: |
             output/playwright/transcript-performance-v011/v0131-*.json
             .performance-baseline/output/playwright/transcript-performance-v011/v0130-*.json
+            output/playwright/native-recovery-read-performance/*.json
 
   release-regressions:
     name: Release regression checks
@@ -602,7 +611,7 @@ jobs:
         id: unit
         continue-on-error: false
         timeout-minutes: 10
-        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts tests/agents-native-stop-recovery.test.ts tests/agent-native-stop-recovery.test.ts tests/renderer-idle-retirement.test.ts tests/agents-native-recovery-boundaries.test.ts
+        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts tests/agents-native-stop-recovery.test.ts tests/agent-native-stop-recovery.test.ts tests/renderer-idle-retirement.test.ts tests/agents-native-recovery-boundaries.test.ts tests/native-recovery-store.test.ts
       - name: Studio focus regression
         id: focus
         continue-on-error: true

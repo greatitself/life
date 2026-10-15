@@ -1340,6 +1340,46 @@ describe('durable native recovery journal', () => {
     expect((await run(store.readTransport(id))).transport.id).toBe(id)
   })
 
+  it('shares immutable committed entries while detaching snapshot prefixes and current owners', async () => {
+    const directory = await temporary()
+    const store = await start(directory)
+    const transport = descriptor()
+    const first = await run(store.createTransport(transport))
+    const second = await run(store.readTransport(transport.id))
+    expect(second.records).not.toBe(first.records)
+    expect(second.records[0]).toBe(first.records[0])
+    const creation = first.records[0]
+    expect(creation.kind).toBe('create')
+    if (creation.kind !== 'create') throw new Error('Missing original creation record')
+    expect(() =>
+      Object.defineProperty(creation.transport.owners[0].input, 'prompt', { value: 'foreign' }),
+    ).toThrow(TypeError)
+    expect(() =>
+      Object.defineProperty(first.records, '0', { value: { kind: 'foreign' } }),
+    ).not.toThrow()
+    Object.defineProperty(second.transport.owners[0].input, 'prompt', { value: 'detached edit' })
+    await run(
+      store.updateTransport(transport.id, { controller: { id: 'next-controller', epoch: 2 } }),
+    )
+    const next = await run(store.readTransport(transport.id))
+    expect(first.records).toHaveLength(1)
+    expect(second.records).toHaveLength(1)
+    expect(next.records).toHaveLength(2)
+    expect(next.records[0]).toBe(second.records[0])
+    expect(next.transport.owners[0].input.prompt).toBe(transport.owners[0].input.prompt)
+    expect(creation.transport.owners[0].input.prompt).toBe(transport.owners[0].input.prompt)
+    expect(second.transport.controller.epoch).toBe(1)
+    expect(next.transport.controller.epoch).toBe(2)
+    await run(store.closeEffect())
+    const restored = await start(directory)
+    const replayed = await run(restored.readTransport(transport.id))
+    expect(replayed.records).toEqual(next.records)
+    expect(replayed.transport).toEqual(next.transport)
+    expect(() => Object.defineProperty(replayed.records[1], 'revision', { value: 999 })).toThrow(
+      TypeError,
+    )
+  })
+
   it('rejects a second live local writer and releases ownership on explicit close', async () => {
     const directory = await temporary()
     const first = await start(directory)

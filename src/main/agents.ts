@@ -2375,7 +2375,12 @@ export class Agents {
     const sessionId = session.input.sessionId
     const previous = this.stopContinuations.get(sessionId)
     this.traceNativeLifecycle('stop-continue', sessionId, session)
-    if (previous) return previous
+    if (previous) {
+      // A queued callback can arrive after another callback acquired this Stop.
+      // Retain its follow-up observation instead of losing the newer receipt.
+      this.pendingStopWakes.add(sessionId)
+      return previous
+    }
     const continuation = this.continueRecoveredStopOperation(session)
     this.stopContinuations.set(sessionId, continuation)
     void continuation
@@ -2475,6 +2480,38 @@ export class Agents {
             codexApprovalStopDecisionId(approval.method, approval.params) !== null,
         })),
       })
+      if (process.env.LIFE_TEST_NATIVE_LIFECYCLE === '1')
+        console.error(
+          '[Life native Stop plan]',
+          JSON.stringify({
+            at: Date.now(),
+            sessionId,
+            sessionGeneration: session.recoveryGeneration,
+            registeredGeneration: owner.generation,
+            registeredPhase: owner.phase,
+            planStatus: plan.status,
+            reasons: plan.reasons,
+            actions: plan.actions.map((action) => ({
+              type: action.type,
+              ...('nativeThreadId' in action ? { nativeThreadId: action.nativeThreadId } : {}),
+              ...('nativeTurnId' in action ? { nativeTurnId: action.nativeTurnId } : {}),
+              ...('input' in action ? { inputSequence: action.input.sequence } : {}),
+            })),
+            inputs: snapshot.inputs
+              .filter((input) => input.semantic.sessionId === sessionId)
+              .slice(-8)
+              .map((input) => ({
+                sequence: input.sequence,
+                kind: input.semantic.kind,
+                generation: input.semantic.ownerGeneration,
+                method: input.semantic.method,
+                nativeTurnId: input.semantic.nativeTurnId,
+                written: input.written,
+                acknowledged: input.acknowledged,
+                receipt: input.deliveryReceipt?.status,
+              })),
+          }),
+        )
       if (plan.status === 'unknown') {
         if (
           plan.reasons.every(
@@ -2512,7 +2549,8 @@ export class Agents {
                 true,
               )
           }
-          if (action.type === 'interrupt-codex')
+          if (action.type === 'interrupt-codex') {
+            this.traceNativeLifecycle('stop-before-native-interrupt', sessionId, session)
             await session.codexRPC?.request(
               'turn/interrupt',
               {
@@ -2532,6 +2570,8 @@ export class Agents {
                 details: { stopKey: action.stopKey },
               }),
             )
+            this.traceNativeLifecycle('stop-after-native-interrupt', sessionId, session)
+          }
           if (action.type === 'interrupt-claude')
             await this.claudeControl(session, { subtype: 'interrupt' }, 10000)
           if (action.type === 'finish-unstarted' || action.type === 'finish-stop') {
@@ -4255,6 +4295,10 @@ export class Agents {
           startup: Boolean(current.startup),
           stopping: Boolean(current.stopping),
           configuration: Boolean(current.configuration),
+          rpcAssigned: Boolean(current.codexRPC),
+          rpcClosed: current.codexRPC?.closed,
+          rpcPendingMutation: current.codexRPC?.hasPendingMutation,
+          transportState: (current.codexRPC?.channel as DurableChannel | undefined)?.transportState,
         },
         observedGeneration: observed?.recoveryGeneration,
         observedIsCurrent: observed ? observed === current : undefined,

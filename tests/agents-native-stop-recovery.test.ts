@@ -1517,6 +1517,60 @@ describe('Agents native Stop recovery boundaries', () => {
       expect(stopEvents(fixture)).toHaveLength(2)
     }))
 
+  it('a concurrent Stop wake rechecks a newer owner after the original snapshot finishes', () =>
+    withFixture('codex', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const channel = await recovered(fixture)
+      const target = fixture.agents as unknown as {
+        sessions: Map<string, { stopRequested: boolean }>
+        recoveredStops: Set<string>
+        continueRecoveredStop: (session: unknown) => Promise<void>
+      }
+      const session = target.sessions.get('life-session')!
+      session.stopRequested = true
+      target.recoveredStops.add('life-session')
+      const gate = Deferred.makeUnsafe<void>()
+      let held = false
+      const originalRead = fixture.store.readTransport.bind(fixture.store)
+      vi.spyOn(fixture.store, 'readTransport').mockImplementation((id) =>
+        Effect.gen(function* () {
+          const snapshot = yield* originalRead(id)
+          if (!held && id === fixture.transport.id) {
+            held = true
+            yield* Deferred.await(gate)
+          }
+          return snapshot
+        }),
+      )
+      const first = target.continueRecoveredStop(session)
+      let joined: Promise<void> | undefined
+      try {
+        await vi.waitFor(() => expect(held).toBe(true))
+        const latest = await run(originalRead(fixture.transport.id))
+        expect(latest.transport.owners[0].stopRequested).not.toBe(true)
+        await run(
+          fixture.store.updateTransport(fixture.transport.id, {
+            owners: latest.transport.owners.map((owner) => ({ ...owner, stopRequested: true })),
+          }),
+        )
+        joined = target.continueRecoveredStop(session)
+      } finally {
+        Deferred.doneUnsafe(gate, Effect.void)
+        await first
+        await joined
+      }
+      await vi.waitFor(() => expect(interrupts(channel)).toHaveLength(1))
+      await channel.reply(interrupted())
+      await vi.waitFor(async () => {
+        await fixture.agents.flushRecovery()
+        expect(stopEvents(fixture)).toHaveLength(1)
+      })
+      expect(interrupts(channel)).toHaveLength(1)
+      expect(channel.nativeWrites.filter((entry) => entry.message.method === 'turn/start')).toEqual(
+        [],
+      )
+    }))
+
   it('renderer handoff joins the original Stop owner receipt before checking admission', () =>
     withFixture('codex', async (fixture) => {
       await admitOriginalPrompt(fixture)

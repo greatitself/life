@@ -30,11 +30,13 @@ async function runRecoveryChecks(context) {
   const readyToSend = () =>
     page().getByRole('button', { name: 'Send message', exact: true }).waitFor()
   const promptFrom = (entry) =>
-    entry.message?.method === 'turn/start'
-      ? entry.message.params.input[0].text
-      : entry.message?.type === 'user'
-        ? entry.message.message.content[0].text
-        : undefined
+    entry.kind === 'title-metadata'
+      ? undefined
+      : entry.message?.method === 'turn/start'
+        ? entry.message.params.input[0].text
+        : entry.message?.type === 'user'
+          ? entry.message.message.content[0].text
+          : undefined
   const replacePage = async (replacement) => {
     await setPage(replacement)
     page().setDefaultTimeout(15000)
@@ -145,6 +147,7 @@ async function runRecoveryChecks(context) {
         .slice(retryLogStart)
         .some(
           (entry) =>
+            entry.kind !== 'title-metadata' &&
             entry.message?.method === 'turn/interrupt' &&
             entry.message.params.threadId === beforeRetry.thread.remoteId,
         ),

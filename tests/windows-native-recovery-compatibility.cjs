@@ -821,6 +821,7 @@ async function nativeWorkflow(page, fixture, provider) {
   let thread
   await waitUntil(async () => {
     const snapshot = await page.evaluate(() => window.relay.conversations.load())
+    if (!snapshot) return false
     thread = snapshot.threads.find(
       (value) =>
         value.provider === provider &&

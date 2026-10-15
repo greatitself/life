@@ -1927,6 +1927,19 @@ describe('Agents native Stop recovery boundaries', () => {
           ),
         ).toBe(confirmed)
         expect(await fixture.agents.rendererHandoffAdmitted()).toBe(confirmed)
+        if (confirmed) {
+          const recovered = await fixture.agents.recover({ consumers: [consumer()] })
+          expect(recovered.owners).toEqual([
+            expect.objectContaining({
+              sessionId: 'life-session',
+              transportId: fixture.transport.id,
+              status: 'idle',
+              remoteId: nativeThread,
+            }),
+          ])
+          expect(launched).toHaveLength(1)
+          expect(channel.nativeWrites).toEqual([])
+        }
       }),
   )
 

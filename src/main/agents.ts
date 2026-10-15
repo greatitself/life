@@ -4504,6 +4504,19 @@ export class Agents {
       }
     } finally {
       if (activeSession.startup === startup) activeSession.startup = undefined
+      if (
+        activeSession.stopRequested &&
+        activeSession.promptDispatchStarted === false &&
+        !activeSession.recoveryTransportId &&
+        this.sessions.get(input.sessionId) === activeSession &&
+        old?.recoveryTransportId &&
+        this.terminalTransports.has(old.recoveryTransportId)
+      ) {
+        // Cancellation before publishing a new native owner must retain the
+        // previous completed owner for reload. The separate opening producer
+        // still owns retirement of any unused process it already allocated.
+        this.sessions.set(input.sessionId, old)
+      }
     }
   }
   private setProviderTitle(session: Session, title: string) {

@@ -84,6 +84,7 @@ import {
 } from './agent-native-claude-controls'
 
 type DurableChannel = ClientChannel & {
+  readonly nativeRecoveryTracked?: boolean
   transportState?: 'connected' | 'suspended' | 'closed'
   isClosing?: boolean
   readonly hasPendingDelivery?: boolean
@@ -2448,7 +2449,8 @@ export class Agents {
         root: {
           state: session.busy
             ? session.phase === 'initializing' ||
-              (session.phase === 'startingTurn' && session.promptDispatchStarted === false)
+              (session.promptDispatchStarted === false &&
+                (session.phase === 'startingTurn' || session.input.provider === 'claude'))
               ? 'starting'
               : 'active'
             : 'idle',
@@ -5600,6 +5602,152 @@ export class Agents {
         })
     }
   }
+  private readonly openClaudeProviderEffect = Effect.fn('Agents.openClaudeProvider')(
+    function* (this: Agents, session: Session, command: string) {
+      let observed: ClientChannel | undefined
+      const onError = (_error: Error) => {}
+      yield* Effect.acquireRelease(Effect.void, () =>
+        Effect.sync(() => {
+          observed?.off('error', onError)
+        }),
+      )
+      const channel = yield* Effect.tryPromise({
+        try: () =>
+          this.providerChannel(
+            command,
+            (opening) => {
+              observed = opening
+              opening.on('error', onError)
+            },
+            'claude',
+            session.machineIdentity,
+          ),
+        catch: (cause) =>
+          cause instanceof NativeRecoveryError || cause instanceof AgentEnvironmentError
+            ? cause
+            : this.recoveryError('opening', 'The original Claude provider opening failed.', cause),
+      })
+      if (!observed) {
+        observed = channel
+        channel.on('error', onError)
+      }
+      const durable = channel as DurableChannel
+      if (
+        this.sessions.get(session.input.sessionId) === session &&
+        !session.stopRequested &&
+        this.machineIdentity() === session.machineIdentity
+      ) {
+        // Publish the original channel before the owner write can yield to Stop.
+        session.channel = channel
+        yield* Effect.tryPromise({
+          try: () => this.recordRecoveryOwner(session, channel),
+          catch: (cause) =>
+            cause instanceof NativeRecoveryError
+              ? cause
+              : this.recoveryError(
+                  'owner',
+                  'The original Claude owner could not be admitted.',
+                  cause,
+                ),
+        })
+        this.bindClaudeParser(session, channel)
+        if (durable.recoveryId) this.removeOwnerlessClaudeObserver(durable.recoveryId)
+        return channel
+      }
+      yield* Effect.gen(
+        function* (this: Agents) {
+          if (!this.nativeRecovery || (!durable.recoveryId && !durable.nativeRecoveryTracked)) {
+            yield* Effect.try({
+              try: () => {
+                try {
+                  channel.signal('TERM')
+                } finally {
+                  channel.close()
+                }
+              },
+              catch: (cause) =>
+                this.recoveryError(
+                  'cancelled-opening',
+                  'The cancelled Claude opening could not be closed.',
+                  cause,
+                ),
+            })
+            return
+          }
+          const id = durable.recoveryId
+          const claim = id ? this.freshProviderChannels.get(id) : undefined
+          if (
+            !id ||
+            !claim ||
+            claim.channel !== channel ||
+            claim.provider !== 'claude' ||
+            claim.machine !== session.machineIdentity ||
+            !durable.signalNativeAndWait ||
+            !durable.closeNativeAndWait
+          )
+            return yield* this.recoveryError(
+              'cancelled-opening',
+              'The cancelled Claude opening has no proven original transport owner.',
+            )
+          const snapshot = yield* this.nativeRecovery.readTransport(id)
+          if (
+            snapshot.transport.provider !== 'claude' ||
+            this.recoveryMachine(snapshot) !== claim.machine ||
+            snapshot.transport.owners.length ||
+            snapshot.inputs.length
+          )
+            return yield* this.recoveryError(
+              'cancelled-opening',
+              'The original Claude opening has already admitted native work and cannot be retired as unused.',
+            )
+          this.observeOwnerlessClaude(id, durable, claim.machine)
+          const signal = durable.signalNativeAndWait.bind(durable)
+          const close = durable.closeNativeAndWait.bind(durable)
+          const confirmed = yield* this.releaseProviderEffect('claude', durable, () =>
+            Effect.gen(function* () {
+              yield* Effect.tryPromise({
+                try: () =>
+                  signal('TERM', { kind: 'transport', method: 'life/cancelled-opening-signal' }),
+                catch: (cause) =>
+                  cause instanceof NativeRecoveryError
+                    ? cause
+                    : new NativeRecoveryError({
+                        operation: 'cancelled-opening',
+                        path: id,
+                        reason: 'uncertain',
+                        message:
+                          'The original Claude cancellation signal has no confirmed delivery.',
+                        cause,
+                      }),
+              })
+              return yield* Effect.tryPromise({
+                try: () => close({ kind: 'close', method: 'life/cancelled-opening-close' }),
+                catch: (cause) =>
+                  cause instanceof NativeRecoveryError
+                    ? cause
+                    : new NativeRecoveryError({
+                        operation: 'cancelled-opening',
+                        path: id,
+                        reason: 'uncertain',
+                        message: 'The original Claude cancelled opening has no confirmed exit.',
+                        cause,
+                      }),
+              })
+            }),
+          )
+          if (!confirmed)
+            return yield* this.recoveryError(
+              'cancelled-opening',
+              'The cancelled original Claude process has not confirmed exit.',
+            )
+          this.adoptFreshProviderChannel(durable)
+          this.clearFreshProviderFailure(id)
+        }.bind(this),
+      ).pipe(Effect.tapError((cause) => this.failFreshProviderChannelEffect(durable, cause)))
+      return undefined
+    }.bind(this),
+    Effect.scoped,
+  )
   private async startClaude(session: Session, reuse = false) {
     this.assertSessionMachine(session)
     const { input } = session
@@ -5715,6 +5863,13 @@ export class Agents {
       if (session.stopRequested || session.channel !== channel) return
       session.phase = 'running'
       await this.recordRecoveryOwner(session, channel)
+      if (
+        session.stopRequested ||
+        session.channel !== channel ||
+        this.sessions.get(input.sessionId) !== session
+      )
+        return
+      session.promptDispatchStarted = true
       await this.writeClaudeAndWait(
         session,
         object(session.nativeStartPlan.user),
@@ -5814,32 +5969,30 @@ export class Agents {
       },
     }
     session.claudeUsageCallId = randomUUID()
-    const channel = await this.providerChannel(
-      claudeLaunchCommand(session.workspace, args),
-      undefined,
-      'claude',
-      session.machineIdentity,
+    const opening = runEffect(
+      this.openClaudeProviderEffect(session, claudeLaunchCommand(session.workspace, args)),
     )
-    if (
-      this.sessions.get(input.sessionId) !== session ||
-      session.stopRequested ||
-      this.machineIdentity() !== session.machineIdentity
-    ) {
-      await this.failFreshProviderChannel(
-        channel as DurableChannel,
-        new Error('The original provider opening was cancelled before owner admission.'),
-      )
-      if (!(channel as DurableChannel).recoveryId) channel.close()
-      return
+    // This producer can outlive cancellation of the renderer-facing startup.
+    // Keep ownership through native retirement, not just until untilCancelled returns.
+    this.pendingNativeOperations.add(opening)
+    this.pendingNativeOperationMachines.set(opening, session.machineIdentity)
+    let channel: ClientChannel | undefined
+    try {
+      channel = await opening
+    } finally {
+      this.pendingNativeOperations.delete(opening)
     }
-    session.channel = channel
-    await this.recordRecoveryOwner(session, channel)
+    if (
+      !channel ||
+      session.stopRequested ||
+      session.channel !== channel ||
+      this.sessions.get(input.sessionId) !== session
+    )
+      return
     if (session.recoveryTransportId)
       session.claudeUsageCallId = `${session.recoveryTransportId}:generation:${session.recoveryGeneration}`
-    this.bindClaudeParser(session, channel)
     try {
       await this.claudeControl(session, object(session.nativeStartPlan.initialize), 60000)
-      if (session.stopRequested || session.channel !== channel) return
       if (session.stopRequested || session.channel !== channel) return
       session.phase = 'running'
       session.nativeStartPlan = {
@@ -5847,6 +6000,13 @@ export class Agents {
         user: { ...object(session.nativeStartPlan.user), session_id: session.remoteId || '' },
       }
       await this.recordRecoveryOwner(session, channel)
+      if (
+        session.stopRequested ||
+        session.channel !== channel ||
+        this.sessions.get(input.sessionId) !== session
+      )
+        return
+      session.promptDispatchStarted = true
       await this.writeClaudeAndWait(
         session,
         object(session.nativeStartPlan.user),
@@ -7616,6 +7776,8 @@ export class Agents {
         const rpc = [...this.codexTransports].find((candidate) => candidate.channel === channel)
         const machine =
           this.openingCodexChannels.get(channel) ??
+          [...this.freshProviderChannels.values()].find((claim) => claim.channel === channel)
+            ?.machine ??
           (rpc && this.codexTransportMachines.get(rpc)) ??
           [...this.sessions.values()].find((session) => session.channel === channel)
             ?.machineIdentity ??

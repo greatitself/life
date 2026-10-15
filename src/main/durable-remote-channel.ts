@@ -1782,6 +1782,9 @@ export class DurableRemoteChannel extends Duplex {
         this.finish()
         return false
       }
+      // TERM can prove native exit before a close envelope is allocated.
+      // No close receipt exists to await in that case; retain any allocated one.
+      if (this.exitReceived && !this.closing && this.closeInputSequence === undefined) return true
       if (this.recoveryOptions && !this.closing && !this.terminalAttachment) {
         // Retirement can race the original broker handshake. Stop the opening
         // from initializing a provider, then wait for its real delivery contract.

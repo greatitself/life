@@ -2098,6 +2098,43 @@ describe('durable provider channel cold recovery', () => {
       }),
   )
 
+  it('accepts confirmed native exit before close without allocating an unused close envelope', () =>
+    withStore(async (fixture) => {
+      const host = new Host()
+      const channel = await DurableRemoteChannel.open(
+        host,
+        'exec claude --output-format stream-json',
+        {
+          store: fixture.store,
+          provider: 'claude',
+        },
+      )
+      fixture.channels.add(channel)
+      await channel.signalNativeAndWait('TERM', { kind: 'transport', method: 'life/test-signal' })
+      let exited = false
+      channel.once('exit', () => {
+        exited = true
+      })
+      host.attachments[0].frame({
+        type: 'exit',
+        cursor: host.nextOutputCursor,
+        code: 0,
+        signal: null,
+        nativeExitConfirmed: true,
+      })
+      await vi.waitFor(() => expect(exited).toBe(true))
+      expect(await channel.closeNativeAndWait({ kind: 'close' }, 250)).toBe(true)
+      const snapshot = await Effect.runPromise(fixture.store.readTransport(channel.recoveryId!))
+      expect(snapshot.closeInputSequence).toBeUndefined()
+      expect(snapshot.inputs.map((input) => input.frame.type)).toEqual(['signal'])
+      expect(host.attachments[0].inputs).toHaveLength(1)
+      expect(
+        snapshot.outputs.some(
+          (output) => output.type === 'exit' && output.nativeExitConfirmed === true,
+        ),
+      ).toBe(true)
+    }))
+
   it('reports an unconfirmed close as false while retaining the owned terminal intent', () =>
     withStore(async (fixture) => {
       const host = new Host()

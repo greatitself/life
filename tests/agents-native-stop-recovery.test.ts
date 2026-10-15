@@ -635,7 +635,10 @@ function nextInput(provider: Provider, localTurn = 8): StartInput {
   }
 }
 
-function installLaunch(fixture: Fixture) {
+function installLaunch(
+  fixture: Fixture,
+  beforeReturn?: (channel: ReattachedChannel) => Promise<void>,
+) {
   const launched: ReattachedChannel[] = []
   fixture.ssh.durableChannel = vi.fn(async (command, onOpening, provider = 'codex') => {
     const id = `${fixture.transport.id}-next-${launched.length + 1}`
@@ -653,6 +656,7 @@ function installLaunch(fixture: Fixture) {
     const channel = new ReattachedChannel(id, fixture.store)
     launched.push(channel)
     onOpening?.(channel as unknown as ClientChannel)
+    if (beforeReturn) await beforeReturn(channel)
     return channel as unknown as ClientChannel
   })
   return launched
@@ -1875,6 +1879,98 @@ describe('Agents native Stop recovery boundaries', () => {
       expect(second.inputs.filter((input) => input.semantic.kind === 'user-prompt')).toHaveLength(1)
       expect(second.inputs.filter((input) => input.semantic.kind === 'interrupt')).toHaveLength(1)
       expect(second.outputs.some((output) => output.type === 'exit')).toBe(true)
+    }))
+
+  it.each([true, false])(
+    'a cancelled fresh Claude opening retains retirement ownership, exit confirmed = %s',
+    (confirmed) =>
+      withFixture('claude', async (fixture) => {
+        await admitOriginalPrompt(fixture)
+        const original = await recovered(fixture)
+        original.autoExitOnClose = true
+        await fixture.agents.stop('life-session')
+        const gate = Deferred.makeUnsafe<void>()
+        const launched = installLaunch(fixture, async (channel) => {
+          channel.autoExitOnClose = confirmed
+          await run(Deferred.await(gate))
+        })
+        const starting = fixture.agents.start(nextInput('claude'))
+        let joined = false
+        let handoff: Promise<void> | undefined
+        try {
+          await vi.waitFor(() => expect(launched).toHaveLength(1))
+          await fixture.agents.stop('life-session')
+          await starting
+          expect(launched[0].nativeWrites).toEqual([])
+          expect(fixture.agents.hasUntrackedRunningSessions()).toBe(true)
+          fixture.agents.suspendRendererConsumers()
+          handoff = fixture.agents.settleRendererHandoff().then(() => {
+            joined = true
+          })
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          expect(joined).toBe(false)
+        } finally {
+          Deferred.doneUnsafe(gate, Effect.void)
+          await starting
+          await handoff
+        }
+        expect(joined).toBe(true)
+        const channel = launched[0]
+        expect(channel.nativeWrites).toEqual([])
+        expect(channel.signalNativeAndWait).toHaveBeenCalledTimes(1)
+        expect(channel.closeNativeAndWait).toHaveBeenCalledTimes(1)
+        const snapshot = await run(fixture.store.readTransport(channel.recoveryId))
+        expect(snapshot.transport.owners).toEqual([])
+        expect(
+          snapshot.outputs.some(
+            (output) => output.type === 'exit' && output.nativeExitConfirmed === true,
+          ),
+        ).toBe(confirmed)
+        expect(await fixture.agents.rendererHandoffAdmitted()).toBe(confirmed)
+      }),
+  )
+
+  it('Claude Stop during the final owner checkpoint cannot send a prompt after acknowledgement', () =>
+    withFixture('claude', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const original = await recovered(fixture)
+      original.autoExitOnClose = true
+      await fixture.agents.stop('life-session')
+      const launched = installLaunch(fixture)
+      const input = nextInput('claude')
+      const gate = Deferred.makeUnsafe<void>()
+      let held = false
+      const target = fixture.agents as unknown as {
+        recordRecoveryOwner: (
+          session: { input: StartInput; phase: string; stopRequested: boolean },
+          channel: ClientChannel,
+        ) => Promise<void>
+      }
+      const record = target.recordRecoveryOwner.bind(fixture.agents)
+      vi.spyOn(target, 'recordRecoveryOwner').mockImplementation(async (session, channel) => {
+        await record(session, channel)
+        if (
+          !held &&
+          session.input === input &&
+          session.phase === 'running' &&
+          !session.stopRequested
+        ) {
+          held = true
+          await run(Deferred.await(gate))
+        }
+      })
+      const starting = fixture.agents.start(input)
+      try {
+        await vi.waitFor(() => expect(held).toBe(true))
+        launched[0].autoExitOnClose = true
+        await fixture.agents.stop('life-session')
+      } finally {
+        Deferred.doneUnsafe(gate, Effect.void)
+        await starting
+      }
+      expect(launched[0].nativeWrites.filter((entry) => entry.message.type === 'user')).toEqual([])
+      expect(interrupts(launched[0])).toEqual([])
+      expect(fixture.agents.hasRunningSessions()).toBe(false)
     }))
 
   it('an explicitly registered historical child retains its own generation during root Stop', () =>

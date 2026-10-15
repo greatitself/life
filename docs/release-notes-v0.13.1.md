@@ -10,7 +10,7 @@ Life 0.13.1 fixes the release-blocking test failures from 0.13.0.
 
 - Resume ordinary Windows documents through a document-owned platform check. A delayed support reply cannot resume a newer renderer, and observing platform support does not enter native replay admission or block a subsequent reload.
 
-- Stop cancels an ordinary turn still waiting for provider-start admission, including a follow-up after an earlier Stop. The new request cannot start later after being reported stopped, and a previous completion cannot acknowledge the new Stop. Renderer preparation is cancelled before a delayed connection reply can dispatch a stopped prompt. Codex also rechecks Stop and session ownership after native owner checkpoints, before dispatching a thread or prompt. Concurrent native Stop checks retain their follow-up observation when another check is already running.
+- Stop cancels an ordinary turn still waiting for provider-start admission, including a follow-up after an earlier Stop. The new request cannot start later after being reported stopped, and a previous completion cannot acknowledge the new Stop. Renderer preparation is cancelled before a delayed connection reply can dispatch a stopped prompt. Both providers recheck Stop and session ownership after native owner checkpoints, before dispatching a prompt. Concurrent native Stop checks retain their follow-up observation when another check is already running.
 
 The release pipeline requires successful verification of the exact source commit before installer publication. Typecheck, unit/integration tests, the production build, browser/Electron workflows, native fixtures, packaged compatibility, and Windows upgrade results are recorded in GitHub Actions. Fixture checks do not establish authenticated upstream-provider behavior.
 
@@ -19,3 +19,5 @@ The platform and experimental active-session-recovery limits described in 0.13.0
 Renderer replacement joins accepted native Stop, startup, permission, and owner-checkpoint work before evaluating the existing ownership gate. A timeout keeps the replacement paused and preserves the original native operation.
 
 A failed provider opening can finish renderer handoff once its exact original native exit is durably confirmed. Missing, unconfirmed, or unrelated-machine exit evidence keeps the original ownership block in place.
+
+Cancelled Claude openings retain retirement ownership until native exit is confirmed. An opening cancelled before owner admission sends neither initialization nor a user prompt. A provider that has already confirmed exit no longer waits for a close receipt when no close envelope was issued.

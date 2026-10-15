@@ -2976,6 +2976,7 @@ export function App() {
               dialog={streamlinedWorkspace}
               onOpenChange={setStudioOpen}
               connection={connection}
+              documentRecoveryReady={nativeRecoveryReady}
               config={config}
               extensions={extensions}
               source={sourceUI}

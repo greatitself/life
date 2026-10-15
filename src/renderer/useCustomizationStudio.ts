@@ -89,6 +89,8 @@ interface StudioRun {
 
 export interface StudioOptions {
   connection: ConnectionState
+  /** Main conversation recovery shares the native admission guard. */
+  documentRecoveryReady?: boolean
   config: LifeConfig
   extensions: LifeExtensionsSnapshot
   source: LifeSourceSnapshot
@@ -1666,7 +1668,12 @@ export function useCustomizationStudio(options: StudioOptions) {
     if (!active) return
     let disposed = false
     setModels(fallbackModelCatalog(active.thread.provider))
-    if (api && nativeRecoveryReady && options.connection.status === 'connected')
+    if (
+      api &&
+      nativeRecoveryReady &&
+      options.documentRecoveryReady !== false &&
+      options.connection.status === 'connected'
+    )
       void api.agent
         .models(active.thread.provider)
         .then((next) => {
@@ -1681,6 +1688,7 @@ export function useCustomizationStudio(options: StudioOptions) {
     options.connection.status,
     options.connection.profile?.id,
     nativeRecoveryReady,
+    options.documentRecoveryReady,
   ])
 
   useEffect(() => {

@@ -122,6 +122,7 @@ export function CustomizationStudio({
   dialog = false,
   onOpenChange,
   connection,
+  documentRecoveryReady,
   config,
   extensions,
   source,
@@ -142,6 +143,7 @@ export function CustomizationStudio({
 }) {
   const studio = useCustomizationStudio({
     connection,
+    documentRecoveryReady,
     config,
     extensions,
     source,

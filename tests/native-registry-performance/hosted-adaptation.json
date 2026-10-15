@@ -1,0 +1,18 @@
+{
+  "scope": "Portable existing benchmark fixture and exact historical source/compiled baseline; NOT an execution or timing result",
+  "archiveSha256": "1aa8c822d5006a88b8d7b0f6f4d942a5f613c76e51f181cc93f894e6f3c21102",
+  "unchangedPreparedFixtures": [
+    "provider.cjs",
+    "probes.cjs",
+    "identity.cjs",
+    "ssh-fixture.cjs",
+    "harness/active-session-recovery-steps.cjs",
+    "harness/desktop-history.cjs",
+    "harness/ssh-fixture.ts"
+  ],
+  "runnerChanges": "Only source/baseline/helper/bundle path adapters, comment and formatting",
+  "gate": "Dispatch only after complete full CI success; validate exact source SHA and downloaded build before and after samples",
+  "baselineContains": "364 application source/compiled files; no installed dependencies or user profile",
+  "syntaxChecked": true,
+  "executed": false
+}

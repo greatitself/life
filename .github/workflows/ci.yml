@@ -1,396 +1,83 @@
-name: Verify Life
+name: Life matched native performance closure
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
     inputs:
-      windows_only:
-        description: 'Run only packaged Windows compatibility while diagnosing that gate'
-        required: false
-        default: false
-        type: boolean
+      candidate_source:
+        description: 'Exact source commit with all functional CI gates passed'
+        required: true
+        type: string
+      verified_run:
+        description: 'Successful full Verify Life run for that source commit'
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  unit-tests:
-    name: Unit shard ${{ matrix.shard }}/4
-    if: inputs.windows_only != true
+  matched-native-performance:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        shard: [1, 2, 3, 4]
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CANDIDATE_SOURCE: ${{ inputs.candidate_source }}
+      VERIFIED_RUN: ${{ inputs.verified_run }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_source }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .performance-inputs
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - name: Run every test in this shard with one worker
-        timeout-minutes: 30
+      - name: Require complete functional verification of the exact source
         shell: bash
         run: |
           mkdir -p output
-          npm test -- --maxWorkers=1 --shard=${{ matrix.shard }}/4 --reporter=verbose 2>&1 | tee output/unit-shard-${{ matrix.shard }}.log
-      - name: Save unit test results even after failure
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-unit-shard-${{ matrix.shard }}-log
-          path: output/unit-shard-${{ matrix.shard }}.log
-          if-no-files-found: warn
-
-  verify:
-    if: inputs.windows_only != true
-    needs: unit-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - name: Capture source before the Linux build
-        run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
-      - run: npm run build
-      - name: Record the Linux compiled build
-        shell: bash
-        run: |
-          node scripts/record-recovery-build.cjs capture-source output/linux-source-after.json
+          gh run view "$VERIFIED_RUN" --repo greatitself/life --json status,conclusion,headSha,jobs > output/performance-upstream-run.json
           node <<'NODE'
           const assert = require('node:assert/strict')
           const fs = require('node:fs')
-          const path = require('node:path')
-          const crypto = require('node:crypto')
-          const child = require('node:child_process')
-          const before = JSON.parse(fs.readFileSync('output/linux-source-before.json'))
-          const after = JSON.parse(fs.readFileSync('output/linux-source-after.json'))
-          assert.deepEqual(after, before, 'Source changed during the build')
-          const compiled = []
-          function visit(name) {
-            const stat = fs.lstatSync(name)
-            assert(!stat.isSymbolicLink(), 'Compiled links are rejected')
-            if (stat.isDirectory()) {
-              for (const entry of fs.readdirSync(name).sort()) visit(path.join(name, entry))
-            } else {
-              assert(stat.isFile())
-              const bytes = fs.readFileSync(name)
-              compiled.push({ path: name, mode: stat.mode & 0o7777, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') })
-            }
-          }
-          visit('out')
-          const sourceCommit = child.execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-          fs.writeFileSync('output/linux-compiled-build.json', JSON.stringify({ sourceCommit, platform: process.platform, arch: process.arch, source: before.sourceBefore, compiled }, null, 2) + '\n')
+          const proof = JSON.parse(fs.readFileSync('output/performance-upstream-run.json'))
+          assert.match(process.env.CANDIDATE_SOURCE, /^[a-f0-9]{40}$/)
+          assert.equal(proof.headSha, process.env.CANDIDATE_SOURCE)
+          assert.equal(proof.status, 'completed')
+          assert.equal(proof.conclusion, 'success')
+          for (const name of ['verify', 'Linux native active recovery', 'Windows packaged native compatibility'])
+            assert(proof.jobs.some(job => job.name === name && job.conclusion === 'success'), name)
+          assert.equal(proof.jobs.filter(job => /^Linux native /.test(job.name) && job.name !== 'Linux native active recovery' && job.conclusion === 'success').length, 11)
+          assert.equal(proof.jobs.filter(job => /^Linux metadata quit /.test(job.name) && job.conclusion === 'success').length, 4)
           NODE
+          gh run download "$VERIFIED_RUN" --repo greatitself/life --name life-linux-verified-build --dir .
+      - run: npm ci
+      - name: Verify exact source and compiled artifact
+        run: node tests/helpers/verified-ci-build.cjs
       - run: npx playwright install chromium --with-deps
-      - run: npm run test:recovery
-      - run: node tests/thread-queue-smoke.cjs
-      - run: node tests/thread-presentation-smoke.cjs
-      - run: node tests/studio-lifecycle-smoke.cjs
-      - run: node tests/app-live-controls-smoke.cjs
-      - run: node tests/app-live-controls-smoke.cjs --presentation
-      - run: node tests/app-live-controls-smoke.cjs --history-hydration
-      - run: node tests/app-live-controls-smoke.cjs --provider-utilities
-      - run: node tests/app-live-controls-smoke.cjs --fluidity
-      - name: Verify thread organization and draft workflows
-        run: node tests/thread-workflows-smoke.cjs
-      - run: node tests/transcript-performance.cjs current
-      - run: node tests/agent-event-batch-performance.cjs
-      - run: node tests/sidebar-history-performance.cjs current
-      - run: node tests/conversation-history-performance.cjs
-      - run: node tests/workspace-surfaces-performance.cjs
-      - run: node tests/conversation-scroll-performance.cjs
-      - run: node tests/thread-message-navigator-smoke.cjs
-      - run: node tests/thread-finder-timeline-smoke.cjs
-      - run: node tests/settled-markdown-smoke.cjs
-      - run: node tests/native-checkpoint-performance.cjs
-      - run: npm run test:checkpoints
-      - run: npm run test:loads
-      - run: node tests/studio-layout-smoke.cjs
-      - run: node tests/run-selectors-smoke.cjs
-      - run: node tests/research-method-ui-smoke.cjs
-      - run: node tests/provider-request-ui-smoke.cjs
-      - run: node tests/conversation-scroll-smoke.cjs
-      - run: node tests/provider-updates-ui-smoke.cjs
-      - run: node tests/usage-smoke.cjs
-      - run: node tests/updates-ui-smoke.cjs
-      - run: node tests/graph-canvas-smoke.cjs
-      - run: node tests/deferred-dialogs-smoke.cjs
-      - run: npm run test:desktop
-      - run: npm run format:check
-      - name: Save the verified Linux build for native checks
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-linux-verified-build
-          path: |
-            out/
-            output/linux-source-before.json
-            output/linux-source-after.json
-            output/linux-compiled-build.json
-          if-no-files-found: error
-
-  linux-active-recovery:
-    name: Linux native active recovery
-    if: github.event_name == 'workflow_dispatch'
-    needs: verify
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: life-linux-verified-build
-      - run: node tests/helpers/verified-ci-build.cjs
-      - run: npx playwright install-deps chromium
-      - name: Verify SSH recovery, source commits, and renderer reload
-        run: npm run test:active-recovery
-      - name: Verify Local Codex active recovery
-        run: node tests/active-recovery-run.cjs local-codex-stream
-      - name: Verify Local Claude approval recovery
-        run: node tests/active-recovery-run.cjs local-claude-approval
-      - name: Verify the original source and compiled build are preserved
-        run: node tests/helpers/verified-ci-build.cjs
-      - name: Save active recovery evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-linux-active-recovery-proof
-          path: output/playwright/active-recovery-run/
-          if-no-files-found: warn
-
-  linux-native-workflows:
-    name: Linux native ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch'
-    needs: verify
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          - {
-              name: local-switch,
-              fixture: local-switch-native-smoke.cjs,
-              external_display: true,
-              packaged: false,
-            }
-          - {
-              name: streaming,
-              fixture: conversation-streaming-electron-smoke.cjs,
-              external_display: true,
-              packaged: false,
-            }
-          - {
-              name: navigation,
-              fixture: renderer-navigation-electron-smoke.cjs,
-              external_display: true,
-              packaged: false,
-            }
-          - {
-              name: ownership,
-              fixture: renderer-ownership-hmr-electron-smoke.cjs,
-              external_display: true,
-              packaged: false,
-            }
-          - {
-              name: dispatch,
-              fixture: renderer-document-dispatch-electron-smoke.cjs,
-              external_display: false,
-              packaged: false,
-            }
-          - {
-              name: studio,
-              fixture: studio-native-checkpoint-smoke.cjs,
-              external_display: false,
-              packaged: false,
-            }
-          - {
-              name: ordinary-draft,
-              fixture: ordinary-draft-native-checkpoint-smoke.cjs,
-              external_display: false,
-              packaged: false,
-            }
-          - {
-              name: local-source,
-              fixture: local-native-smoke.cjs,
-              external_display: true,
-              packaged: false,
-            }
-          - {
-              name: helpers-source,
-              fixture: local-owned-helpers-native.cjs,
-              external_display: false,
-              packaged: false,
-            }
-          - {
-              name: local-package,
-              fixture: local-native-smoke.cjs,
-              external_display: true,
-              packaged: true,
-            }
-          - {
-              name: helpers-package,
-              fixture: local-owned-helpers-native.cjs,
-              external_display: false,
-              packaged: true,
-            }
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      LIFE_TEST_EXPECT_ARCHIVE_LOSS: '0'
-      LIFE_TEST_EXPECT_DRAFT_LOSS: '0'
-      LIFE_TEST_EXPECT_SOURCE_LOSS: '0'
-      LIFE_TEST_EXPECT_DOCUMENT_DISPATCH: rejected
-      LIFE_TEST_HMR_POLICY: guarded
-      LIFE_SWITCH_EXPECT_BEFORE: '0'
-      LIFE_SWITCH_ROUTES: disconnect,connect
-      LIFE_NAVIGATION_FIXTURE_XVFB: '1'
-      LIFE_TEST_PRIVATE_LOCAL_APPENDS_XVFB: '1'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: life-linux-verified-build
-      - run: node tests/helpers/verified-ci-build.cjs
-      - run: npx playwright install-deps chromium
-      - name: Package the exact compiled application
-        if: matrix.packaged
-        run: npx electron-builder --linux --x64 --dir --publish never
-      - name: Verify the packaged native filesystem
-        if: matrix.name == 'local-package'
+      - name: Prepare the frozen baseline and identical current dependencies
+        run: node .performance-inputs/tests/native-registry-performance/hosted-prepare.cjs
+      - name: Run the existing eight matched pairs and separate durability probe
         env:
-          LIFE_RECOVERY_BUILD_PROVENANCE: output/recovery-release-build.json
+          LIFE_NATIVE_REGISTRY_REPOSITORY: ${{ github.workspace }}
+          LIFE_NATIVE_REGISTRY_BASELINE: ${{ github.workspace }}/output/immutable-app/performance-baseline
+          LIFE_NATIVE_REGISTRY_ATTEMPT: ${{ github.workspace }}/output/native-registry-performance/attempt
         run: |
-          node scripts/record-recovery-build.cjs seal output/linux-source-before.json release/linux-unpacked/life-desktop output/recovery-release-build.json
-          node tests/native-recovery-filesystem-probe.cjs release/linux-unpacked/life-desktop output/native-recovery-filesystem-probe/linux-x64.json
-      - name: Run the existing native fixture in this disposable runner
-        shell: bash
-        run: |
-          export LIFE_TEST_APP_ROOT="$PWD"
-          export LIFE_TEST_APP_PATH="$PWD"
-          export LIFE_TEST_ARTIFACTS_DIR="$PWD/output/release-native/${{ matrix.name }}"
-          export LIFE_TEST_SCREENSHOTS_DIR="$LIFE_TEST_ARTIFACTS_DIR/screenshots"
-          export LIFE_TEST_BACKGROUND_PID="$BASHPID"
-          if [[ '${{ matrix.packaged }}' == 'true' ]]; then
-            export LIFE_ELECTRON_BINARY="$PWD/release/linux-unpacked/life-desktop"
-            export LIFE_HELPER_SOURCE_ROOT="$PWD/release/linux-unpacked/resources/life-source/src"
-            export LIFE_TEST_SOURCE=0 LIFE_TEST_PACKAGED=1
-          else
-            export LIFE_HELPER_SOURCE_ROOT="$PWD/src"
-            export LIFE_TEST_SOURCE=1 LIFE_TEST_PACKAGED=0
-          fi
-          if [[ '${{ matrix.external_display }}' == 'true' ]]; then
-            xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp -extension MIT-SHM' node 'tests/${{ matrix.fixture }}'
-          else
-            node 'tests/${{ matrix.fixture }}'
-          fi
-      - name: Verify the original source and compiled build are preserved
+          mkdir -p "$LIFE_NATIVE_REGISTRY_ATTEMPT"
+          node .performance-inputs/tests/native-registry-performance/run-paired.cjs --candidate "$GITHUB_WORKSPACE/output/immutable-app/performance-candidate" --lease "$GITHUB_WORKSPACE/output/native-registry-performance/quiet-lease.json"
+      - name: Reverify the candidate source and compiled artifact
+        if: always()
         run: node tests/helpers/verified-ci-build.cjs
-      - name: Save native workflow evidence
+      - name: Retain measurements and failure evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: life-linux-native-${{ matrix.name }}-proof
+          name: life-matched-native-performance
           path: |
-            output/release-native/
-            output/playwright/
-            output/native-recovery-filesystem-probe/
-            output/recovery-release-build.json
-          if-no-files-found: warn
-
-  linux-metadata-quit:
-    name: Linux metadata quit ${{ matrix.mode }}
-    if: github.event_name == 'workflow_dispatch'
-    needs: verify
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        mode: [local-allocated, ssh-allocated, local-preallocation, ssh-preallocation]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: life-linux-verified-build
-      - id: build
-        run: node tests/helpers/verified-ci-build.cjs
-      - run: npx playwright install-deps chromium
-      - name: Verify normal quit during cold metadata startup
-        env:
-          LIFE_TEST_APP_PATH: ${{ github.workspace }}
-          LIFE_FIXTURE_REPOSITORY: ${{ github.workspace }}
-          LIFE_METADATA_QUIT_EXPECT_MAIN_SHA256: ${{ steps.build.outputs.main_sha256 }}
-          LIFE_METADATA_QUIT_CASE: ${{ matrix.mode }}
-          LIFE_METADATA_QUIT_ARTIFACTS: ${{ github.workspace }}/output/metadata-startup-quit/${{ matrix.mode }}
-        run: node tests/metadata-startup-quit/owned-runner.cjs
-      - name: Verify the original source and compiled build are preserved
-        run: node tests/helpers/verified-ci-build.cjs
-      - name: Save cold metadata quit evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-linux-metadata-quit-${{ matrix.mode }}-proof
-          path: output/metadata-startup-quit/
-          if-no-files-found: warn
-
-  windows-native-recovery:
-    name: Windows packaged native compatibility
-    runs-on: windows-latest
-    timeout-minutes: 25
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - name: Capture source before the release build
-        run: node scripts/record-recovery-build.cjs capture-source output/recovery-source-before.json
-      - run: npm run build
-      - name: Build unpacked Windows application
-        run: npx electron-builder --win --x64 --dir --publish never
-      - name: Seal build and package provenance
-        run: node scripts/record-recovery-build.cjs seal output/recovery-source-before.json release/win-unpacked/Life.exe output/recovery-release-build.json
-      - name: Verify packaged Windows native compatibility
-        shell: pwsh
-        run: ./tests/windows-native-recovery-compatibility.ps1 -BuildProvenance output/recovery-release-build.json
-      - name: Save Windows compatibility evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: life-windows-native-recovery-proof
-          path: |
-            output/windows-native-recovery-compatibility/
-            output/recovery-source-before.json
-            output/recovery-release-build.json
+            output/native-registry-performance/
+            output/performance-upstream-run.json
           if-no-files-found: error

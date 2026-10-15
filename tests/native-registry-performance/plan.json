@@ -1,0 +1,97 @@
+{
+  "status": "author-only; syntax readiness only; no runtime or timing execution authorized",
+  "workingDirectory": "/root/research-work/active-session-recovery",
+  "adapterDirectory": "output/native-registry-performance",
+  "baseline": "/root/.local/share/life-feedback-runtime/apps/streaming-checkpoints-9142998",
+  "candidate": "future immutable output/immutable-app/ssh-candidate-* published after functional proof",
+  "executeOnlyAfter": [
+    "candidate source, out and dependency graphs frozen and functional native recovery proof passed",
+    "explicit parent GO for this exact benchmark adapter",
+    "explicit live Root quiet lease covering all measured intervals and private cleanup"
+  ],
+  "command": "node output/native-registry-performance/run-paired.cjs --candidate /absolute/immutable/ssh-candidate-path --lease /absolute/parent-issued-quiet-lease.json",
+  "leaseRequiredFields": {
+    "rootQuietLeaseId": "Root-issued opaque quiet lease identity",
+    "parentGoId": "Parent-issued explicit benchmark GO identity",
+    "candidatePath": "exact immutable candidate path",
+    "fixtureSha256": "exact run-paired.cjs SHA256 from preparation manifest",
+    "validFrom": "UTC ISO timestamp",
+    "validUntil": "UTC ISO timestamp covering sixteen samples, separate durability probe, cleanup and fingerprint rechecks"
+  },
+  "leasePolicy": "The preparer never creates or approves its own lease. The runner checks the live lease before every new application and measured phase; expiry aborts further work and cleans only owned resources.",
+  "pairedRuns": {
+    "sequence": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "matchedPairs": 8,
+    "freshPrivateApplicationAndSSHServerPerRun": true,
+    "pairedTimingHooks": "small4ms renderer/main timers and transparent original history-IPC handler boundaries only; no filesystem hooks, no WAL-buffer accumulation, no worker-message hooks",
+    "phases": [
+      "bulk: actual native8Mi UTF-16 body emitted as eight1Mi deltas under one existing thread/turn/item",
+      "tail: exact2Ki UTF-16 suffix appended to the owned8Mi response, then actual App history flush"
+    ]
+  },
+  "candidateOnlyDurabilityProbe": {
+    "runs": 1,
+    "comparisonScope": "excluded from paired timing medians and differences",
+    "observation": "transparent main FileHandle.write/sync and worker-message observations return original Promises and inputs unchanged; buffers are retained and decoded after timing",
+    "evidence": "actual private projection admission; matching protected worker ACK; exact history prepare and native ACK; exact successful native journal sync; matching final native history bytes and protected sidecar receipt"
+  },
+  "sameFixture": {
+    "nativeProvider": "private deterministic Codex app-server stand-in with discovery codex-cli0.162.1, never installed CLI/authentication/inference",
+    "transport": "real loopback SSH/SFTP and the app's unmodified detached native broker",
+    "prompt": "one original exact textarea prompt submitted through the actual App UI exactly once",
+    "projection": "actual App listener/reducer/persistence/private native ownership path, no synthetic cursor/token/projection or imported owned thread",
+    "providerDiskWork": "stream body kept in memory; one final provider archive write outside measurements, avoiding quadratic fixture-side disk work",
+    "completion": "small pinned native Turn with itemsView:notLoaded, then thread idle; no oversized full final item replacement",
+    "helpers": "frozen RecoveryHarness and desktop-history helper plus existing frozen SSH bundle reused without modifications",
+    "notThe39CaseFixture": "separate new benchmark adapter; original matched6 recovery inputs remain unchanged"
+  },
+  "metrics": {
+    "matched": [
+      "armed-renderer-to-output-observer interval and response throughput, including command delivery/private provider polling and excluding subsequent flush submission",
+      "4ms renderer timer maximum delay",
+      "4ms main timer maximum delay",
+      "actual App flush synchronous submission call-to-Promise return",
+      "actual App flush Promise settlement interval",
+      "actual native history IPC API ACK interval and packet size"
+    ],
+    "candidateOnly": [
+      "raw wire WAL committed bytes/batch count and observed successful sync intervals",
+      "exact native protected history preparation and ACK sync evidence"
+    ],
+    "baselineCommitSemantics": "Read-only inspection of immutable baseline source and actual compiled worker confirms atomic temporary file write/sync/close/rename, followed by API ACK; no parent-history-directory sync. Label matched interval API ACK latency, not identical durable directory guarantee.",
+    "candidateCommitSemantics": "Protected worker path additionally admits exact private ownership, stages protected proof, commits file and directory before its worker ACK. Separate native journal ACK is proved by the candidate-only successful sync observation.",
+    "noOldWalRatio": "The immutable baseline has no native registry or protected history API; absent capabilities have no invented throughput or fsync timing comparison."
+  },
+  "identityAndCleanup": [
+    "Full immutable app source/output/modes fingerprints before and after all samples",
+    "Same exact current installed dependency tree/modes/internal symlinks and Electron/Node executable bytes fingerprinted before and after both versions",
+    "Historical baseline publication lacks installed-byte fingerprint; these new runs establish current matched installed bytes only",
+    "Private ports, remote HOME/workspace, XDG profile, display, main/renderer/provider/broker PID identities and intervals retained in unique attempt artifacts",
+    "All exact tracked private processes absent from proc, including zombies, before deleting owned private profiles; no live/shared process signals",
+    "Owned private Xvfb socket/lock absence recorded after outer runner exits"
+  ],
+  "limits": [
+    "Release-file interval includes up to10ms private provider polling and observer checks; it is explicitly an end-to-end fixture measurement",
+    "Optional hashes, snapshot/proof JSON encoding, source/dependency walks, disk reads and correctness checks occur outside timed phases; native protocol JSON encoding/emission, small release logs and the identical SSH harness broker-frame observer remain inside end-to-end delivery timing",
+    "Fixture protocol and App workflow proof are distinct from authenticated upstream provider use",
+    "No hardware-independent latency threshold or claim that durability adds zero overhead",
+    "All failures preserve unique attempt artifacts; dependent retries require diagnosis and renewed parent GO"
+  ]
+}

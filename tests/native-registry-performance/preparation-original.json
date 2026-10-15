@@ -1,0 +1,151 @@
+{
+  "format": "life-native-registry-performance-preparation",
+  "version": 1,
+  "status": "syntax-checked-not-executed",
+  "capturedAt": "2026-10-14T16:39:24.579220+00:00",
+  "inputs": [
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/provider.cjs",
+      "bytes": 11419,
+      "sha256": "2ad795cbd9a003efb5e50b471f758cbb2988a53778670abdd5ba202d8ed57f7f"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/probes.cjs",
+      "bytes": 11646,
+      "sha256": "f8b702c9fe7c71782f238a5b896c6e55c8312203f3eeb338404e0833dd271efc"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/identity.cjs",
+      "bytes": 3084,
+      "sha256": "862a4445aa95893a2d75118abc7cee05cacd07d3011331a985ec3d4acd3f4f6a"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/run-paired.cjs",
+      "bytes": 29213,
+      "sha256": "38e4a70db8d353135de582499886602566b7c6e205bb9d6f0a59c7c4616dc027"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/plan.json",
+      "bytes": 6974,
+      "sha256": "b6122934c9a6e0f90384c6b5feb105d16e4333ddff881a1c6bff74bb399e2f5c"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/native-registry-performance/README.md",
+      "bytes": 3458,
+      "sha256": "a7d73be3c2e9e6ed854a0cc112d90c481ea1debcde7753a773d5184496cc9632"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/tests/helpers/active-session-recovery-steps.cjs",
+      "bytes": 37433,
+      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/tests/helpers/desktop-history.cjs",
+      "bytes": 423,
+      "sha256": "48c1f98263dc463cd5c3b8f7981367d23e03f785c4681ba6f9084b560330b21f"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/tests/helpers/ssh-fixture.ts",
+      "bytes": 12920,
+      "sha256": "d1648f4c52e5ab818c6c270f40b9c4d65c4702000fcd027474b98c74b229b194"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/output/playwright/active-session-recovery-baseline-full/ssh-fixture.cjs",
+      "bytes": 13867,
+      "sha256": "46b717c268ca2a347db1401da5d3840c47c87e4610cec3a1f1fa097f64fcb990"
+    },
+    {
+      "path": "/root/research-work/active-session-recovery/package-lock.json",
+      "bytes": 409278,
+      "sha256": "68ca05d545296f2c05f9bff7d959afda44b11f51511b0b410d3c339a2197a4bc"
+    }
+  ],
+  "checks": {
+    "nodeSyntax": {
+      "commands": [
+        "node --check output/native-registry-performance/provider.cjs",
+        "node --check output/native-registry-performance/probes.cjs",
+        "node --check output/native-registry-performance/identity.cjs",
+        "node --check output/native-registry-performance/run-paired.cjs"
+      ],
+      "exitCodes": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "format": {
+      "command": "./node_modules/.bin/prettier --ignore-path /dev/null --check output/native-registry-performance/{provider,probes,identity,run-paired}.cjs output/native-registry-performance/plan.json output/native-registry-performance/README.md",
+      "exitCode": 0,
+      "explicitIgnoreOverride": true
+    }
+  },
+  "matchedSixRecoveryInputsUnchanged": [
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "bytes": 54864,
+      "sha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "bytes": 37433,
+      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-provider.cjs",
+      "bytes": 43671,
+      "sha256": "bec9cf3b2649c9a79c25e28564957623c027366b0a78e7caa8c0322d6cfdc983"
+    },
+    {
+      "path": "tests/helpers/ssh-fixture.ts",
+      "bytes": 12920,
+      "sha256": "d1648f4c52e5ab818c6c270f40b9c4d65c4702000fcd027474b98c74b229b194"
+    },
+    {
+      "path": "tests/helpers/desktop-history.cjs",
+      "bytes": 423,
+      "sha256": "48c1f98263dc463cd5c3b8f7981367d23e03f785c4681ba6f9084b560330b21f"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 409278,
+      "sha256": "68ca05d545296f2c05f9bff7d959afda44b11f51511b0b410d3c339a2197a4bc"
+    }
+  ],
+  "baselineCommitContract": {
+    "inputs": [
+      {
+        "path": "/root/.local/share/life-feedback-runtime/apps/streaming-checkpoints-9142998/src/main/persistence-effects.ts",
+        "bytes": 1809,
+        "sha256": "04a29b0f8c947a64407efa40309e90ea8c9ff1b34ba22e7210357ccbeb0a7c92"
+      },
+      {
+        "path": "/root/.local/share/life-feedback-runtime/apps/streaming-checkpoints-9142998/src/main/conversation-checkpoint-engine.ts",
+        "bytes": 16103,
+        "sha256": "72af84dad840c87b08e914955c6efaf6e6f951fc4f946f6a9ea3c075e7c8e497"
+      },
+      {
+        "path": "/root/.local/share/life-feedback-runtime/apps/streaming-checkpoints-9142998/out/main/conversation-checkpoint-worker.js",
+        "bytes": 729944,
+        "sha256": "914299899da3143151183be4d7004204d136c9ff692804cdd570b8b7bd6460f4"
+      }
+    ],
+    "compiledWorkerFileSyncBeforeRename": true,
+    "compiledHistoryDirectorySyncPresent": false,
+    "scope": "Atomic temporary file sync/close then rename and API ACK. No claim of baseline parent-directory durability."
+  },
+  "execution": {
+    "tests": false,
+    "build": false,
+    "browser": false,
+    "electron": false,
+    "provider": false,
+    "authentication": false,
+    "performance": false,
+    "quietLeaseRequestedOrCreated": false
+  },
+  "writesConfinedTo": "/root/research-work/active-session-recovery/output/native-registry-performance",
+  "candidateAppFrozen": false,
+  "nextRequired": "Parent explicit GO and live Root quiet lease after native functional proof."
+}

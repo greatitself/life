@@ -685,9 +685,6 @@ async function launch(userData, fixture, name) {
     await page.evaluate(() => {
       window.__windowsNativeEvents = []
       window.relay.onAgent((event) => window.__windowsNativeEvents.push(event))
-      window.relay.onHostKey((request) => {
-        void window.relay.connection.trust(request.id, true)
-      })
     })
     return { application, page, identity, rendererErrors, logs }
   } catch (error) {
@@ -697,10 +694,25 @@ async function launch(userData, fixture, name) {
 }
 
 async function connect(page, fixture) {
-  const state = await page.evaluate(
-    (input) => window.relay.connection.connect(input),
-    fixture.input(),
-  )
+  await page.evaluate((input) => {
+    window.__windowsGateConnection = { settled: false }
+    void window.relay.connection.connect(input).then(
+      (state) => {
+        window.__windowsGateConnection = { settled: true, state }
+      },
+      (error) => {
+        window.__windowsGateConnection = { settled: true, error: String(error) }
+      },
+    )
+  }, fixture.input())
+  await waitUntil(async () => {
+    const trust = page.getByRole('button', { name: 'Trust and connect', exact: true })
+    if (await trust.isVisible()) await trust.click()
+    const attempt = await page.evaluate(() => window.__windowsGateConnection)
+    if (attempt.error) throw new Error(attempt.error)
+    return attempt.settled
+  }, 'native connection and its real host-key confirmation')
+  const state = await page.evaluate(() => window.__windowsGateConnection.state)
   assert.equal(state.status, 'connected')
   const selected = await page.evaluate(
     (workspace) => window.relay.connection.selectWorkspace(workspace),

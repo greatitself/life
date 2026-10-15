@@ -532,7 +532,6 @@ export function useCustomizationStudio(options: StudioOptions) {
         if (supportBlocksMutation() || recoveryInFlight.current) return
         const epoch = recoveryEpoch.current
         const prepared = historyOwner.current.prepare(next)
-        const snapshotId = crypto.randomUUID()
         const receipts: Parameters<
           NonNullable<NonNullable<typeof api>['agent']['acknowledgeRecoveryHistory']>
         >[0][] = []
@@ -576,6 +575,8 @@ export function useCustomizationStudio(options: StudioOptions) {
               continue
             // Historical cursors remain in the transcript. Only its exact
             // current owner can prepare a cache checkpoint for this planner.
+            // Rows sharing a provider transport have different bytes and owners.
+            const snapshotId = crypto.randomUUID()
             const planner = run
               ? capturePlanner(session.id, run)
               : parseStudioPlannerRecovery(owner.clientRecovery)

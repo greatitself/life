@@ -47,3 +47,5 @@ Studio can rebuild a missing cache from the current document’s exact native re
 Studio waits for its native owner before checkpointing a restored cache and resumes a planner that was waiting for reconnect. A programmatic renderer reload during window close joins the existing shutdown boundary, preserving orderly native exit.
 
 Studio binds its registered native workspace before replay, so reconnecting preserves its projection proof while mutation controls continue to follow native ownership.
+
+Recovered Studio planners restore their active planning stage after native ownership returns. Recovery claims distinguish the last acknowledged cache occurrence from a newer live projection, preserving exact cache-hash checks while allowing a genuine replay tail to continue.

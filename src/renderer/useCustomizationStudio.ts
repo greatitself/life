@@ -116,6 +116,7 @@ export function useCustomizationStudio(options: StudioOptions) {
   const [models, setModels] = useState<ModelOption[]>([])
   const [feedback, setFeedback] = useState(history.storageError || '')
   const [notice, setNotice] = useState('')
+  const recoveryFeedback = useRef('')
   const [autoApply, setAutoApply] = useState(true)
   const current = useRef(sessions)
   const latest = useRef(options)
@@ -1563,6 +1564,7 @@ export function useCustomizationStudio(options: StudioOptions) {
         )
         .map(async (session) => {
           const row = historyOwner.current.recoveryRow(session)
+          const currentCache = studioRecoveryCacheRow(session.thread)
           return {
             kind: 'studio' as const,
             sessionId: session.id,
@@ -1570,7 +1572,7 @@ export function useCustomizationStudio(options: StudioOptions) {
             ...(session.thread.workspace ? { workspace: session.thread.workspace } : {}),
             ...(session.thread.remoteId ? { remoteId: session.thread.remoteId } : {}),
             ...(session.thread.nativeRecovery ? { applied: session.thread.nativeRecovery } : {}),
-            ...(row !== undefined ? { cacheHash: await cacheHash(row) } : {}),
+            ...(row !== undefined && currentCache ? { cacheHash: await cacheHash(row) } : {}),
             ...(nativeProjectionAdmissions([session.thread])
               ? {
                   projectionAdmissions: nativeProjectionAdmissions([session.thread]),
@@ -1675,11 +1677,17 @@ export function useCustomizationStudio(options: StudioOptions) {
           }
         }
         const uncertain = owners.find((owner) => owner.status === 'unknown')
-        if (uncertain)
-          setFeedback(
+        if (uncertain) {
+          const message =
             uncertain.message ||
-              'Life could not verify the original native Studio owner. Sending and permission responses stay paused; the conversation is preserved.',
-          )
+            'Life could not verify the original native Studio owner. Sending and permission responses stay paused; the conversation is preserved.'
+          recoveryFeedback.current = message
+          setFeedback(message)
+        } else {
+          const previous = recoveryFeedback.current
+          recoveryFeedback.current = ''
+          setFeedback((message) => (message === previous ? '' : message))
+        }
         setNativeRecoveryReady(true)
         recoveryInFlight.current = false
         const buffered = recoveryEvents.current
@@ -1687,7 +1695,8 @@ export function useCustomizationStudio(options: StudioOptions) {
         for (const event of buffered) deliverRecoveryEvent.current?.(event)
         for (const { id, run, step } of resumptions) {
           if (runs.current.get(id) !== run) continue
-          if (step === 'finish-response') void finishRef.current(id, run)
+          if (step === 'await-output') mutate(id, (session) => ({ ...session, stage: 'planning' }))
+          else if (step === 'finish-response') void finishRef.current(id, run)
           else if (
             ['reconcile-action', 'continue-action', 'use-receipt'].includes(step) &&
             run.recovery?.action

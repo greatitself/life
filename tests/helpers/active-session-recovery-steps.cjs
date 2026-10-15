@@ -725,6 +725,7 @@ class RecoveryHarness {
         transportId: record.request.transportId,
         ownerGeneration: record.request.ownerGeneration,
         kind: record.request.kind,
+        intent: record.request.intent,
         status: record.status,
         intentHash: record.intentHash,
         native: record.receipt?.native,

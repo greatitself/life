@@ -749,8 +749,10 @@ async function init() {
           owner.webContents.reload()
         })()
           .catch((error) => {
-            if (!quitting && ownsDocument())
+            if (!quitting && ownsDocument()) {
+              console.error('[Life] Source reload failed:', error)
               dialog.showErrorBox('Life reload failed', String(error))
+            }
           })
           .finally(() => {
             if (timer === undefined) finish()

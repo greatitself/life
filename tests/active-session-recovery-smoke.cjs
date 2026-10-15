@@ -132,6 +132,20 @@ const assistantReplies = (thread, text) =>
   thread?.messages?.filter((message) => message?.role === 'assistant' && message.text === text) ||
   []
 const WITH_MIDDLE = INITIAL + MIDDLE + FINAL.slice(INITIAL.length)
+async function waitForNativeSource(harness) {
+  await waitUntil(
+    async () => {
+      const failure = harness.nativeLogs
+        .flat()
+        .find((line) => line.includes('[Life] Source reload failed:'))
+      if (failure) throw new Error(failure)
+      return harness.page.getByTestId('life-active-recovery-source').isVisible()
+    },
+    'the original native source activation becomes visible',
+    90000,
+  )
+}
+
 const permissionResponses = (harness, record) =>
   harness
     .log()
@@ -849,7 +863,7 @@ async function runStudioScenario(harness, scenario, index) {
       )
     }, 'the recovered planner interprets and applies its actual settings proposal')
   } else {
-    await harness.page.getByTestId('life-active-recovery-source').waitFor({ timeout: 90000 })
+    await waitForNativeSource(harness)
     assert.equal(
       await harness.page.getByTestId('life-active-recovery-source').innerText(),
       scenario.mode === 'STUDIO_REPAIR' ? 'Recovery source repaired' : 'Recovery source verified',
@@ -890,7 +904,16 @@ async function runStudioScenario(harness, scenario, index) {
   const actionReceipts = await harness.studioActionReceipts(record.session.id)
   const countAction = (kind, status) =>
     actionReceipts.filter((receipt) => receipt.kind === kind && receipt.status === status).length
-  assert.equal(countAction('source-read', 'succeeded'), scenario.mode === 'STUDIO_REPAIR' ? 3 : 1)
+  const sourceReads = actionReceipts.filter(
+    (receipt) => receipt.kind === 'source-read' && receipt.status === 'succeeded',
+  )
+  const countRead = (purpose) =>
+    sourceReads.filter((receipt) => receipt.intent?.purpose === purpose).length
+  assert.equal(countRead('initial'), 1)
+  assert.equal(countRead('source-read'), 1)
+  assert.equal(countRead('repair-index'), scenario.mode === 'STUDIO_REPAIR' ? 1 : 0)
+  assert.equal(countRead('repair-files'), scenario.mode === 'STUDIO_REPAIR' ? 1 : 0)
+  assert.equal(sourceReads.length, scenario.mode === 'STUDIO_REPAIR' ? 4 : 2)
   assert.equal(
     actionReceipts.filter((receipt) => !['succeeded', 'failed'].includes(receipt.status)).length,
     0,
@@ -1220,7 +1243,7 @@ async function runSourceCommitScenario(harness, scenario, index) {
   const shutdown = await harness.shutdown('crash', [record.started.pid])
   await harness.restoreActionTerminal()
   await harness.reopen()
-  await harness.page.getByTestId('life-active-recovery-source').waitFor({ timeout: 90000 })
+  await waitForNativeSource(harness)
   await harness.openStudio()
   await waitUntil(async () => {
     const session = await harness.studioSession(prompt)

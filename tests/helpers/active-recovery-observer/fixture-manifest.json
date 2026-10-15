@@ -101,13 +101,13 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 58753,
-      "sha256": "10b0e6aff9a1229ee1ede52d59b40169cdaf3e81d6b062e494da6902f029e8fe"
+      "bytes": 59543,
+      "sha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38218,
-      "sha256": "eeb7f9c5bace1d09512f753951cb53b7ac7924fd31fd122a3dad67156783df4c"
+      "bytes": 38257,
+      "sha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -138,13 +138,13 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 58753,
-      "sha256": "10b0e6aff9a1229ee1ede52d59b40169cdaf3e81d6b062e494da6902f029e8fe"
+      "bytes": 59543,
+      "sha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38218,
-      "sha256": "eeb7f9c5bace1d09512f753951cb53b7ac7924fd31fd122a3dad67156783df4c"
+      "bytes": 38257,
+      "sha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -211,6 +211,10 @@
     {
       "path": "tests/active-session-reload-smoke.cjs",
       "reason": "Probe a genuine same-session mutation before requesting reload during pending native exit, require native handoff refusal, then retain original close, once-only prompt, writer, and actual terminal-exit assertions."
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "reason": "Count and verify initial, requested, repair-index and repair-files native source reads separately; the original fixture omitted the initial source-context action. Retain exact terminal receipt and once-only native continuation guards."
     }
   ]
 }

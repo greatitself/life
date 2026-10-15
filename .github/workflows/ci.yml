@@ -26,7 +26,8 @@ on:
         required: false
         default: all
         type: choice
-        options: [all, active-recovery, active-tail, navigation, ownership, ssh-allocated]
+        options:
+          [all, active-recovery, active-tail, studio-source, navigation, ownership, ssh-allocated]
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -699,7 +700,7 @@ jobs:
         if: matrix.suite == 'ownership'
         run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
       - name: Verify native recovery boundary regressions
-        if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail'
+        if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail' || matrix.suite == 'studio-source'
         run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
@@ -758,6 +759,13 @@ jobs:
             active-tail)
               failed=0
               for stage in ssh-thread-binding ssh-turn-start ssh-string-approval ssh-codex-studio-planning ssh-codex-studio-source-read ssh-codex-studio-source-proposal ssh-codex-studio-repair ssh-claude-studio-planning ssh-claude-studio-source-read ssh-claude-studio-source-proposal ssh-claude-studio-repair source-commit reload; do
+                node tests/active-recovery-run.cjs "$stage" || failed=1
+              done
+              test "$failed" = 0
+              ;;
+            studio-source)
+              failed=0
+              for stage in ssh-codex-studio-source-proposal source-commit ssh-codex-studio-repair; do
                 node tests/active-recovery-run.cjs "$stage" || failed=1
               done
               test "$failed" = 0

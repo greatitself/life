@@ -533,3 +533,41 @@ jobs:
             output/recovery-source-before.json
             output/recovery-release-build.json
           if-no-files-found: error
+
+  matched-renderer-performance:
+    name: Matched renderer performance
+    if: inputs.windows_only != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium --with-deps
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.13.0
+          path: .performance-baseline
+      - name: Measure the same fixture in baseline-candidate-candidate-baseline order
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -s "$GITHUB_WORKSPACE/node_modules" .performance-baseline/node_modules
+          cmp tests/transcript-performance.cjs .performance-baseline/tests/transcript-performance.cjs
+          (cd .performance-baseline && node tests/transcript-performance.cjs v0130-a)
+          node tests/transcript-performance.cjs v0131-a
+          node tests/transcript-performance.cjs v0131-b
+          (cd .performance-baseline && node tests/transcript-performance.cjs v0130-b)
+      - name: Retain both source measurements without treating fixture times as upstream provider evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-matched-renderer-performance
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            output/playwright/transcript-performance-v011/v0131-*.json
+            .performance-baseline/output/playwright/transcript-performance-v011/v0130-*.json

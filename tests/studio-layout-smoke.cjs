@@ -104,6 +104,10 @@ async function run() {
       await studio.locator('.studio-session-list').scrollIntoViewIfNeeded()
       await page.screenshot({ path: join(output, `${viewport.width}x${viewport.height}.png`) })
       await studio.getByRole('button', { name: 'Close dialog', exact: true }).click()
+      await studio.waitFor({ state: 'hidden' })
+      await page.waitForFunction(
+        () => document.activeElement === document.querySelector('.titlebar-studio-toggle'),
+      )
       assert.equal(
         await page
           .getByRole('button', { name: 'Customize', exact: true })

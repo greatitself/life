@@ -287,6 +287,68 @@ const write = (channel: DurableRemoteChannel, bytes: Buffer | string) =>
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 describe('durable provider channel cold recovery', () => {
+  it('waits for the original tracked broker handshake before admitting an idle close', () =>
+    withStore(async (fixture) => {
+      let attachment!: Attachment
+      class DelayedHost extends Host {
+        override async channel(command: string): Promise<ClientChannel> {
+          this.commands.push(command)
+          attachment = new Attachment()
+          this.attachments.push(attachment)
+          return attachment as unknown as ClientChannel
+        }
+      }
+      const host = new DelayedHost()
+      let candidate!: DurableRemoteChannel
+      const opening = DurableRemoteChannel.open(
+        host,
+        'exec codex app-server',
+        (channel) => {
+          candidate = channel
+          fixture.channels.add(channel)
+        },
+        { store: fixture.store, provider: 'codex' },
+      )
+      await vi.waitFor(() => expect(host.attachments).toHaveLength(1))
+      let settled = false
+      const released = Effect.runPromise(candidate.closeAndWaitEffect()).then((result) => {
+        settled = true
+        return result
+      })
+      await vi.waitFor(() => expect(candidate.isClosing).toBe(true))
+      expect(attachment.inputs).toEqual([])
+      expect(settled).toBe(false)
+      attachment.frame({
+        type: 'ready',
+        protocol: 2,
+        inputReceipts: 1,
+        cursor: 0,
+        lastInputSequence: 0,
+        writerLease: { epoch: 1, token: 'original-opening-writer' },
+      })
+      attachment.frame({ type: 'replayComplete', replayCursor: 0 })
+      expect(await opening).toBe(candidate)
+      await vi.waitFor(() => expect(attachment.inputs).toHaveLength(1))
+      const close = attachment.inputs[0]
+      expect(close.type).toBe('close')
+      attachment.frame({ type: 'ack', sequence: close.sequence })
+      attachment.frame({
+        type: 'inputReceipt',
+        cursor: 1,
+        sequence: close.sequence,
+        status: 'written',
+      })
+      await nextTurn()
+      expect(settled).toBe(false)
+      attachment.frame({ type: 'exit', cursor: 2, code: 0, signal: null })
+      expect(await released).toBe(true)
+      expect(host.commands).toHaveLength(1)
+      expect(attachment.inputs.map((input) => input.type)).toEqual(['close'])
+      const stored = await Effect.runPromise(fixture.store.readTransport(candidate.recoveryId!))
+      expect(stored.inputs).toHaveLength(1)
+      expect(stored.inputs[0].deliveryReceipt?.status).toBe('written')
+    }))
+
   it('attaches to the registered absolute broker root despite a changed remote home', () =>
     withStore(async (fixture) => {
       const snapshot = await createSnapshot(fixture.store)

@@ -179,6 +179,7 @@ export class DurableRemoteChannel extends Duplex {
   private pending = new Map<number, InputFrame>()
   private started = false
   private closing = false
+  private closeRequested = false
   private retired = false
   private detaching = false
   private readonly writeAdmissions = new Set<Deferred.Deferred<void, NativeRecoveryError>>()
@@ -260,7 +261,7 @@ export class DurableRemoteChannel extends Duplex {
   }
 
   get isClosing() {
-    return this.closing || this.retired || this.detaching
+    return this.closeRequested || this.closing || this.retired || this.detaching
   }
 
   /** Ordinary attachments retain queued input until ACK; tracked owners require native receipts. */
@@ -1780,6 +1781,19 @@ export class DurableRemoteChannel extends Duplex {
       if (this.nativeExitUnconfirmed) {
         this.finish()
         return false
+      }
+      if (this.recoveryOptions && !this.closing && !this.terminalAttachment) {
+        // Retirement can race the original broker handshake. Stop the opening
+        // from initializing a provider, then wait for its real delivery contract.
+        this.closeRequested = true
+        const ready = yield* Effect.tryPromise({
+          try: () => this.ready,
+          catch: (cause) =>
+            cause instanceof NativeRecoveryError
+              ? cause
+              : this.recoveryError('close', 'uncertain', 'Native close readiness failed.', cause),
+        }).pipe(Effect.timeoutOption(timeoutMs))
+        if (Option.isNone(ready)) return false
       }
       this.waitForRemoteExit = true
       yield* Effect.try({

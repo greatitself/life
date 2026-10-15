@@ -11,6 +11,7 @@ const knownVersions = [
   '0.11.0',
   '0.11.1',
   '0.12.0',
+  '0.13.0',
 ]
 
 function releaseBaselines(targetVersion) {

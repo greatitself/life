@@ -1318,6 +1318,7 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
   let recoveryPrompt:
     { controller: AbortController; cause: 'unresponsive' | 'crash' | 'load' } | undefined
   const reportRecoveryFailure = (error: unknown) => {
+    console.error('[Life] Renderer handoff failed:', error)
     if (!quitting) dialog.showErrorBox('Life recovery failed', String(error))
   }
   const promptRecovery = (cause: 'unresponsive' | 'crash' | 'load', detail: string) => {

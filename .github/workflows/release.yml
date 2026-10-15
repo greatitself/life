@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   LIFE_RELEASE_REF: ${{ inputs.source_ref || inputs.tag || github.ref }}
@@ -40,6 +41,33 @@ jobs:
       - name: Record release source
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Require complete successful CI for the exact release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          gh run list --workflow ci.yml --commit "$source_sha" --status success --limit 30 --json databaseId,headSha > candidate-ci-runs.json
+          node <<'NODE'
+          const fs = require('node:fs')
+          const { execFileSync } = require('node:child_process')
+          const runs = JSON.parse(fs.readFileSync('candidate-ci-runs.json', 'utf8'))
+          const expected = ['verify', 'Windows packaged native compatibility', 'Linux native active recovery',
+            ...[1,2,3,4].map(n => `Unit shard ${n}/4`),
+            ...['local-switch','streaming','navigation','ownership','dispatch','studio','ordinary-draft','local-source','helpers-source','local-package','helpers-package'].map(n => `Linux native ${n}`),
+            ...['local-allocated','ssh-allocated','local-preallocation','ssh-preallocation'].map(n => `Linux metadata quit ${n}`),
+            'Matched renderer performance']
+          for (const run of runs) {
+            const response = JSON.parse(execFileSync('gh', ['api', `repos/${process.env.GH_REPO}/actions/runs/${run.databaseId}/jobs?per_page=100`], {encoding:'utf8'}))
+            if (expected.every(name => response.jobs.some(job => job.name === name && job.conclusion === 'success'))) {
+              console.log(`Full CI ${run.databaseId} passed every required job for ${run.headSha}`)
+              process.exit(0)
+            }
+          }
+          throw new Error('No complete successful CI run exists for this exact source. Publication is blocked.')
+          NODE
       - name: Check out maintained release baseline selection
         uses: actions/checkout@v4
         with:

@@ -1360,7 +1360,8 @@ export class Agents {
       session.input = { ...session.input, clientRecovery: owner.clientRecovery }
     session.remoteId = owner.nativeThreadId || owner.nativeSessionId || session.remoteId
     session.turnId = owner.nativeTurnId || session.turnId
-    if (snapshot.transport.provider === 'claude')
+    // Reusing a native Claude process keeps its original cumulative-usage call identity.
+    if (snapshot.transport.provider === 'claude' && !session.claudeUsageCallId)
       session.claudeUsageCallId = `${snapshot.transport.id}:generation:${session.recoveryGeneration}`
     if (rpc) session.codexRPC = rpc
     if (channel) session.channel = channel
@@ -7537,6 +7538,7 @@ export class Agents {
                 stopping: Boolean(session.stopping),
                 configuration: Boolean(session.configuration),
                 unknown: session.recoveryUnknown,
+                failure: this.recoveryFailures.get(sessionId),
               })),
           })
         return false

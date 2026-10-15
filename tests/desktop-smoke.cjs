@@ -327,6 +327,7 @@ export function activityLabel(activity: ThreadActivity): string {
                 ownerGeneration: owner.ownerGeneration,
                 acceptedAppliedCursor: owner.acceptedAppliedCursor,
                 hasProjectionAdmission: Boolean(owner.acceptedProjectionAdmission),
+                message: owner.message,
               }))
             return result
           } catch (error) {

@@ -849,6 +849,91 @@ function installClaudeMetadata(fixture: Fixture) {
 }
 
 describe('Agents native recovery boundaries', () => {
+  it('keeps Claude cumulative usage on its original process identity across recovered turn generations', async () => {
+    await withFixture('claude', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      await appendMessages(fixture, [
+        {
+          type: 'result',
+          session_id: nativeThread,
+          subtype: 'success',
+          is_error: false,
+          usage: { input_tokens: 1, output_tokens: 1 },
+          total_cost_usd: 0.01,
+        },
+      ])
+      const original = fixture.transport.owners[0]
+      const prompt = '  Second exact Claude request\r\n'
+      await run(
+        fixture.store.updateTransport(fixture.transport.id, {
+          owners: [
+            {
+              ...original,
+              generation: 4,
+              localTurn: 8,
+              snapshotToken: 'next-native-snapshot',
+              input: { ...original.input, prompt, localTurn: 8 },
+            },
+          ],
+        }),
+      )
+      const second = await run(
+        fixture.store.reserveInput(
+          fixture.transport.id,
+          {
+            type: 'write',
+            data: encoded({
+              type: 'user',
+              session_id: nativeThread,
+              message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+            }),
+          },
+          {
+            kind: 'user-prompt',
+            sessionId: 'life-session',
+            ownerGeneration: 4,
+            nativeThreadId: nativeThread,
+          },
+        ),
+      )
+      await deliverWrittenInput(fixture.store, fixture.transport.id, second.sequence)
+      await appendMessages(fixture, [
+        {
+          type: 'result',
+          session_id: nativeThread,
+          subtype: 'success',
+          is_error: false,
+          usage: { input_tokens: 2, output_tokens: 2 },
+          total_cost_usd: 0.02,
+        },
+      ])
+      const restored = await fixture.agents.recover({ consumers: [consumer()] })
+      await fixture.agents.flushRecovery()
+      expect(restored.owners.find((owner) => owner.sessionId === 'life-session')?.status).toBe(
+        'idle',
+      )
+      const usage = fixture.events.filter((event) => event.details?.usageScope === 'session')
+      expect(usage).toHaveLength(2)
+      expect(usage.map((event) => event.details?.usageCallId)).toEqual([
+        fixture.transport.id + ':generation:3',
+        fixture.transport.id + ':generation:3',
+      ])
+      expect(usage.map((event) => event.nativeRecovery?.ownerGeneration)).toEqual([3, 4])
+      const journal = await run(fixture.store.readTransport(fixture.transport.id))
+      expect(journal.inputs.filter((input) => input.semantic.kind === 'user-prompt')).toHaveLength(
+        2,
+      )
+      expect(
+        decodeInput(journal.inputs.find((input) => input.sequence === second.sequence)!).message
+          .content[0].text,
+      ).toBe(prompt)
+      expect(fixture.attachments).toHaveLength(1)
+      expect(fixture.attachments[0].nativeWrites).toEqual([])
+      expect(fixture.ssh.channel).not.toHaveBeenCalled()
+      expect(fixture.ssh.exec).not.toHaveBeenCalled()
+    })
+  })
+
   it('flushes the exact accepted fresh native write admission without waiting for its receipt or SDK response and preserves typed WAL failure', async () => {
     await withFixture(
       'codex',

@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      studio_only:
+        description: 'Focus the diagnostic desktop run on Studio; full verification is unchanged'
+        required: false
+        default: false
+        type: boolean
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -617,6 +622,9 @@ jobs:
         id: desktop
         continue-on-error: true
         timeout-minutes: 30
+        env:
+          LIFE_TEST_PHASE: ${{ inputs.studio_only && 'features' || '' }}
+          LIFE_TEST_SKIP_PRIOR_FEATURES: ${{ inputs.studio_only && '1' || '' }}
         run: npm run test:desktop
       - name: Require every selected regression check
         env:

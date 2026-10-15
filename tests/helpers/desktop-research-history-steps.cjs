@@ -56,6 +56,7 @@ async function sendAndSettle(context, text, provider) {
         .some((entry) => entry.provider === provider && promptFrom(entry) === text),
     `exact ${provider} research/history request reaches the provider`,
   )
+  await context.waitForSend()
   await context.waitUntil(
     async () =>
       (await savedThreads(context.getPage())).some(
@@ -66,6 +67,7 @@ async function sendAndSettle(context, text, provider) {
           thread.messages.some((message) => message.role === 'assistant' && message.text),
       ),
     `${provider} research/history turn settles and persists`,
+    30000,
   )
   const entries = (await context.fixture.log()).slice(baseline)
   const prompts = entries.map(promptFrom).filter((prompt) => prompt !== undefined)

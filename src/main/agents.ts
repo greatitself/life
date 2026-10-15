@@ -5625,7 +5625,13 @@ export class Agents {
         catch: (cause) =>
           cause instanceof NativeRecoveryError || cause instanceof AgentEnvironmentError
             ? cause
-            : this.recoveryError('opening', 'The original Claude provider opening failed.', cause),
+            : this.recoveryError(
+                'opening',
+                cause instanceof Error
+                  ? cause.message
+                  : 'The original Claude provider opening failed.',
+                cause,
+              ),
       })
       if (!observed) {
         observed = channel

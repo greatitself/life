@@ -1841,6 +1841,7 @@ export function useCustomizationStudio(options: StudioOptions) {
     if (!selected || selected.thread.busy || runs.current.has(selected.id)) return false
     if (
       !nativeRecoveryReady ||
+      options.documentRecoveryReady === false ||
       supportBlocksMutation() ||
       nativeRecoveryBlocksMutation(selected.thread)
     ) {
@@ -2130,6 +2131,15 @@ export function useCustomizationStudio(options: StudioOptions) {
   return {
     sessions,
     active,
+    canSubmit: Boolean(
+      active &&
+      !active.thread.busy &&
+      !runs.current.has(active.id) &&
+      nativeRecoveryReady &&
+      options.documentRecoveryReady !== false &&
+      !supportBlocksMutation() &&
+      !nativeRecoveryBlocksMutation(active.thread),
+    ),
     models,
     feedback,
     notice,

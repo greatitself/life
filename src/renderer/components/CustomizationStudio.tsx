@@ -472,7 +472,7 @@ export function CustomizationStudio({
                   type="submit"
                   className="studio-submit"
                   aria-label="Send customization request"
-                  disabled={!draft.trim() || !active}
+                  disabled={!draft.trim() || !studio.canSubmit}
                 >
                   <ArrowUp size={17} />
                 </button>

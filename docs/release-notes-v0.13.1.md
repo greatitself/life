@@ -35,3 +35,5 @@ Cold replay preserves an observed Codex turn completion when a later checkpoint 
 Renderer handoff closes the old document’s history-write admission after its final flush and before draining accepted writes or revoking recovery tokens. Late unload writes cannot replace a proved history file with an unproved snapshot; a new native document receives fresh write admission.
 
 Concurrent native close callbacks join the same Studio history flush, preserving one acknowledged write of the final archive.
+
+Studio enables Send after both document recovery and the recovered planner finish their native acknowledgments, preserving the draft while sending is unavailable.

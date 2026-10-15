@@ -800,6 +800,8 @@ export function App() {
       !api ||
       !startupReady ||
       emergencyReview.current ||
+      connectOpen ||
+      projectOpen ||
       viewCurrent.current !== 'investigation'
     )
       return

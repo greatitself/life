@@ -124,6 +124,11 @@ async function runResearchChecks(context) {
   await environment.waitFor({ state: 'hidden' })
   const project = page.getByRole('dialog', { name: 'Select a project', exact: true })
   await project.waitFor()
+  assert.equal(
+    (await page.evaluate(() => window.relay.connection.state())).profile?.id,
+    sshProfile.id,
+    'Research restoration preserves the explicitly connected environment through project selection',
+  )
   await project
     .getByRole('textbox', { name: 'Project directory', exact: true })
     .fill(connection.workspace)

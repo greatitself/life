@@ -115,7 +115,36 @@ async function runRecoveryChecks(context) {
   assert.equal(afterRetryConnection.profile.id, beforeRetry.connection.profile.id)
   assert.equal(afterRetryConnection.workspace, beforeRetry.connection.workspace)
   assert.deepEqual((await extensions()).extensions, beforeRetry.extensions)
+  const stopAfterRetry = page().getByRole('button', {
+    name: 'Stop agent and pause queued messages',
+    exact: true,
+  })
+  await stopAfterRetry.waitFor()
+  assert.equal(
+    await page().evaluate(() => localStorage.getItem('life.active-thread.v1')),
+    beforeRetry.thread.id,
+  )
+  const originalPromptCount = (await fixture.log())
+    .slice(retryLogStart)
+    .filter((entry) => promptFrom(entry) === 'hang').length
+  assert.equal(
+    originalPromptCount,
+    1,
+    'Native Retry preserves the live turn without resending its prompt.',
+  )
+  await stopAfterRetry.click()
   await readyToSend()
+  await waitUntil(
+    async () =>
+      (await fixture.log())
+        .slice(retryLogStart)
+        .some(
+          (entry) =>
+            entry.message?.method === 'turn/interrupt' &&
+            entry.message.params.threadId === beforeRetry.thread.remoteId,
+        ),
+    'explicit Stop reaches the original native conversation after Retry',
+  )
   await send('native-after-retry')
   await readyToSend()
   await waitUntil(
@@ -145,13 +174,16 @@ async function runRecoveryChecks(context) {
   await saveProof('desktop-native-retry-proof.json', {
     threadId: afterRetryThread.id,
     remoteId: afterRetryThread.remoteId,
+    preservedBusyOwner: true,
+    originalPromptCount,
+    continuation: 'explicit-stop-after-retry',
     workspace: afterRetryConnection.workspace,
     enabledExtensions: beforeRetry.extensions
       .filter((entry) => entry.enabled)
       .map((entry) => entry.id),
   })
   record(
-    'Native Retry stops a busy agent and restores its existing conversation without losing SSH',
+    'Native Retry preserves a busy native owner without resending input; explicit Stop then continues the same conversation without losing SSH',
   )
 
   const recoveryExtension = {

@@ -574,10 +574,9 @@ export function useCustomizationStudio(options: StudioOptions) {
                   run.ownerGeneration !== cursor.ownerGeneration))
             )
               continue
-            if (owner.status !== 'running' && owner.status !== 'idle')
-              throw new StudioRecoveryPending(
-                'The Studio cache checkpoint is waiting for its original native owner.',
-              )
+            // Keep the cache dirty until its original native owner is admitted.
+            // Waiting for reconnect is not a failed history write.
+            if (owner.status !== 'running' && owner.status !== 'idle') return
             // Historical cursors remain in the transcript. Only its exact
             // current owner can prepare a cache checkpoint for this planner.
             // Rows sharing a provider transport have different bytes and owners.

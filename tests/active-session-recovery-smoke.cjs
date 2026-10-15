@@ -766,6 +766,20 @@ async function runStudioScenario(harness, scenario, index) {
     async () => (await current())?.id === record.session.id,
     'the actual saved Studio session hydrates before inspecting its recovered native identity',
   )
+  const studioDialog = harness.page.getByRole('dialog', { name: 'Customize Life', exact: true })
+  const studioSearch = studioDialog.getByRole('textbox', {
+    name: 'Search customization conversations',
+    exact: true,
+  })
+  await studioSearch.fill(prompt.split('\n')[0])
+  const restoredRow = studioDialog.locator('.studio-session')
+  assert.equal(
+    await restoredRow.count(),
+    1,
+    'The exact original Studio request selects one recovered conversation',
+  )
+  await restoredRow.click()
+  await studioSearch.fill('')
   const activeRestored = await current()
   assert.equal(activeRestored.id, record.session.id)
   assert.equal(activeRestored.thread.id, record.session.thread.id)

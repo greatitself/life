@@ -163,7 +163,7 @@ async function run() {
   }
   const connect = async (fixture, record) => {
     const input = fixture.input()
-    const dialog = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const dialog = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
     if (!(await dialog.isVisible()))
       await page.getByRole('button', { name: 'Connections', exact: true }).click()
     await dialog.waitFor()
@@ -433,7 +433,7 @@ async function run() {
       assert.equal(restored.profileId, original.profileId)
       assert.deepEqual(restored.messages, original.messages)
       await page.locator(`[data-thread-row="${original.id}"]`).waitFor()
-      await page.getByRole('dialog', { name: 'Connect a machine', exact: true }).waitFor()
+      await page.getByRole('dialog', { name: 'Choose an environment', exact: true }).waitFor()
       await connect(record.fixture, record)
       await openAgents()
       await page.locator(`[data-thread-row="${original.id}"]`).click()

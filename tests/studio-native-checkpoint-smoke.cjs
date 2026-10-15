@@ -339,7 +339,7 @@ async function run() {
     return { previousWindow: oldWindow, nextWindow: windowIds[0] }
   }
   const openStudio = async () => {
-    const connect = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const connect = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
     if (await connect.isVisible())
       await connect.getByRole('button', { name: 'Close dialog', exact: true }).click()
     await page.getByRole('button', { name: 'Customize', exact: true }).click()

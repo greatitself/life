@@ -106,8 +106,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 37433,
-      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+      "bytes": 37619,
+      "sha256": "c88409471557f8b293fae8df27c6a2c5c8206a0ffcd4fcb99339cbfb4958219d"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",

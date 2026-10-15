@@ -588,7 +588,7 @@ export function activityLabel(activity: ThreadActivity): string {
   const reconnect = async () => {
     if ((await page.evaluate(() => window.relay.connection.state())).status === 'connected') return
     let dialog = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
-    const loading = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const loading = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
     if (!(await dialog.isVisible()) && !(await loading.isVisible()))
       await page.getByRole('button', { name: 'Connections', exact: true }).click()
     await dialog.waitFor()

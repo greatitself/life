@@ -94,40 +94,135 @@ jobs:
           NODE
       - run: npx playwright install chromium --with-deps
       - run: npm run test:recovery
+        id: release_check_01
+        continue-on-error: true
       - run: node tests/thread-queue-smoke.cjs
+        id: release_check_02
+        continue-on-error: true
       - run: node tests/thread-presentation-smoke.cjs
+        id: release_check_03
+        continue-on-error: true
       - run: node tests/studio-lifecycle-smoke.cjs
+        id: release_check_04
+        continue-on-error: true
       - run: node tests/app-live-controls-smoke.cjs
+        id: release_check_05
+        continue-on-error: true
       - run: node tests/app-live-controls-smoke.cjs --presentation
+        id: release_check_06
+        continue-on-error: true
       - run: node tests/app-live-controls-smoke.cjs --history-hydration
+        id: release_check_07
+        continue-on-error: true
       - run: node tests/app-live-controls-smoke.cjs --provider-utilities
+        id: release_check_08
+        continue-on-error: true
       - run: node tests/app-live-controls-smoke.cjs --fluidity
+        id: release_check_09
+        continue-on-error: true
       - name: Verify thread organization and draft workflows
+        id: release_check_10
+        continue-on-error: true
         run: node tests/thread-workflows-smoke.cjs
       - run: node tests/transcript-performance.cjs current
+        id: release_check_11
+        continue-on-error: true
       - run: node tests/agent-event-batch-performance.cjs
+        id: release_check_12
+        continue-on-error: true
       - run: node tests/sidebar-history-performance.cjs current
+        id: release_check_13
+        continue-on-error: true
       - run: node tests/conversation-history-performance.cjs
+        id: release_check_14
+        continue-on-error: true
       - run: node tests/workspace-surfaces-performance.cjs
+        id: release_check_15
+        continue-on-error: true
       - run: node tests/conversation-scroll-performance.cjs
+        id: release_check_16
+        continue-on-error: true
       - run: node tests/thread-message-navigator-smoke.cjs
+        id: release_check_17
+        continue-on-error: true
       - run: node tests/thread-finder-timeline-smoke.cjs
+        id: release_check_18
+        continue-on-error: true
       - run: node tests/settled-markdown-smoke.cjs
+        id: release_check_19
+        continue-on-error: true
       - run: node tests/native-checkpoint-performance.cjs
+        id: release_check_20
+        continue-on-error: true
       - run: npm run test:checkpoints
+        id: release_check_21
+        continue-on-error: true
       - run: npm run test:loads
+        id: release_check_22
+        continue-on-error: true
       - run: node tests/studio-layout-smoke.cjs
+        id: release_check_23
+        continue-on-error: true
       - run: node tests/run-selectors-smoke.cjs
+        id: release_check_24
+        continue-on-error: true
       - run: node tests/research-method-ui-smoke.cjs
+        id: release_check_25
+        continue-on-error: true
       - run: node tests/provider-request-ui-smoke.cjs
+        id: release_check_26
+        continue-on-error: true
       - run: node tests/conversation-scroll-smoke.cjs
+        id: release_check_27
+        continue-on-error: true
       - run: node tests/provider-updates-ui-smoke.cjs
+        id: release_check_28
+        continue-on-error: true
       - run: node tests/usage-smoke.cjs
+        id: release_check_29
+        continue-on-error: true
       - run: node tests/updates-ui-smoke.cjs
+        id: release_check_30
+        continue-on-error: true
       - run: node tests/graph-canvas-smoke.cjs
+        id: release_check_31
+        continue-on-error: true
       - run: node tests/deferred-dialogs-smoke.cjs
+        id: release_check_32
+        continue-on-error: true
       - run: npm run test:desktop
+        id: release_check_33
+        continue-on-error: true
       - run: npm run format:check
+        id: release_check_34
+        continue-on-error: true
+      - name: Require every existing workflow check to pass
+        if: always()
+        env:
+          WORKFLOW_CHECK_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs')
+          const assert = require('node:assert/strict')
+          const steps = JSON.parse(process.env.WORKFLOW_CHECK_RESULTS)
+          const commands = ["npm run test:recovery", "node tests/thread-queue-smoke.cjs", "node tests/thread-presentation-smoke.cjs", "node tests/studio-lifecycle-smoke.cjs", "node tests/app-live-controls-smoke.cjs", "node tests/app-live-controls-smoke.cjs --presentation", "node tests/app-live-controls-smoke.cjs --history-hydration", "node tests/app-live-controls-smoke.cjs --provider-utilities", "node tests/app-live-controls-smoke.cjs --fluidity", "node tests/thread-workflows-smoke.cjs", "node tests/transcript-performance.cjs current", "node tests/agent-event-batch-performance.cjs", "node tests/sidebar-history-performance.cjs current", "node tests/conversation-history-performance.cjs", "node tests/workspace-surfaces-performance.cjs", "node tests/conversation-scroll-performance.cjs", "node tests/thread-message-navigator-smoke.cjs", "node tests/thread-finder-timeline-smoke.cjs", "node tests/settled-markdown-smoke.cjs", "node tests/native-checkpoint-performance.cjs", "npm run test:checkpoints", "npm run test:loads", "node tests/studio-layout-smoke.cjs", "node tests/run-selectors-smoke.cjs", "node tests/research-method-ui-smoke.cjs", "node tests/provider-request-ui-smoke.cjs", "node tests/conversation-scroll-smoke.cjs", "node tests/provider-updates-ui-smoke.cjs", "node tests/usage-smoke.cjs", "node tests/updates-ui-smoke.cjs", "node tests/graph-canvas-smoke.cjs", "node tests/deferred-dialogs-smoke.cjs", "npm run test:desktop", "npm run format:check"]
+          const results = commands.map((command, index) => {
+            const id = 'release_check_' + String(index + 1).padStart(2, '0')
+            return { id, command, outcome: steps[id]?.outcome ?? 'missing' }
+          })
+          fs.mkdirSync('output', { recursive: true })
+          fs.writeFileSync('output/linux-workflow-results.json', JSON.stringify(results, null, 2) + '\n')
+          const failed = results.filter(result => result.outcome !== 'success')
+          for (const result of failed) console.error(result.command + ': ' + result.outcome)
+          assert.equal(failed.length, 0, 'Every existing browser, desktop, performance and format check must pass')
+          NODE
+      - name: Save workflow diagnostics even after failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-workflow-results
+          path: output/linux-workflow-results.json
+          if-no-files-found: warn
       - name: Save the verified Linux build for native checks
         uses: actions/upload-artifact@v4
         with:

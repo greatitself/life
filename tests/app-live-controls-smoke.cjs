@@ -756,7 +756,7 @@ async function fluidityChecks(page, checks, settle) {
   )
 
   await page.keyboard.press('Control+,')
-  const connections = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+  const connections = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
   await connections.locator('.saved-profile > button').filter({ hasText: 'Test machine' }).click()
   await connections
     .getByRole('textbox', { name: 'Machine name optional', exact: true })
@@ -766,7 +766,7 @@ async function fluidityChecks(page, checks, settle) {
     .fill('fresh.example')
   await connections.getByRole('button', { name: 'Save profile', exact: true }).click()
   await connections.getByText('Connection profile saved.', { exact: true }).waitFor()
-  await connections.getByRole('button', { name: 'New machine', exact: true }).click()
+  await connections.getByRole('button', { name: 'Add SSH machine', exact: true }).click()
   await connections
     .getByRole('textbox', { name: 'Machine name optional', exact: true })
     .fill('Added machine')

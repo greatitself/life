@@ -413,7 +413,7 @@ async function run() {
     assert.equal(initial.codex, 'codex-cli test.0')
     assert.equal(initial.claude, '2.test.0 (Claude Code fixture)')
     assert.equal(
-      await page.getByRole('dialog', { name: 'Connect a machine', exact: true }).isVisible(),
+      await page.getByRole('dialog', { name: 'Choose an environment', exact: true }).isVisible(),
       false,
     )
     proof.localId = local.id

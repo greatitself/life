@@ -754,7 +754,10 @@ async function run() {
     const archivedRow = page.locator('[data-thread-row]').filter({ hasText: title })
     await archivedRow.waitFor()
     const reconnect = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
-    const reconnectLoading = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const reconnectLoading = page.getByRole('dialog', {
+      name: 'Choose an environment',
+      exact: true,
+    })
     if (!(await reconnect.or(reconnectLoading).isVisible())) await archivedRow.click()
     await reconnect.waitFor()
     assert.equal(

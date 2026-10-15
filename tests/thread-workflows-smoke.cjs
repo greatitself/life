@@ -143,7 +143,7 @@ async function run() {
         await page.evaluate(() => localStorage.getItem('life.workflow-fixture.offline') === 'true')
       )
         await page
-          .getByRole('dialog', { name: 'Connect a machine', exact: true })
+          .getByRole('dialog', { name: 'Choose an environment', exact: true })
           .getByRole('button', { name: 'Close dialog', exact: true })
           .click()
       await composer.waitFor()

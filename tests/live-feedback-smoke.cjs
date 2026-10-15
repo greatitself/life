@@ -241,7 +241,7 @@ async function run() {
     phase = 'connect fixture and save exact native conversation'
     const input = fixture.input()
     await page.getByRole('button', { name: 'Connections', exact: true }).click()
-    const connection = page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const connection = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
     await connection.waitFor()
     await connection.getByPlaceholder('My development server').fill(input.name)
     await connection.getByPlaceholder('dev.example.com').fill(input.host)

@@ -486,7 +486,10 @@ class RecoveryHarness {
 
   async connect() {
     const input = this.fixture.input()
-    const dialog = this.page.getByRole('dialog', { name: 'Connect a machine', exact: true })
+    const dialog = this.page.getByRole('dialog', {
+      name: /^(Connect a machine|Choose an environment)$/,
+      exact: true,
+    })
     const openedAutomatically = await dialog.waitFor({ state: 'visible', timeout: 5000 }).then(
       () => true,
       () => false,
@@ -504,6 +507,8 @@ class RecoveryHarness {
         .first()
         .click()
     } else {
+      const addSSH = dialog.getByRole('button', { name: 'Add SSH machine', exact: true })
+      if (await addSSH.count()) await addSSH.click()
       await dialog.getByPlaceholder('My development server').fill(input.name)
       await dialog.getByPlaceholder('dev.example.com').fill(input.host)
       await dialog.getByLabel('Port', { exact: true }).fill(String(input.port))

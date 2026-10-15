@@ -535,7 +535,7 @@ async function runRecoveryChecks(context) {
   )
   assert.equal(emergencyIntentRemaining, false, 'The new app consumes the startup intent once.')
   assert.equal(
-    await page().getByRole('dialog', { name: 'Connect a machine', exact: true }).count(),
+    await page().getByRole('dialog', { name: 'Choose an environment', exact: true }).count(),
     0,
   )
   await application().evaluate(() => {

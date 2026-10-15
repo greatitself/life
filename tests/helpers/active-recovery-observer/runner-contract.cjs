@@ -29,6 +29,30 @@ const STAGES = {
   reload: { script: 'tests/active-session-reload-smoke.cjs', cases: 3, mode: 'ssh' },
   'source-artifacts-matrix': { artifactStage: 'matrix' },
   'source-artifacts-commit': { artifactStage: 'source-commit' },
+  'ssh-thread-binding': {
+    script: 'tests/active-session-recovery-smoke.cjs',
+    selected: 'codex-thread-start-before-bind-crash',
+    cases: 1,
+    mode: 'ssh',
+  },
+  'ssh-turn-start': {
+    script: 'tests/active-session-recovery-smoke.cjs',
+    selected: 'codex-turn-start-before-reply-crash',
+    cases: 1,
+    mode: 'ssh',
+  },
+  'ssh-string-approval': {
+    script: 'tests/active-session-recovery-smoke.cjs',
+    selected: 'codex-pending-approval-string-id-crash',
+    cases: 1,
+    mode: 'ssh',
+  },
+  'ssh-studio': {
+    script: 'tests/active-session-recovery-smoke.cjs',
+    selected: 'studio-',
+    cases: 8,
+    mode: 'ssh',
+  },
   'local-codex-stream': {
     script: 'tests/active-session-recovery-smoke.cjs',
     selected: 'codex-stream-crash',

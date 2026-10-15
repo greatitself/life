@@ -3012,6 +3012,9 @@ export class Agents {
       }
       const owners: NativeRecoveryOwnerState[] = []
       for (const snapshot of snapshots) {
+        // Disconnected documents can replay their private ledger before a native
+        // attachment is eligible. Delivery still validates the exact stored event.
+        this.recovery.seed(snapshot)
         this.recoverySnapshots.set(snapshot.transport.id, snapshot)
         for (const owner of snapshot.transport.owners) {
           if (owner.kind !== 'root' || absentOwners.has(owner.sessionId)) continue

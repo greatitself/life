@@ -369,13 +369,54 @@ async function runScenario(harness, scenario, index) {
     }
   }
   if (original.awaitingInitialSubmission) {
-    await waitUntil(
-      () => harness.log().some((entry) => entry.kind === 'turn-started' && entry.prompt === prompt),
-      'the previously committed original prompt is submitted exactly once after thread binding recovers',
+    // Ordinary starts have no privately claimed Studio startup reservation.
+    // A created upstream thread alone cannot authorize its unadmitted user turn.
+    await waitUntil(async () => {
+      const current = await harness.thread(prompt)
+      return (
+        current?.nativeRecoveryStatus === 'unknown' && current.remoteId === original.thread.remoteId
+      )
+    }, 'the unadmitted original start remains protected without a proven startup intent')
+    const retained = await harness.thread(prompt)
+    assert.equal(retained.id, original.thread.id)
+    assert.equal(retained.profileId, original.thread.profileId)
+    assert.equal(retained.workspace, original.thread.workspace)
+    assert.equal(retained.remoteId, original.thread.remoteId)
+    const users = retained.messages.filter(
+      (message) => message.role === 'user' && message.text === prompt,
     )
-    original.started = harness
-      .log()
-      .find((entry) => entry.kind === 'turn-started' && entry.prompt === prompt)
+    const originalUser = beforeShutdown[0].messages.find(
+      (message) => message.role === 'user' && message.text === prompt,
+    )
+    assert.equal(users.length, 1)
+    assert.equal(users[0].id, originalUser.id)
+    assert.equal(users[0].createdAt, originalUser.createdAt)
+    assert.equal(harness.log().filter((entry) => entry.kind === 'turn-started').length, 0)
+    assert.equal(harness.log().filter((entry) => entry.kind === 'thread-started').length, 1)
+    assert.equal(harness.log().filter((entry) => entry.kind === 'writer-conflict').length, 0)
+    assert.deepEqual(
+      harness
+        .log()
+        .filter((entry) => entry.kind === 'provider-started' && entry.argv.includes('app-server'))
+        .map((entry) => entry.pid),
+      [original.started.pid],
+    )
+    assert.doesNotThrow(
+      () => process.kill(original.started.pid, 0),
+      'The original native provider remains alive',
+    )
+    return {
+      name,
+      outcome: 'verified-unadmitted-native-start-retained-without-resubmission',
+      shutdown,
+      beforeShutdown,
+      restoredInitially,
+      retained,
+      nativeBoundary: original.nativeReplyBoundary,
+      gate: harness.gate.proof,
+      opaqueArchiveSha256: await harness.assertOpaque(),
+      recoveryObservationMs: performance.now() - recoveryStarted,
+    }
   }
   if (scenario.kind.startsWith('pending-approval')) {
     const recoveredApproval = await harness.approval(prompt)

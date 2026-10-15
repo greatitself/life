@@ -26,7 +26,7 @@ on:
         required: false
         default: all
         type: choice
-        options: [all, active-recovery, navigation, ownership, ssh-allocated]
+        options: [all, active-recovery, active-tail, navigation, ownership, ssh-allocated]
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -698,6 +698,9 @@ jobs:
       - name: Verify native reload coordination regressions
         if: matrix.suite == 'ownership'
         run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
+      - name: Verify native recovery boundary regressions
+        if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail'
+        run: npm test -- --maxWorkers=1 tests/agents-native-recovery-boundaries.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
       - run: npm run build
@@ -751,6 +754,14 @@ jobs:
               npm run test:active-recovery
               node tests/active-recovery-run.cjs local-codex-stream
               node tests/active-recovery-run.cjs local-claude-approval
+              ;;
+            active-tail)
+              node tests/active-recovery-run.cjs ssh-thread-binding
+              node tests/active-recovery-run.cjs ssh-turn-start
+              node tests/active-recovery-run.cjs ssh-string-approval
+              node tests/active-recovery-run.cjs ssh-studio
+              node tests/active-recovery-run.cjs source-commit
+              node tests/active-recovery-run.cjs reload
               ;;
             ssh-allocated)
               export LIFE_METADATA_QUIT_CASE=ssh-allocated

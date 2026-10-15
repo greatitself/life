@@ -39,3 +39,5 @@ Concurrent native close callbacks join the same Studio history flush, preserving
 Studio enables Send after both document recovery and the recovered planner finish their native acknowledgments, preserving the draft while sending is unavailable.
 
 Automatic development reloads wait until active native turns are idle, preserving the current interface, Stop control, and draft. Explicit reloads retain the verified durable handoff.
+
+Disconnected documents load their original committed native ledger before replay delivery, so viewing saved history does not require attaching a provider. An unadmitted ordinary startup remains protected without a privately proven startup intent.

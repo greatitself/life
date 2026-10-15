@@ -76,8 +76,8 @@
     },
     {
       "path": "tests/helpers/active-recovery-observer/runner-contract.cjs",
-      "bytes": 18278,
-      "sha256": "c5cd2822e223aefac6296c36eb382babdcc5dde4d3e79fcca0d76444bca6645d"
+      "bytes": 18923,
+      "sha256": "c3cf3e2c9c8ab0af855f3dbd92d2f7c14812cacc6ceef104ca9ac4d2e09a4249"
     },
     {
       "path": "tests/helpers/active-recovery-observer/local-proof.cjs",
@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 55322,
-      "sha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000"
+      "bytes": 57141,
+      "sha256": "6707004440e3656554cb9ab195303a418231b5c8ca9c516d9d3390546ffba13b"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 55322,
-      "sha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000"
+      "bytes": 57141,
+      "sha256": "6707004440e3656554cb9ab195303a418231b5c8ca9c516d9d3390546ffba13b"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -190,6 +190,11 @@
       "path": "tests/active-session-recovery-smoke.cjs",
       "priorSha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80",
       "reason": "Final Codex native snapshot reveals final_answer. Assert the exact phase-qualified projected ID and unchanged origin timestamp; preserve all native replay, exact prompt, and once-only delivery checks."
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "priorSha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000",
+      "reason": "An ordinary thread/start acknowledgment is not a privately claimed Studio start intent. Verify the unadmitted turn remains unknown with its exact user message, upstream thread and original live process retained, zero prompt submissions and no competing writer."
     }
   ]
 }

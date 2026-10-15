@@ -849,6 +849,59 @@ function installClaudeMetadata(fixture: Fixture) {
 }
 
 describe('Agents native recovery boundaries', () => {
+  it.each(['codex', 'claude'] as const)(
+    'replays exact committed %s history before reconnect without attaching or admitting input',
+    async (provider) => {
+      await withFixture(provider, async (fixture) => {
+        const original = owner(provider)
+        const [stored] = await run(
+          fixture.store.appendEvents(fixture.transport.id, [
+            {
+              eventId: `${fixture.transport.id}:local:original:1`,
+              outputCursor: 0,
+              event: {
+                sessionId: original.sessionId,
+                type: 'text',
+                text: exactReply,
+                nativeRecovery: {
+                  snapshotToken: original.snapshotToken!,
+                  ownerGeneration: original.generation!,
+                  localTurn: original.localTurn!,
+                },
+              },
+            },
+          ]),
+        )
+        const before = await run(fixture.store.readTransport(fixture.transport.id))
+        fixture.ssh.state = { ...fixture.ssh.state, status: 'disconnected' }
+        const recovered = await fixture.agents.recover({ consumers: [consumer()] })
+        expect(recovered.owners).toMatchObject([
+          { status: 'unknown', transportId: fixture.transport.id },
+        ])
+        expect(fixture.events).toHaveLength(1)
+        expect(fixture.events[0]).toMatchObject({
+          sessionId: original.sessionId,
+          type: 'text',
+          text: exactReply,
+          nativeRecovery: {
+            eventId: stored.eventId,
+            revision: stored.revision,
+            snapshotToken: original.snapshotToken,
+            ownerGeneration: original.generation,
+            localTurn: original.localTurn,
+          },
+        })
+        expect((await run(fixture.store.readTransport(fixture.transport.id))).inputs).toEqual(
+          before.inputs,
+        )
+        expect(fixture.attachments).toEqual([])
+        expect(fixture.open).not.toHaveBeenCalled()
+        expect(fixture.ssh.channel).not.toHaveBeenCalled()
+        expect(fixture.ssh.exec).not.toHaveBeenCalled()
+      })
+    },
+  )
+
   it.each([true, false])(
     'preserves an observed Codex completion across stale sibling checkpoints before native exit: completed=%s',
     async (completed) => {

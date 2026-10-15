@@ -1666,7 +1666,7 @@ export function useCustomizationStudio(options: StudioOptions) {
     if (!active) return
     let disposed = false
     setModels(fallbackModelCatalog(active.thread.provider))
-    if (api && options.connection.status === 'connected')
+    if (api && nativeRecoveryReady && options.connection.status === 'connected')
       void api.agent
         .models(active.thread.provider)
         .then((next) => {
@@ -1676,7 +1676,12 @@ export function useCustomizationStudio(options: StudioOptions) {
     return () => {
       disposed = true
     }
-  }, [active?.thread.provider, options.connection.status, options.connection.profile?.id])
+  }, [
+    active?.thread.provider,
+    options.connection.status,
+    options.connection.profile?.id,
+    nativeRecoveryReady,
+  ])
 
   useEffect(() => {
     if (!api || supportBlocksMutation()) return

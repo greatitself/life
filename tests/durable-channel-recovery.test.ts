@@ -2106,9 +2106,10 @@ describe('durable provider channel cold recovery', () => {
         provider: 'codex',
       })
       fixture.channels.add(channel)
+      await channel.ready
       const stopping = channel.closeNativeAndWait(
         { kind: 'close', sessionId: 'owned-root', ownerGeneration: 8 },
-        50,
+        1_000,
       )
       await vi.waitFor(() => expect(host.attachments[0].inputs).toHaveLength(1))
       host.attachments[0].frame({ type: 'ack', sequence: 1 })

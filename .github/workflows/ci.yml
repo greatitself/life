@@ -603,6 +603,11 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         run: node tests/studio-layout-smoke.cjs
+      - name: Stop during renderer preparation regression
+        id: preparation
+        continue-on-error: false
+        timeout-minutes: 3
+        run: node tests/app-live-controls-smoke.cjs --presentation
       - name: Exact native history load and checkpoint regression
         id: history
         continue-on-error: true
@@ -620,7 +625,7 @@ jobs:
           node <<'NODE'
           const assert = require('node:assert/strict')
           const steps = JSON.parse(process.env.REGRESSION_RESULTS)
-          const results = ['unit','focus','history','desktop'].map(name => ({name,outcome:steps[name]?.outcome || 'missing'}))
+          const results = ['unit','focus','preparation','history','desktop'].map(name => ({name,outcome:steps[name]?.outcome || 'missing'}))
           console.log(JSON.stringify(results,null,2))
           assert(results.every(row => row.outcome === 'success'), 'All release regression checks must pass')
           NODE

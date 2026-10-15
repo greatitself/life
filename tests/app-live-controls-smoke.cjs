@@ -208,7 +208,53 @@ async function presentationChecks(page, checks) {
       (id) => window.controlsTest.emit(id, 'complete', { status: 'completed' }),
       start.sessionId,
     )
+    await page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+    const pending = await page.evaluate(() => {
+      const test = window.controlsTest
+      test.holdState(true)
+      return { starts: test.records.starts.length, held: test.records.heldStateReads }
+    })
+    const cancelled = `  Cancel this ${provider} preparation exactly.\nNo late provider start.  `
+    await composer.fill(cancelled)
+    await composer.press('Enter')
+    await page.waitForFunction(
+      (held) => window.controlsTest.records.heldStateReads > held,
+      pending.held,
+    )
+    await page
+      .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+      .click()
+    await page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+    await page.evaluate(() => window.controlsTest.releaseStates())
+    const following = `  Explicit ${provider} follow-up after Stop.  `
+    await composer.fill(following)
+    await composer.press('Enter')
+    await page.waitForFunction(
+      (before) => window.controlsTest.records.starts.length > before,
+      pending.starts,
+    )
+    const after = await page.evaluate((before) => {
+      const test = window.controlsTest
+      return {
+        starts: test.records.starts.slice(before),
+        messages: test.stored().flatMap((thread) => thread.messages),
+      }
+    }, pending.starts)
+    assert.equal(after.starts.length, 1)
+    assert.equal(after.starts[0].prompt, following)
+    assert.equal(after.starts[0].remoteId, `external-${provider}`)
+    assert.equal(
+      after.messages.find((message) => message.text === cancelled)?.finishStatus,
+      'interrupted',
+    )
+    await page.evaluate(
+      (id) => window.controlsTest.emit(id, 'complete', { status: 'completed' }),
+      start.sessionId,
+    )
   }
+  checks.push(
+    'Stop cancels both providers before the connection reply reaches start IPC; only an explicit subsequent exact prompt is dispatched',
+  )
   checks.push(
     'Bring to Life imports both external Codex and Claude conversations and resumes their original provider IDs and project',
   )

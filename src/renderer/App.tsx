@@ -596,7 +596,9 @@ export function App() {
   }, [threads, historyWritable])
   const [threadMenu, setThreadMenu] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
-  const submitting = useRef<{ id?: string } | undefined>(undefined)
+  const submitting = useRef<
+    { id?: string; start?: { cancelled: boolean; dispatched: boolean } } | undefined
+  >(undefined)
   const sourceReloading = useRef(false)
   const runningChoices = useRef(
     new Map<string, Pick<StartInput, 'model' | 'reasoningEffort' | 'serviceTier'>>(),
@@ -1663,7 +1665,7 @@ export function App() {
     const transfer = selectedAttachments.length
       ? { id: '', controller: new AbortController() }
       : undefined
-    const submission = { id: active?.id }
+    const submission = { id: active?.id, start: { cancelled: false, dispatched: false } }
     submitting.current = submission
     if (!queued) {
       setDraft((current) => (current === prompt ? '' : current))
@@ -1862,7 +1864,9 @@ export function App() {
       if (attachmentTransfer.current === transfer) attachmentTransfer.current = undefined
       if (sourceReloading.current)
         throw new Error('Life is reloading. The queued message will be paused.')
+      if (submission.start.cancelled) return
       const actualConnection = await api!.connection.state()
+      if (submission.start.cancelled) return
       if (
         actualConnection.status !== 'connected' ||
         actualConnection.profile?.id !== connection.profile?.id ||
@@ -1904,6 +1908,7 @@ export function App() {
         reasoningEffort: input.reasoningEffort || '',
         serviceTier: input.serviceTier || '',
       })
+      submission.start.dispatched = true
       await api!.agent.start(input)
       if (selectedAttachments.length) {
         const sentIds = new Set(selectedAttachments.map((item) => item.id))
@@ -2055,6 +2060,10 @@ export function App() {
     if (!active || !api || !canMutateHistory()) return
     if (!nativeRecoveryReady || nativeRecoveryBlocksMutation(active)) return
     queue.pause(active.id)
+    const submission = submitting.current?.id === active.id ? submitting.current : undefined
+    // Stop can arrive while connection/context preparation still precedes the
+    // start IPC. Cancel that exact submission before acknowledging interruption.
+    if (submission?.start && !submission.start.dispatched) submission.start.cancelled = true
     if (attachmentTransfer.current?.id === active.id) {
       attachmentTransfer.current.controller.abort()
       return
@@ -2068,7 +2077,7 @@ export function App() {
             : thread,
         ),
       )
-      if (submitting.current?.id === active.id) submitting.current = undefined
+      if (submission && submitting.current === submission) submitting.current = undefined
     } catch (e) {
       setToast(errorText(e))
     } finally {

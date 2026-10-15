@@ -6984,9 +6984,11 @@ export class Agents {
       // This Stop owns the new, not-yet-admitted turn. An earlier completed
       // Stop cannot acknowledge it or let that turn start after interruption.
       admission.cancelled ||= new Error('Agent startup cancelled before native admission.')
-      const previous = this.sessions.get(sessionId)
       await runEffect(Deferred.await(admission.settled))
-      if (this.sessions.get(sessionId) !== previous) return
+      // No session can be published after this exact admission was cancelled.
+      // Its Stop is settled even if an earlier turn's Stop failed; that older
+      // completion must not become the result of cancelling the new request.
+      return
     }
     const pendingCompletion = this.stopCompletions.get(sessionId)
     if (pendingCompletion) {

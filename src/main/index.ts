@@ -620,16 +620,24 @@ async function init() {
   })
   await sourceCode.init()
   assertStartupActive()
-  type PendingReload = { acknowledgement: Promise<void>; cancel(): void }
+  type PendingReload = {
+    acknowledgement: Promise<void>
+    cancel(): void
+    allowActive(): void
+  }
   const sourceReloads = new RendererReloadFlights<BrowserWindow | null, PendingReload>()
-  const reloadSource = () => {
+  const reloadSource = (waitForIdleSessions = false) => {
     if (historyLifecycle.failure) return Promise.reject(historyLifecycle.failure)
     const owner = window
     const document = captureHistoryDocument(owner)
     const requestedRevision = owner ? rendererAdmissions.get(owner)?.documentRevision : undefined
     const requestedDocumentId = nativeDocuments.capture().documentId
     const existing = sourceReloads.get(owner, requestedRevision, requestedDocumentId)
-    if (existing) return existing.acknowledgement
+    if (existing) {
+      if (!waitForIdleSessions) existing.allowActive()
+      return existing.acknowledgement
+    }
+    let deferActive = waitForIdleSessions
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let acknowledge = () => {}
@@ -647,7 +655,13 @@ async function init() {
       sourceReloads.clear(pending)
       acknowledge()
     }
-    const pending: PendingReload = { acknowledgement, cancel: finish }
+    const pending: PendingReload = {
+      acknowledgement,
+      cancel: finish,
+      allowActive: () => {
+        deferActive = false
+      },
+    }
     sourceReloads.replace(owner, requestedRevision, pending, requestedDocumentId)?.cancel()
     const ownsDocument = () =>
       Boolean(
@@ -683,6 +697,9 @@ async function init() {
       }
       try {
         await agents.settleRendererHandoff()
+        // Automatic development navigation retains the current React owner while
+        // its native turn is active. Explicit reloads use the durable handoff.
+        if (deferActive && agents.hasRunningSessions()) return false
         if (await agents.rendererHandoffAdmitted(reportBlocked)) return true
       } catch (error) {
         if (reportBlocked) console.error('[Life] Source reload ownership check failed:', error)
@@ -721,7 +738,10 @@ async function init() {
           if (!ownsDocument() || historyLifecycle.failure) return
           // Accepted start/control work can enter while history is flushing.
           // Recheck its real durable ownership after every asynchronous barrier.
-          if (!(await agents.rendererHandoffAdmitted())) {
+          if (
+            (deferActive && agents.hasRunningSessions()) ||
+            !(await agents.rendererHandoffAdmitted())
+          ) {
             if (ownsDocument()) schedule(() => void reloadWhenIdle(), 200)
             return
           }
@@ -740,7 +760,7 @@ async function init() {
     schedule(() => void reloadWhenIdle(), 100)
     return acknowledgement
   }
-  reloadRendererWhenIdle = reloadSource
+  reloadRendererWhenIdle = () => reloadSource(true)
   const actionDirectory = join(app.getPath('userData'), 'native-recovery-actions')
   let recoveryActions: NativeRecoveryActionsHandle = unavailableNativeRecoveryActions(
     actionDirectory,

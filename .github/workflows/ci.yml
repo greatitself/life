@@ -695,6 +695,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify native reload coordination regressions
+        if: matrix.suite == 'ownership'
+        run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
       - run: npm run build

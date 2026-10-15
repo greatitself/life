@@ -311,7 +311,7 @@ function fixture(name: string) {
     clearTimeout,
     coordinator: undefined as
       | {
-          reloadSource(): Promise<void>
+          reloadSource(waitForIdleSessions?: boolean): Promise<void>
           cancelRendererWork(owner?: Owner | null): Promise<void>
           permitsRendererAdmission(channel: string): boolean
         }
@@ -383,6 +383,53 @@ afterAll(() => {
 })
 
 describe('production source reload waits for idle native writers', () => {
+  it('keeps automatic reload pending while a verified native turn is still active', async () => {
+    const { context, coordinator, writers, events, snapshot } = fixture(
+      'automatic reload with durable active ownership',
+    )
+    context.busy = true
+    context.agents.rendererHandoffAdmitted = async () => true
+    let acknowledged = false
+    const pending = coordinator.reloadSource(true)
+    void pending.then(() => {
+      acknowledged = true
+    })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(acknowledged).toBe(false)
+    expect(events).not.toContain('renderer:reload')
+    expect(events).not.toContain('agents:suspend-consumers')
+    expect(coordinator.permitsRendererAdmission('agent:stop')).toBe(true)
+    snapshot('automatic reload retains the live document and Stop authority')
+    context.busy = false
+    writers.codex.exit()
+    writers.claude.exit()
+    await vi.advanceTimersByTimeAsync(400)
+    await pending
+    expect(events).toContain('renderer:reload')
+  })
+
+  it('lets an explicit verified reload promote a deferred automatic request', async () => {
+    const { context, coordinator, writers, events } = fixture(
+      'explicit reload promotes automatic wait',
+    )
+    // These fixture writers represent the idle pool; the separate active owner
+    // is certified by the real coordinator's native-handoff callback below.
+    writers.codex.exit()
+    writers.claude.exit()
+    context.busy = true
+    context.agents.rendererHandoffAdmitted = async () => true
+    const automatic = coordinator.reloadSource(true)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(events).not.toContain('renderer:reload')
+    const explicit = coordinator.reloadSource()
+    expect(explicit).toBe(automatic)
+    await vi.advanceTimersByTimeAsync(400)
+    await explicit
+    expect(events).toContain('renderer:reload')
+    expect(context.busy).toBe(true)
+    expect(events).not.toContain('agents:close')
+  })
+
   it('reconciles original native exit evidence before source-reload admission', async () => {
     const { context, coordinator, writers, events } = fixture(
       'source preflight native exit reconciliation',

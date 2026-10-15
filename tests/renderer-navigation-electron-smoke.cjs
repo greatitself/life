@@ -882,6 +882,11 @@ async function run() {
       prompt,
     )
     await setDraft(draft)
+    await waitUntil(async () => {
+      await flush()
+      const observed = await savedThread()
+      return typeof observed?.gitObservedAt === 'number' && observed.gitHost === input.host
+    }, 'initial native Git context is acknowledged before comparing reload snapshots')
     await flush()
     baseline = await nativeState()
     proof.baseline = baseline

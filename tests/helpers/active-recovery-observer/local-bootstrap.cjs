@@ -422,10 +422,20 @@ async function connectLocal(harness, bootstrap) {
     await chooser.getByRole('button', { name: 'Use Local', exact: true }).click()
   const picker = harness.page.getByRole('dialog', { name: 'Select a project', exact: true })
   if (await picker.isVisible()) {
-    await picker
-      .getByRole('textbox', { name: 'Project directory', exact: true })
-      .fill(harness.fixture.workspace)
-    await picker.getByRole('button', { name: 'Open project', exact: true }).click()
+    try {
+      await picker
+        .getByRole('textbox', { name: 'Project directory', exact: true })
+        .fill(harness.fixture.workspace)
+      await picker.getByRole('button', { name: 'Open project', exact: true }).click()
+    } catch (error) {
+      const restored = await harness.page.evaluate(() => window.relay.connection.state())
+      if (
+        restored.status !== 'connected' ||
+        restored.profile?.id !== bootstrap.sshProfileId ||
+        restored.workspace !== harness.fixture.workspace
+      )
+        throw error
+    }
     await picker.waitFor({ state: 'hidden' })
   }
 }
@@ -485,10 +495,20 @@ async function connectSSH(harness, bootstrap) {
     (await harness.page.evaluate(() => window.relay.connection.state())).workspace !==
     harness.fixture.workspace
   ) {
-    await picker
-      .getByRole('textbox', { name: 'Project directory', exact: true })
-      .fill(harness.fixture.workspace)
-    await picker.getByRole('button', { name: 'Open project', exact: true }).click()
+    try {
+      await picker
+        .getByRole('textbox', { name: 'Project directory', exact: true })
+        .fill(harness.fixture.workspace)
+      await picker.getByRole('button', { name: 'Open project', exact: true }).click()
+    } catch (error) {
+      const restored = await harness.page.evaluate(() => window.relay.connection.state())
+      if (
+        restored.status !== 'connected' ||
+        restored.profile?.id !== bootstrap.sshProfileId ||
+        restored.workspace !== harness.fixture.workspace
+      )
+        throw error
+    }
   }
   if (await picker.isVisible()) await picker.waitFor({ state: 'hidden' })
   const connected = await harness.page.evaluate(() => window.relay.connection.state())

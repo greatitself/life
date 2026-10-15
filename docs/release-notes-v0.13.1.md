@@ -37,3 +37,5 @@ Renderer handoff closes the old document’s history-write admission after its f
 Concurrent native close callbacks join the same Studio history flush, preserving one acknowledged write of the final archive.
 
 Studio enables Send after both document recovery and the recovered planner finish their native acknowledgments, preserving the draft while sending is unavailable.
+
+Automatic development reloads wait until active native turns are idle, preserving the current interface, Stop control, and draft. Explicit reloads retain the verified durable handoff.

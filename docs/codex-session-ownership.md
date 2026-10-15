@@ -97,12 +97,4 @@ actions use separate receipts; a started action is reconciled rather than
 executed again, and a completed source action stays completed if later history
 bookkeeping fails. See [native active-session recovery](native-active-recovery.md).
 
-The current isolated Linux Electron/SSH Codex streaming-restart case passed.
-Claude approval recovery remains unresolved (`PENDING_CLAUDE_APPROVAL_RECOVERY`).
-Final merged native counts (`PENDING_FINAL_MERGED_NATIVE_COUNTS`), matched
-performance (`PENDING_MATCHED_PERFORMANCE`), and Windows directory-durability/native-recovery
-compatibility (`PENDING_WINDOWS_NATIVE_RECOVERY_COMPATIBILITY`) remain pending.
-These active fixtures use deterministic provider stand-ins and do not authenticate
-or request upstream inference. Earlier idle-ownership timings and the separately
-scoped authenticated session read above retain their original meaning; they do
-not establish complete active recovery or performance on the final merged graph.
+Release verification is scoped to the exact tagged source commit and its required GitHub Actions jobs. See the [0.13.1 release notes](release-notes-v0.13.1.md) for the release contract. Controlled native fixtures do not establish authenticated upstream-provider behavior; authenticated Claude verification remains deferred. Historical performance reports retain their original frozen-source scope, and renderer measurements do not certify native-provider performance. Native Local execution and active-session recovery require POSIX facilities; Windows supports attached SSH providers and preserves protected state without admitting unsupported native recovery.

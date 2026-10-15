@@ -2,8 +2,7 @@
 
 The 0.13.0 release candidate uses **Effect 4.0.0-rc.118**, pinned in `package.json`, for
 native application services and asynchronous domain workflows. Electron still
-renders React and speaks the providers' existing native protocols. Final merged
-recovery verification and release publication remain pending. Historical
+renders React and speaks the providers' existing native protocols. Release publication requires verification of the exact source commit. Historical
 performance evidence retains the scope of its original frozen graphs.
 
 ## Application boundary
@@ -148,11 +147,7 @@ while native ownership continues; source, settings, extension, and reload action
 retain their own receipts. Started actions are reconciled rather than blindly
 executed again. See [native active-session recovery](native-active-recovery.md).
 
-Final merged native counts (`PENDING_FINAL_MERGED_NATIVE_COUNTS`), matched
-performance (`PENDING_MATCHED_PERFORMANCE`), Claude approval recovery
-(`PENDING_CLAUDE_APPROVAL_RECOVERY`), and Windows directory-durability/native-recovery
-compatibility (`PENDING_WINDOWS_NATIVE_RECOVERY_COMPATIBILITY`) remain pending.
-The existing Linux Codex stream result does not establish those remaining gates.
+Release verification is scoped to the exact tagged source commit and its required GitHub Actions jobs. See the [0.13.1 release notes](release-notes-v0.13.1.md) for the release contract. Controlled native fixtures do not establish authenticated upstream-provider behavior; authenticated Claude verification remains deferred. Historical performance reports retain their original frozen-source scope, and renderer measurements do not certify native-provider performance. Native Local execution and active-session recovery require POSIX facilities; Windows supports attached SSH providers and preserves protected state without admitting unsupported native recovery.
 
 A private weak map associates eligible complete loads with their exact raw
 native source. Unique nonempty thread identities determine compact

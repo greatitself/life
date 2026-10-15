@@ -4,7 +4,7 @@ Life is an Electron desktop research workspace for **Codex and Claude Code**, wi
 
 ![Life agent workspace](docs/images/life-workspace.png)
 
-Desktop installer download target: [v0.13.0 release](https://github.com/greatitself/life/releases/tag/v0.13.0). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned. Publication is pending completion of the release verification pipeline.
+Desktop installer download target: [v0.13.1 release](https://github.com/greatitself/life/releases/tag/v0.13.1). Windows uses a `.exe` installer; macOS uses DMG; Linux supports AppImage and Debian packages. Builds are unsigned. Publication requires completion of the release verification pipeline.
 
 ## Upgrade your installed Life
 
@@ -12,7 +12,7 @@ If you installed **0.1.0**, run the new Windows `.exe` once. It upgrades the exi
 
 From **0.2.2**, open **Updates** to check, download, and restart into subsequent published releases. Windows and Linux AppImage support in-app updates. From 0.11.0, updates prepare in the background by default; turn off **Download updates automatically** to choose when to download. Restart remains your choice. Unsigned macOS and Debian installations use the latest installer. Windows CI upgrades only from the latest preceding published release, **0.12.0** for the 0.13.0 release, and reports the complete installation/upgrade time while requiring installation identity, saved data, payload verification, and cleanup checks to pass. Local source revisions and extension files remain in Life’s data directory when the installer updates.
 
-Life 0.13 adds native Local execution with a real terminal, moves asynchronous services to Effect, and strengthens large-history loading, streaming checkpoints, and conversation ownership. Its active-recovery candidate records the original provider process and session, numbered input delivery, and native permission ownership rather than launching replacement work. Native Local execution requires a POSIX shell; Windows continues to support SSH environments. The [0.13.0 release notes](docs/release-notes-v0.13.0.md) retain the pending final recovery, performance, and Windows compatibility gates.
+Life 0.13 adds native Local execution with a real terminal, moves asynchronous services to Effect, and strengthens large-history loading, streaming checkpoints, and conversation ownership. Its active-recovery candidate records the original provider process and session, numbered input delivery, and native permission ownership rather than launching replacement work. Native Local execution requires a POSIX shell; Windows continues to support SSH environments. The [0.13.1 release notes](docs/release-notes-v0.13.1.md) describe the corrective fixes and required verification.
 
 Life 0.12 brings pinned threads, stable manual ordering, unread completion indicators, compact settled/snoozed/archive sections, reversible thread arrangement, and recovered composer drafts with their attachments. Completed responses keep their full activity available to expand, with file changes shown when reported. The [0.12.0 release notes](docs/release-notes-v0.12.0.md) describe the thread behavior adapted from the inspected T3 Code reference.
 
@@ -139,7 +139,7 @@ Codex requests, persistence, provider metadata, and typed failures. See the
 [renderer performance checks](docs/renderer-performance.md) for migration scope,
 verification, and measurement limits.
 
-The current isolated Linux Codex streaming-restart fixture passed; Claude approval recovery remains unresolved (`PENDING_CLAUDE_APPROVAL_RECOVERY`). Final merged native counts (`PENDING_FINAL_MERGED_NATIVE_COUNTS`), matched performance (`PENDING_MATCHED_PERFORMANCE`), and Windows directory-durability/native-recovery compatibility (`PENDING_WINDOWS_NATIVE_RECOVERY_COMPATIBILITY`) remain pending. Historical performance measurements keep their original frozen-graph scope. Publication remains pending completion of those final gates.
+Release verification is scoped to the exact tagged source commit and its required GitHub Actions jobs. See the [0.13.1 release notes](docs/release-notes-v0.13.1.md) for the release contract. Controlled native fixtures do not establish authenticated upstream-provider behavior; authenticated Claude verification remains deferred. Historical performance reports retain their original frozen-source scope, and renderer measurements do not certify native-provider performance. Native Local execution and active-session recovery require POSIX facilities; Windows supports attached SSH providers and preserves protected state without admitting unsupported native recovery.
 
 Use Node.js **22.12 or newer**:
 

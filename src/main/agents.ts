@@ -324,6 +324,7 @@ interface Session {
   >
   claudeTaskRuns?: Map<string, string>
   phase: 'initializing' | 'startingTurn' | 'running'
+  promptDispatchStarted?: boolean
 }
 export class Agents {
   private readonly recovery: NativeAgentRecovery
@@ -2441,7 +2442,8 @@ export class Agents {
         processedInputSequences: [...(this.nativeProcessedInputs.get(id) || [])],
         root: {
           state: session.busy
-            ? session.phase === 'initializing' || session.phase === 'startingTurn'
+            ? session.phase === 'initializing' ||
+              (session.phase === 'startingTurn' && session.promptDispatchStarted === false)
               ? 'starting'
               : 'active'
             : 'idle',
@@ -2456,6 +2458,11 @@ export class Agents {
         },
         children,
         graphComplete: true,
+        rootDispatchNotStarted:
+          this.sessions.get(sessionId) === session &&
+          session.promptDispatchStarted === false &&
+          owner.generation === session.recoveryGeneration &&
+          owner.snapshotToken === session.recoverySnapshotToken,
         approvals: [...session.approvals].map(([requestId, approval]) => ({
           requestId,
           nativeRequestId: approval.wireId as string | number,
@@ -4436,6 +4443,7 @@ export class Agents {
       claudeTaskRuns: old?.claudeTaskRuns,
       claudeFastModeNeedsOptIn: old?.claudeFastModeNeedsOptIn,
       phase: 'initializing',
+      promptDispatchStarted: false,
       initialization: new AbortController(),
     }
     // Claude's stream-json process supports further user messages and native
@@ -5031,6 +5039,7 @@ export class Agents {
     session.nativeStartPlan = { ...session.nativeStartPlan, turn: { params: turnParams } }
     await this.recordRecoveryOwner(session, rpc.channel)
     if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
+    session.promptDispatchStarted = true
     const result = await rpc.request(
       'turn/start',
       turnParams,

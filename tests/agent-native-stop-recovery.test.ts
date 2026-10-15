@@ -718,6 +718,59 @@ describe('native Stop recovery plan', () => {
     expect(actual.actions).toEqual([])
   })
 
+  it('only a live pre-dispatch witness can finish a prepared start with no allocated prompt', () => {
+    const pendingOwner = owner({
+      phase: 'startingTurn',
+      state: 'starting',
+      nativeTurnId: undefined,
+    })
+    const saved = withTransport(snapshot(), { owners: [pendingOwner] })
+    for (const rootDispatchNotStarted of [false, true]) {
+      const actual = planNativeStopRecovery(
+        input({
+          owner: pendingOwner,
+          snapshot: saved,
+          root: { state: 'starting', ownershipProven: true, nativeThreadId: 'native-thread' },
+          rootDispatchNotStarted,
+        }),
+      )
+      expect(actual.status).toBe(rootDispatchNotStarted ? 'complete' : 'unknown')
+      expect(actual.actions).toEqual(rootDispatchNotStarted ? [{ type: 'finish-unstarted' }] : [])
+    }
+  })
+
+  it('a pre-dispatch witness cannot finish any unresolved allocated user prompt', () => {
+    const pendingOwner = owner({
+      phase: 'startingTurn',
+      state: 'starting',
+      nativeTurnId: undefined,
+    })
+    for (const acknowledged of [false, true]) {
+      const original = delivery({
+        acknowledged,
+        written: false,
+        semantic: {
+          kind: 'user-prompt',
+          sessionId: 'life-session',
+          ownerGeneration: 4,
+          method: 'turn/start',
+          requestId: 20,
+        },
+      })
+      const saved = withTransport(snapshot({ inputs: [original] }), { owners: [pendingOwner] })
+      const actual = planNativeStopRecovery(
+        input({
+          owner: pendingOwner,
+          snapshot: saved,
+          root: { state: 'starting', ownershipProven: true, nativeThreadId: 'native-thread' },
+          rootDispatchNotStarted: true,
+        }),
+      )
+      expect(actual.status).toBe('unknown')
+      expect(actual.actions).toEqual([])
+    }
+  })
+
   it('finishes startup before any prompt allocation without native work or title inference', () => {
     const pendingOwner = owner({
       phase: 'initializing',

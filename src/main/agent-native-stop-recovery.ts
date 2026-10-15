@@ -39,6 +39,8 @@ export interface NativeStopRecoveryInput {
   readonly approvals: readonly NativeStopRecoveryApproval[]
   /** The private native reducer has reconstructed all ownership and child relationships. */
   readonly graphComplete: boolean
+  /** Live Main witness for the exact owner generation before its native prompt call begins. */
+  readonly rootDispatchNotStarted?: boolean
 }
 
 export type NativeStopRecoveryAction =
@@ -356,7 +358,7 @@ export function planNativeStopRecovery(input: NativeStopRecoveryInput): NativeSt
   }
   const unstarted =
     root.state === 'starting' &&
-    registered.phase === 'initializing' &&
+    (registered.phase === 'initializing' || input.rootDispatchNotStarted === true) &&
     prompts.every(
       (delivery) =>
         !delivery.written &&

@@ -5982,30 +5982,21 @@ export class Agents {
     } finally {
       this.pendingNativeOperations.delete(opening)
     }
-    if (
-      !channel ||
-      session.stopRequested ||
-      session.channel !== channel ||
-      this.sessions.get(input.sessionId) !== session
-    )
-      return
+    const ownsChannel = () =>
+      session.channel === channel && this.sessions.get(input.sessionId) === session
+    if (!channel || session.stopRequested || !ownsChannel()) return
     if (session.recoveryTransportId)
       session.claudeUsageCallId = `${session.recoveryTransportId}:generation:${session.recoveryGeneration}`
     try {
       await this.claudeControl(session, object(session.nativeStartPlan.initialize), 60000)
-      if (session.stopRequested || session.channel !== channel) return
+      if (session.stopRequested || !ownsChannel()) return
       session.phase = 'running'
       session.nativeStartPlan = {
         ...session.nativeStartPlan,
         user: { ...object(session.nativeStartPlan.user), session_id: session.remoteId || '' },
       }
       await this.recordRecoveryOwner(session, channel)
-      if (
-        session.stopRequested ||
-        session.channel !== channel ||
-        this.sessions.get(input.sessionId) !== session
-      )
-        return
+      if (session.stopRequested || !ownsChannel()) return
       session.promptDispatchStarted = true
       await this.writeClaudeAndWait(
         session,

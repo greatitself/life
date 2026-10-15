@@ -1517,6 +1517,75 @@ describe('Agents native Stop recovery boundaries', () => {
       expect(stopEvents(fixture)).toHaveLength(2)
     }))
 
+  it('renderer handoff joins the original Stop owner receipt before checking admission', () =>
+    withFixture('codex', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const channel = await recovered(fixture)
+      const gate = Deferred.makeUnsafe<void>()
+      let held = false
+      const target = fixture.agents as unknown as {
+        recordRecoveryOwner: (
+          session: { stopRequested: boolean; busy: boolean },
+          channel: ClientChannel,
+        ) => Promise<void>
+      }
+      const original = target.recordRecoveryOwner.bind(fixture.agents)
+      vi.spyOn(target, 'recordRecoveryOwner').mockImplementation(async (session, attachment) => {
+        await original(session, attachment)
+        if (!held && session.stopRequested && !session.busy) {
+          held = true
+          await run(Deferred.await(gate))
+        }
+      })
+      const stopping = fixture.agents.stop('life-session')
+      await vi.waitFor(() => expect(interrupts(channel)).toHaveLength(1))
+      const reply = channel.reply(interrupted())
+      let joined = false
+      let handoff: Promise<void> | undefined
+      try {
+        await vi.waitFor(() => expect(held).toBe(true))
+        fixture.agents.suspendRendererConsumers()
+        expect(await fixture.agents.rendererHandoffAdmitted()).toBe(false)
+        handoff = fixture.agents.settleRendererHandoff().then(() => {
+          joined = true
+        })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(joined).toBe(false)
+      } finally {
+        Deferred.doneUnsafe(gate, Effect.void)
+        await reply
+        await stopping
+        await handoff
+      }
+      expect(joined).toBe(true)
+      expect(await fixture.agents.rendererHandoffAdmitted()).toBe(true)
+      expect(interrupts(channel)).toHaveLength(1)
+      expect(channel.nativeWrites.filter((entry) => entry.message.method === 'turn/start')).toEqual(
+        [],
+      )
+    }))
+
+  it('a handoff timeout preserves the original pending native Stop', () =>
+    withFixture('codex', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const channel = await recovered(fixture)
+      const stopping = fixture.agents.stop('life-session')
+      await vi.waitFor(() => expect(interrupts(channel)).toHaveLength(1))
+      fixture.agents.suspendRendererConsumers()
+      try {
+        await expect(fixture.agents.settleRendererHandoff(25)).rejects.toMatchObject({
+          operation: 'renderer-handoff',
+        })
+        expect(await fixture.agents.rendererHandoffAdmitted()).toBe(false)
+        expect(interrupts(channel)).toHaveLength(1)
+        expect(channel.close).not.toHaveBeenCalled()
+        expect(channel.signal).not.toHaveBeenCalled()
+      } finally {
+        await channel.reply(interrupted())
+        await stopping
+      }
+    }))
+
   it('an unresolved original user prompt obtains its own native identity before one Stop', () =>
     withFixture(
       'codex',

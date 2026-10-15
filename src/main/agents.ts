@@ -7244,6 +7244,43 @@ export class Agents {
     }
     return false
   }
+  /** Join the old document's accepted work before testing replacement admission. */
+  readonly settleRendererHandoffEffect = Effect.fn('Agents.settleRendererHandoff')(
+    function* (this: Agents, timeoutMs = 8_000) {
+      const settled = yield* Effect.gen(
+        function* (this: Agents) {
+          // Provider completion may reach the UI before Stop's final owner/history
+          // receipt. Join that original completion; never infer an exit from UI state.
+          yield* Effect.all([...this.stopCompletions.values()].map(Deferred.await), {
+            concurrency: 'unbounded',
+          })
+          yield* Effect.tryPromise({
+            try: () =>
+              Promise.allSettled([
+                ...this.pendingNativeOperations,
+                ...this.stopContinuations.values(),
+                ...this.pendingOwnerUpdates,
+                ...[...this.pendingPermissionResponses.values()].map((entry) => entry.promise),
+              ]),
+            catch: (cause) =>
+              this.recoveryError(
+                'renderer-handoff',
+                'The original native work could not settle.',
+                cause,
+              ),
+          })
+        }.bind(this),
+      ).pipe(Effect.timeoutOption(timeoutMs))
+      if (Option.isNone(settled))
+        return yield* this.recoveryError(
+          'renderer-handoff',
+          'The original native work has not settled. The new interface stays paused.',
+        )
+    }.bind(this),
+  )
+  settleRendererHandoff(timeoutMs = 8_000): Promise<void> {
+    return runEffect(this.settleRendererHandoffEffect(timeoutMs))
+  }
   readonly rendererHandoffAdmittedEffect = Effect.fn('Agents.rendererHandoffAdmitted')(
     function* (this: Agents) {
       if (this.hasUntrackedRunningSessions()) return false

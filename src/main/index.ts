@@ -92,6 +92,7 @@ let applicationRuntime: ApplicationRuntime | undefined
 let nativeRecoveryRuntime: ManagedRuntime.ManagedRuntime<NativeRecoveryStore, unknown> | undefined
 let nativeActionRuntime: ManagedRuntime.ManagedRuntime<NativeRecoveryActions, unknown> | undefined
 let flushNativeRecovery = async (): Promise<void> => {}
+let settleRendererOperations = async (): Promise<void> => {}
 let detachNativeRecovery = async (): Promise<void> => {}
 let finalizeRendererSuspension = () => {}
 let rendererHandoffAdmitted = async (): Promise<boolean> => false
@@ -205,6 +206,7 @@ async function cancelRendererWork(
               if (!current()) break
               await releaseIdleProviders()
             }
+          await settleRendererOperations()
           await flushNativeRecovery()
           finalizeRendererSuspension()
           if (retired && !retired.success) throw retired.error
@@ -454,6 +456,7 @@ async function init() {
   hostHistory = new AgentHistory(ssh)
   cancelRendererSessions = () => agents.suspendRendererConsumers()
   flushNativeRecovery = () => agents.flushRecovery()
+  settleRendererOperations = () => agents.settleRendererHandoff()
   detachNativeRecovery = () => agents.detachForShutdown()
   finalizeRendererSuspension = () => agents.finalizeRendererSuspension()
   rendererHandoffAdmitted = () => agents.rendererHandoffAdmitted()

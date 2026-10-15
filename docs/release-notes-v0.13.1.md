@@ -17,3 +17,5 @@ The release pipeline requires successful verification of the exact source commit
 The platform and experimental active-session-recovery limits described in 0.13.0 still apply. Windows supports SSH environments; native Local execution and active-session recovery require POSIX facilities. Windows and macOS packages use the existing unsigned policy.
 
 Renderer replacement joins accepted native Stop, startup, permission, and owner-checkpoint work before evaluating the existing ownership gate. A timeout keeps the replacement paused and preserves the original native operation.
+
+A failed provider opening can finish renderer handoff once its exact original native exit is durably confirmed. Missing, unconfirmed, or unrelated-machine exit evidence keeps the original ownership block in place.

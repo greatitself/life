@@ -1571,6 +1571,49 @@ describe('Agents native Stop recovery boundaries', () => {
       )
     }))
 
+  it.each(['missing', 'unconfirmed', 'confirmed', 'foreign-machine'] as const)(
+    'a failed opening requires its exact persisted native exit: %s',
+    (proof) =>
+      withFixture('codex', async (fixture) => {
+        await admitOriginalPrompt(fixture)
+        const channel = await recovered(fixture)
+        const originalWrites = [...channel.nativeWrites]
+        const target = fixture.agents as unknown as {
+          machineIdentity: () => string
+          failedFreshProviders: Map<
+            string,
+            { machine: string; provider: Provider; message: string }
+          >
+        }
+        target.failedFreshProviders.set(fixture.transport.id, {
+          machine: proof === 'foreign-machine' ? 'unrelated-machine' : target.machineIdentity(),
+          provider: 'codex',
+          message: 'Opening failed before adopting the native exit observer.',
+        })
+        if (proof !== 'missing') {
+          const snapshot = await run(fixture.store.readTransport(fixture.transport.id))
+          await run(
+            fixture.store.appendOutputs(fixture.transport.id, [
+              {
+                type: 'exit',
+                cursor: snapshot.outputCursor + 1,
+                code: 0,
+                nativeExitConfirmed: proof !== 'unconfirmed',
+              },
+            ]),
+          )
+        }
+        fixture.agents.suspendRendererConsumers()
+        expect(await fixture.agents.rendererHandoffAdmitted()).toBe(false)
+        await fixture.agents.settleRendererHandoff()
+        expect(await fixture.agents.rendererHandoffAdmitted()).toBe(proof === 'confirmed')
+        expect(target.failedFreshProviders.has(fixture.transport.id)).toBe(proof !== 'confirmed')
+        expect(channel.nativeWrites).toEqual(originalWrites)
+        expect(channel.close).not.toHaveBeenCalled()
+        expect(channel.signal).not.toHaveBeenCalled()
+      }),
+  )
+
   it('renderer handoff joins the original Stop owner receipt before checking admission', () =>
     withFixture('codex', async (fixture) => {
       await admitOriginalPrompt(fixture)

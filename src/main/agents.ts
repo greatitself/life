@@ -7257,26 +7257,54 @@ export class Agents {
     function* (this: Agents, timeoutMs = 8_000) {
       const settled = yield* Effect.gen(
         function* (this: Agents) {
+          if (this.nativeRecovery && this.failedFreshProviders.size) {
+            yield* this.nativeRecovery.flushEffect()
+            const snapshots = yield* this.nativeRecovery.listTransports()
+            for (const snapshot of snapshots) {
+              const failed = this.failedFreshProviders.get(snapshot.transport.id)
+              const exited = snapshot.outputs.findLast(isConfirmedNativeExit)
+              if (
+                !failed ||
+                !exited ||
+                failed.provider !== snapshot.transport.provider ||
+                failed.machine !== this.recoveryMachine(snapshot)
+              )
+                continue
+              // An opening can fail before its live exit observer is adopted.
+              // Reduce only the original transport's persisted native exit proof.
+              this.reduceNativeExit(
+                snapshot.transport.id,
+                exited.cursor,
+                [...this.sessions].filter(
+                  ([, session]) => session.recoveryTransportId === snapshot.transport.id,
+                ),
+              )
+            }
+          }
           // Provider completion may reach the UI before Stop's final owner/history
           // receipt. Join that original completion; never infer an exit from UI state.
           yield* Effect.all([...this.stopCompletions.values()].map(Deferred.await), {
             concurrency: 'unbounded',
           })
-          yield* Effect.tryPromise({
-            try: () =>
-              Promise.allSettled([
-                ...this.pendingNativeOperations,
-                ...this.stopContinuations.values(),
-                ...this.pendingOwnerUpdates,
-                ...[...this.pendingPermissionResponses.values()].map((entry) => entry.promise),
-              ]),
-            catch: (cause) =>
-              this.recoveryError(
-                'renderer-handoff',
-                'The original native work could not settle.',
-                cause,
-              ),
-          })
+          yield* Effect.all(
+            [
+              ...this.pendingNativeOperations,
+              ...this.stopContinuations.values(),
+              ...this.pendingOwnerUpdates,
+              ...[...this.pendingPermissionResponses.values()].map((entry) => entry.promise),
+            ].map((operation) =>
+              Effect.tryPromise({
+                try: () => operation,
+                catch: (cause) =>
+                  this.recoveryError(
+                    'renderer-handoff',
+                    'The original native work could not settle.',
+                    cause,
+                  ),
+              }).pipe(Effect.exit),
+            ),
+            { concurrency: 'unbounded' },
+          )
         }.bind(this),
       ).pipe(Effect.timeoutOption(timeoutMs))
       if (Option.isNone(settled))
@@ -7310,6 +7338,11 @@ export class Agents {
               recoveryStarting: Boolean(this.recoveryStarting),
               recoveryAdmissionDepth: this.recoveryAdmissionDepth,
             },
+            failedProviderOpenings: [...this.failedFreshProviders].map(([id, failed]) => ({
+              id,
+              provider: failed.provider,
+              machine: failed.machine,
+            })),
             sessions: [...this.sessions]
               .filter(
                 ([, session]) =>

@@ -114,16 +114,27 @@ async function runUsageChecks(context) {
   const baseline = (await context.fixture.log()).length
   const probeTurn = async (provider, prompt, { fresh = false } = {}) => {
     if (fresh) await context.newThread(provider)
+    const start = (await context.fixture.log()).length
     await context.send(prompt)
+    await context.waitUntil(
+      async () => (await context.promptsSince(start, provider)).includes(prompt),
+      `Exact native ${provider} usage probe reaches the provider`,
+      30000,
+    )
+    await context.waitForSend()
     let thread
-    await context.waitUntil(async () => {
-      thread = (await readThreads()).find(
-        (item) =>
-          item.provider === provider &&
-          item.messages.some((message) => message.role === 'user' && message.text === prompt),
-      )
-      return Boolean(thread && !thread.busy && usageMessages(thread).length)
-    }, `Native ${provider} usage event is retained after ${prompt}`)
+    await context.waitUntil(
+      async () => {
+        thread = (await readThreads()).find(
+          (item) =>
+            item.provider === provider &&
+            item.messages.some((message) => message.role === 'user' && message.text === prompt),
+        )
+        return Boolean(thread && !thread.busy && usageMessages(thread).length)
+      },
+      `Native ${provider} usage event is retained after ${prompt}`,
+      30000,
+    )
     proof.requests.push({ provider, prompt, threadId: thread.id })
     return thread
   }

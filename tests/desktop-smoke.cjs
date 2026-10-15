@@ -633,6 +633,7 @@ export function activityLabel(activity: ThreadActivity): string {
     rendererErrors,
     input,
     waitUntil,
+    promptsSince,
     send,
     composer,
     waitForSend,

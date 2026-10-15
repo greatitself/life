@@ -434,9 +434,19 @@ async function connectSSH(harness, bootstrap) {
   const input = harness.fixture.input()
   const dialog = harness.page.getByRole('dialog', { name: 'Choose an environment', exact: true })
   if (!(await dialog.isVisible())) {
-    const connect = harness.page.getByRole('button', { name: 'Connect environment', exact: true })
-    if (await connect.isVisible()) await connect.click()
-    else await harness.page.getByRole('button', { name: 'Connections', exact: true }).click()
+    // Archive hydration can replace the welcome card. Use the persistent titlebar
+    // route so a transient Connect environment button cannot disappear mid-click.
+    await harness.page
+      .getByRole('button', { name: 'Current Active Environment', exact: true })
+      .click()
+      .catch(async (error) => {
+        if (!(await dialog.isVisible())) throw error
+      })
+    if (!(await dialog.isVisible()))
+      await harness.page
+        .getByRole('dialog', { name: 'Current Active Environment', exact: true })
+        .getByRole('button', { name: 'Manage connections', exact: true })
+        .click()
   }
   await dialog.waitFor()
   const profiles = await harness.page.evaluate(() => window.relay.profiles.list())

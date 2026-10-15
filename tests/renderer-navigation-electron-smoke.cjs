@@ -909,8 +909,12 @@ async function run() {
           await readyDocument(before, name)
           await waitUntil(async () => {
             await flush()
-            return (await savedThread())?.nativeRecoveryStatus === 'idle'
-          }, `${name}: recovered idle owner reaches the acknowledged native history`)
+            return (
+              (await savedThread())?.nativeRecoveryStatus === 'idle' &&
+              (await page.getByRole('button', { name: 'Send message', exact: true }).isEnabled()) &&
+              (await composer().inputValue()) === draft
+            )
+          }, `${name}: recovered idle owner, exact draft and continuation controls are ready`)
           const after = await assertPreserved(name, { busy: false, uiIdle: true })
           assert.deepEqual(after.document.draftStorage, before.document.draftStorage)
           const recoveredHistory = await readSavedThreads(page)
@@ -1000,8 +1004,12 @@ async function run() {
           await readyDocument(before, name)
           await waitUntil(async () => {
             await flush()
-            return (await savedThread())?.nativeRecoveryStatus === 'idle'
-          }, `${name}: recovered idle owner reaches the acknowledged native history`)
+            return (
+              (await savedThread())?.nativeRecoveryStatus === 'idle' &&
+              (await page.getByRole('button', { name: 'Send message', exact: true }).isEnabled()) &&
+              (await composer().inputValue()) === draft
+            )
+          }, `${name}: recovered idle owner, exact draft and continuation controls are ready`)
           const after = await assertPreserved(name, { busy: false, uiIdle: true })
           assert.equal(after.document.draftStorage, before.document.draftStorage)
           await record(name, before, { deferred, after })

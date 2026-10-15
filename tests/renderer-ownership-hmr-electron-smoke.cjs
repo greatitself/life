@@ -770,14 +770,32 @@ async function run() {
       await startupPicker.waitFor({ state: 'hidden' })
     }
     const reconnect = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
-    // Hydration may already select this row and asynchronously open its actual
-    // credentials dialog. Clicking it again races the dialog's modal overlay.
-    if (
-      !(await reconnect.isVisible()) &&
-      (await archivedRow.getAttribute('aria-current')) !== 'page'
-    )
-      await archivedRow.click()
+    // A passive archive does not itself request credentials. The persistent
+    // environment control provides the real user's explicit reconnect intent.
+    if (!(await reconnect.isVisible())) {
+      await page
+        .getByRole('button', { name: 'Current Active Environment', exact: true })
+        .click()
+        .catch(async (error) => {
+          if (!(await reconnect.isVisible())) throw error
+        })
+      if (!(await reconnect.isVisible()))
+        await page
+          .getByRole('dialog', { name: 'Current Active Environment', exact: true })
+          .getByRole('button', { name: 'Manage connections', exact: true })
+          .click()
+    }
     await reconnect.waitFor()
+    const ownerProfile = (await page.evaluate(() => window.relay.profiles.list())).find(
+      (profile) => profile.id === raw.profileId,
+    )
+    assert.ok(ownerProfile)
+    await reconnect
+      .locator('.saved-profile')
+      .filter({ hasText: ownerProfile.name })
+      .getByRole('button')
+      .first()
+      .click()
     assert.equal(
       await reconnect.getByPlaceholder('My development server').inputValue(),
       input.name,

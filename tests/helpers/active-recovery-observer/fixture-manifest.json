@@ -72,7 +72,7 @@
     {
       "path": "tests/helpers/active-recovery-observer/local-bootstrap.cjs",
       "bytes": 22027,
-      "sha256": "0a2062c40610f6ea0073625d7febf88289a66b770c205b66ea119358fa172072"
+      "sha256": "ccdf3ece7261fe6d83f4640f98911a887ac5fc68ae0cb6fbe0faac6d1e099560"
     },
     {
       "path": "tests/helpers/active-recovery-observer/runner-contract.cjs",

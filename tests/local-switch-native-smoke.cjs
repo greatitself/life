@@ -119,7 +119,10 @@ if (cfg && cfg.mode !== 'daemon' && /(?:^|\s)codex\s+app-server(?:\s|$)/.test(cf
   if (claimed) {
     const write = process.stdout.write.bind(process.stdout)
     let held = false
+    let released = false
+    const pending = []
     process.stdout.write = function (chunk, encoding, callback) {
+      if (held && !released) { pending.push([chunk, encoding, callback]); return true }
       const value = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
       const first = value.split('\n')[0]
       let frame
@@ -127,11 +130,13 @@ if (cfg && cfg.mode !== 'daemon' && /(?:^|\s)codex\s+app-server(?:\s|$)/.test(cf
       if (!held && frame && frame.type === 'ready') {
         held = true
         fs.writeFileSync(entered, JSON.stringify({ id: cfg.id, attachmentPid: process.pid, frame, at: Date.now() }))
+        pending.push([chunk, encoding, callback])
         const timer = setInterval(() => {
           if (!fs.existsSync(release)) return
           clearInterval(timer)
+          released = true
           fs.writeFileSync(entered + '.released', String(Date.now()))
-          write(chunk, encoding, callback)
+          for (const args of pending.splice(0)) write(...args)
         }, 10)
         return true
       }

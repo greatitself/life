@@ -2,7 +2,7 @@
 // Deterministic stand-ins: no provider SDK, credentials, network calls or inference.
 const { basename, dirname, join } = require('node:path')
 const { appendFileSync, existsSync, readFileSync } = require('node:fs')
-const { createHash } = require('node:crypto')
+const { createHash, randomUUID } = require('node:crypto')
 const { createInterface } = require('node:readline')
 const provider = basename(process.argv[1])
 const argv = process.argv.slice(2)
@@ -433,6 +433,7 @@ if (provider === 'claude' && metadataWorkspace) {
   })
 } else {
   let sequence = 0
+  const turnNamespace = randomUUID()
   let threadSequence = 0
   let pending = new Map()
   let active
@@ -577,14 +578,14 @@ if (provider === 'claude' && metadataWorkspace) {
     const text = input[0].text
     const turn = {
       threadId,
-      turnId: `turn-${++sequence}`,
+      turnId: `turn-${turnNamespace}-${++sequence}`,
       itemId: `message-${sequence}`,
       prompt: text,
       steering: [],
     }
     active = turn
     codexActive.set(threadId, turn)
-    record({ kind: 'turn-started', threadId, turnId: turn.turnId, prompt: text })
+    record({ kind: 'turn-started', threadId, turnId: turn.turnId, sequence, prompt: text })
     send({ id: message.id, result: { turn: { id: turn.turnId } } })
     send({ method: 'turn/started', params: { threadId, turn: { id: turn.turnId } } })
     if (metadataWorkspace) {
@@ -647,7 +648,7 @@ if (provider === 'claude' && metadataWorkspace) {
       })
       send({
         method: 'turn/started',
-        params: { threadId: childId, turn: { id: `child-turn-${sequence}` } },
+        params: { threadId: childId, turn: { id: `child-turn-${turnNamespace}-${sequence}` } },
       })
       send({
         method: 'item/completed',
@@ -663,7 +664,10 @@ if (provider === 'claude' && metadataWorkspace) {
       })
       send({
         method: 'turn/completed',
-        params: { threadId: childId, turn: { id: `child-turn-${sequence}`, status: 'completed' } },
+        params: {
+          threadId: childId,
+          turn: { id: `child-turn-${turnNamespace}-${sequence}`, status: 'completed' },
+        },
       })
       send({
         method: 'item/completed',

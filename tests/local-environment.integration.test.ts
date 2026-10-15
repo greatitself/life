@@ -232,7 +232,7 @@ describe('actual local environment', () => {
         const turn = approvalLog.find(
           (entry) => entry.kind === 'turn-started' && entry.prompt === 'approval',
         )!
-        const sequence = Number(turn.turnId.replace('turn-', ''))
+        const sequence = Number(turn.sequence)
         const responses = approvalLog.filter(
           (entry) => entry.message?.id === 9000 + sequence && !entry.message.method,
         )

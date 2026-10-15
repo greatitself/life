@@ -164,7 +164,7 @@ async function run() {
     paidInferenceRequested: false,
     rendererSourceRoot: repository,
     nativeAppRoot: appRoot,
-    historyComparisonExcludedFields: ['gitObservedAt'],
+    historyComparisonExcludedFields: ['gitObservedAt', 'nativeRecoveryStatus'],
     executionConditions: {
       quietHostGuaranteed: false,
       concurrentIsolatedFunctionalGatesPermitted: true,
@@ -359,10 +359,14 @@ async function run() {
     workspace: value.workspace,
   })
   // Fresh App documents observe the same workspace Git context again. Compare
-  // all persisted history fields except that explicit observation timestamp;
-  // keep the complete original snapshots in the proof for independent review.
+  // persisted history fields except the Git observation timestamp and live
+  // recovery-control status, which is separately checked after idle recovery.
+  // Keep complete original snapshots in the proof for independent review.
   const stableHistory = (history) =>
-    history.map(({ gitObservedAt: _observedAt, ...retained }) => retained)
+    history.map(
+      ({ gitObservedAt: _observedAt, nativeRecoveryStatus: _recoveryStatus, ...retained }) =>
+        retained,
+    )
   const mainCommits = (state) =>
     state.events.filter((event) => event.type === 'did-frame-navigate' && event.isMainFrame)
   const mainAttempts = (state) =>
@@ -905,10 +909,12 @@ async function run() {
           await readyDocument(before, name)
           const after = await assertPreserved(name, { busy: false })
           assert.deepEqual(after.document.draftStorage, before.document.draftStorage)
-          assert.deepEqual(
-            stableHistory(await readSavedThreads(page)),
-            stableHistory(before.history),
+          const recoveredHistory = await readSavedThreads(page)
+          assert.equal(
+            recoveredHistory.find((entry) => entry.id === thread.id)?.nativeRecoveryStatus,
+            'idle',
           )
+          assert.deepEqual(stableHistory(recoveredHistory), stableHistory(before.history))
           await record(name, before, after)
         } else if (name === 'foreign-busy') {
           await startHang(name)

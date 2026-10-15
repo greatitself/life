@@ -123,6 +123,7 @@ export function useCustomizationStudio(options: StudioOptions) {
   const historyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const historyDirty = useRef(false)
   const historyWrites = useRef<Promise<void>>(Promise.resolve())
+  const historyFlush = useRef<Promise<void> | undefined>(undefined)
   const pendingSessionRegistrations = useRef(new Set<string>())
   const alive = useRef(true)
   const [recoverySupport, setRecoverySupport] = useState<NativeRecoverySupport | undefined>(() =>
@@ -644,9 +645,18 @@ export function useCustomizationStudio(options: StudioOptions) {
     return write
   }, [])
 
-  const flushHistory = useCallback(async () => {
-    await historyWrites.current.catch(() => {})
-    if (historyDirty.current) await persistHistory(current.current)
+  const flushHistory = useCallback(() => {
+    if (historyFlush.current) return historyFlush.current
+    const flushing = (async () => {
+      await historyWrites.current.catch(() => {})
+      if (historyDirty.current) await persistHistory(current.current)
+    })()
+    historyFlush.current = flushing
+    const settled = () => {
+      if (historyFlush.current === flushing) historyFlush.current = undefined
+    }
+    void flushing.then(settled, settled)
+    return flushing
   }, [persistHistory])
 
   useEffect(() => {

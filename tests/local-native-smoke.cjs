@@ -564,7 +564,7 @@ async function run() {
           (entry) => entry.kind === 'turn-started' && entry.prompt === 'approval',
         )
         assert.ok(turn)
-        const sequence = Number(turn.turnId.replace('turn-', ''))
+        const sequence = Number(turn.sequence)
         const responses = approvalLog.filter(
           (entry) => entry.message?.id === 9000 + sequence && !entry.message.method,
         )

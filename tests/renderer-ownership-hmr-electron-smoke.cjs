@@ -753,12 +753,20 @@ async function run() {
     await launch()
     const archivedRow = page.locator('[data-thread-row]').filter({ hasText: title })
     await archivedRow.waitFor()
+    const startupPicker = page.getByRole('dialog', { name: 'Select a project', exact: true })
+    if (await startupPicker.isVisible()) {
+      await startupPicker.getByRole('button', { name: 'Choose later', exact: true }).click()
+      await startupPicker.waitFor({ state: 'hidden' })
+    }
     const reconnect = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
-    const reconnectLoading = page.getByRole('dialog', {
-      name: 'Choose an environment',
-      exact: true,
-    })
-    if (!(await reconnect.or(reconnectLoading).isVisible())) await archivedRow.click()
+    if (!(await reconnect.isVisible())) {
+      await archivedRow.click()
+      if (!(await reconnect.isVisible())) {
+        const connect = page.getByRole('button', { name: 'Connect environment', exact: true })
+        if (await connect.isVisible()) await connect.click()
+        else await page.getByRole('button', { name: 'Connections', exact: true }).click()
+      }
+    }
     await reconnect.waitFor()
     assert.equal(
       await reconnect.getByPlaceholder('My development server').inputValue(),

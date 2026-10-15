@@ -24,7 +24,9 @@ const artifacts = resolve(
   process.env.LIFE_TEST_ARTIFACTS_DIR ||
     'output/playwright/local-owned-appends-integration/functional',
 )
-const frozen = join(repository, 'output/playwright/local-owned-appends-integration')
+const frozen = baseline
+  ? join(repository, 'output/playwright/local-owned-appends-integration')
+  : artifacts
 const sourceRoot = baseline ? join(frozen, 'baseline-source') : repository
 const helperOnly = process.argv.includes('--build-helper-only')
 
@@ -384,6 +386,51 @@ window.lifeStreamingFixture = {
 }
 `
 
+async function prepareFrozenArtifacts() {
+  if (baseline) return
+  await mkdir(frozen, { recursive: true })
+  const manifestPath = join(frozen, 'source-freeze.json')
+  if (existsSync(manifestPath)) return
+  const inventory = async (root) => {
+    const hashes = {}
+    const visit = async (directory) => {
+      for (const entry of await readdir(join(repository, directory), { withFileTypes: true })) {
+        const name = directory + '/' + entry.name
+        if (entry.isDirectory()) await visit(name)
+        else {
+          assert.ok(entry.isFile(), 'Frozen inputs must be regular files: ' + name)
+          hashes[name] = createHash('sha256')
+            .update(await readFile(join(repository, name)))
+            .digest('hex')
+        }
+      }
+    }
+    await visit(root)
+    return hashes
+  }
+  const sha256 = await inventory('src')
+  const compiledOut = await inventory('out')
+  const verifiedPath = join(repository, 'output/linux-compiled-build.json')
+  let sourceCommit
+  if (existsSync(verifiedPath)) {
+    const verified = JSON.parse(await readFile(verifiedPath, 'utf8'))
+    assert.deepEqual(
+      sha256,
+      Object.fromEntries(verified.source.map((row) => ['src/' + row.path, row.sha256])),
+    )
+    assert.deepEqual(
+      compiledOut,
+      Object.fromEntries(verified.compiled.map((row) => [row.path, row.sha256])),
+    )
+    sourceCommit = verified.sourceCommit
+  }
+  await writeFile(
+    manifestPath,
+    JSON.stringify({ sourceCommit, sha256, compiledOut }, null, 2) + '\n',
+    { flag: 'wx' },
+  )
+}
+
 async function buildHelper() {
   await assertFrozenSourceGraph()
   await mkdir(artifacts, { recursive: true })
@@ -421,9 +468,7 @@ async function buildHelper() {
 async function assertFrozenSourceGraph() {
   const manifest = JSON.parse(
     await readFile(
-      baseline
-        ? join(frozen, 'baseline-artifact-hashes.json')
-        : join(repository, 'output/playwright/local-owned-appends-integration/source-freeze.json'),
+      baseline ? join(frozen, 'baseline-artifact-hashes.json') : join(frozen, 'source-freeze.json'),
       'utf8',
     ),
   )
@@ -458,9 +503,7 @@ async function assertFrozenArtifacts() {
   await assertFrozenSourceGraph()
   const manifest = JSON.parse(
     await readFile(
-      baseline
-        ? join(frozen, 'baseline-artifact-hashes.json')
-        : join(repository, 'output/playwright/local-owned-appends-integration/source-freeze.json'),
+      baseline ? join(frozen, 'baseline-artifact-hashes.json') : join(frozen, 'source-freeze.json'),
       'utf8',
     ),
   )
@@ -640,6 +683,7 @@ async function run() {
         false,
         'Preserve prior results by selecting a fresh LIFE_TEST_ARTIFACTS_DIR',
       )
+  await prepareFrozenArtifacts()
   const helperPath = await buildHelper()
   if (helperOnly) {
     console.log(`Streaming helper built: ${helperPath}`)

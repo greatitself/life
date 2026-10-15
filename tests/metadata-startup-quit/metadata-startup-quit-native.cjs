@@ -154,7 +154,21 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
       } catch {}
     }
   }
-  const state = { sequence: 0, targetModel: undefined, heldRead: false }
+  const state = { sequence: 0, targetModel: undefined, heldRead: false, connection: undefined }
+  const pendingModels = new Set()
+  const window = BrowserWindow.getAllWindows()[0]
+  if (window) {
+    window.setBounds({ width: 1920, height: 1080 })
+    const originalSend = window.webContents.send
+    window.webContents.send = function (channel, ...args) {
+      if (channel === 'connection:state') state.connection = args[0]
+      return Reflect.apply(originalSend, this, [channel, ...args])
+    }
+  }
+  const modelSettled = (observationId) => {
+    pendingModels.delete(observationId)
+    state.targetModel = pendingModels.values().next().value
+  }
   const release = (file) =>
     new Promise((resolve, reject) => {
       const polling = setInterval(() => {
@@ -178,9 +192,10 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
       if (path.resolve(String(input)) !== directory || !state.targetModel || state.heldRead)
         return original.call(this, input, ...args)
       state.heldRead = true
+      const modelObservationId = state.targetModel
       record('native-recovery-read-entered', {
         directory,
-        modelObservationId: state.targetModel,
+        modelObservationId,
         stack: new Error('Exact native recovery directory read').stack,
         readOwner: 'UNKNOWN',
         allocatorRegistration: 'UNKNOWN',
@@ -189,11 +204,11 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
         async (value) => {
           record('native-recovery-read-result-held', {
             directory,
-            modelObservationId: state.targetModel,
+            modelObservationId,
             entries: value.map((entry) => (typeof entry === 'string' ? entry : entry.name)),
           })
           await release(options.readRelease)
-          record('native-recovery-read-released', { modelObservationId: state.targetModel })
+          record('native-recovery-read-released', { modelObservationId })
           return value
         },
         (error) => {
@@ -226,23 +241,41 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
         channel === 'source-code:ready' &&
         args[0] === options.revision
       ) {
-        record('source-ready-delegation-held', { observationId, requestedRevision: args[0] })
+        record('source-ready-delegation-held', {
+          channel,
+          observationId,
+          requestedRevision: args[0],
+        })
         await release(options.readyRelease)
       }
+      const connection = state.connection
+      const targetEnvironment =
+        options.stage === 'target' &&
+        channel === 'agent:models' &&
+        args[0] === 'codex' &&
+        connection?.status === 'connected' &&
+        (connection.profile?.transport === 'local' ? 'local' : 'ssh') === options.transport &&
+        connection.workspace === options.workspace
       let result
       try {
-        if (options.stage === 'target' && channel === 'agent:models' && args[0] === 'codex')
+        if (targetEnvironment) {
+          pendingModels.add(observationId)
           state.targetModel ||= observationId
+        }
         record('original-handler-call-starting', { channel, observationId })
         result = original(event, ...args)
         record('original-handler-returned', {
           channel,
           observationId,
           provider: channel === 'agent:models' ? args[0] : undefined,
+          targetEnvironment,
+          transport: connection?.profile?.transport === 'local' ? 'local' : 'ssh',
+          workspace: connection?.workspace,
           allocatorAccepted: 'UNKNOWN: Promise return is not allocator acceptance',
         })
       } catch (error) {
         record('ipc-synchronous-rejection', { channel, observationId, message: error.message })
+        modelSettled(observationId)
         throw error
       }
       if (channel === 'agent:models') {
@@ -284,11 +317,11 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
       } catch (error) {
         record('ipc-settled-error', { channel, observationId, message: error.message })
         throw error
+      } finally {
+        modelSettled(observationId)
       }
     })
   }
-  const window = BrowserWindow.getAllWindows()[0]
-  if (window) window.setBounds({ width: 1920, height: 1080 })
   record('private-observers-installed', { directory })
 }
 async function run() {
@@ -938,6 +971,8 @@ async function run() {
         marker,
         readyRelease,
         readRelease,
+        transport,
+        workspace: transport === 'local' ? local.workspace : ssh.workspace,
       }),
       'target delegate-only native observers before HTML',
     )
@@ -984,16 +1019,22 @@ async function run() {
         ),
       'target source-ready delegation is explicitly held',
     )
-    await waitUntil(
-      async () =>
-        (await phases()).some(
-          (value) =>
-            value.stage === 'target' &&
-            value.phase === 'model-document-observed' &&
-            value.document.mounted,
-        ),
-      'actual model sender frame observes compiled DOM',
-    )
+    await waitUntil(async () => {
+      const timeline = await phases()
+      return timeline.some(
+        (value) =>
+          value.stage === 'target' &&
+          value.phase === 'model-document-observed' &&
+          value.document.mounted &&
+          timeline.some(
+            (call) =>
+              call.stage === 'target' &&
+              call.phase === 'original-handler-returned' &&
+              call.targetEnvironment &&
+              call.observationId === value.observationId,
+          ),
+      )
+    }, 'selected environment model sender frame observes compiled DOM')
     const beforeQuit = await collect('controlled target gate before normal quit')
     const timeline = await phases()
     const readGate = timeline.find(
@@ -1007,7 +1048,18 @@ async function run() {
               value.stage === 'target' &&
               value.phase === 'original-handler-returned' &&
               value.channel === 'agent:models' &&
-              value.provider === 'codex',
+              value.provider === 'codex' &&
+              value.targetEnvironment &&
+              !timeline.some(
+                (settled) =>
+                  settled.stage === 'target' &&
+                  settled.observationId === value.observationId &&
+                  [
+                    'ipc-settled-success',
+                    'ipc-settled-error',
+                    'ipc-synchronous-rejection',
+                  ].includes(settled.phase),
+              ),
           ).observationId
     const modelEntry = timeline.find(
       (value) =>

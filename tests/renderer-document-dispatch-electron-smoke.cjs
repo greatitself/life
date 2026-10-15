@@ -374,7 +374,7 @@ async function run() {
     nativeLogs: [],
     cleanup: {},
   }
-  let application, applicationChild, display, originalIdentity, invocationObservation, failure
+  let application, applicationChild, display, originalIdentity, failure
   try {
     originalIdentity = await identity(appRoot)
     proof.originalIdentity = originalIdentity
@@ -471,15 +471,19 @@ async function run() {
       BrowserWindow.getAllWindows()[0].getTitle(),
     )
     assert.equal(proof.positiveControlBeforeReload, 'CURRENT_DOCUMENT_ALLOWED')
-    invocationObservation = page
-      .evaluate(
-        (title) => window.relay.extensions.invoke('window.configure', { title }),
-        targetTitle,
+    proof.oldRendererInvocation = await page.evaluate((title) => {
+      // The originating document is deliberately destroyed below. Awaiting its
+      // Playwright evaluation across reload cannot establish native dispatch.
+      void window.relay.extensions.invoke('window.configure', { title }).then(
+        (value) => {
+          globalThis.__oldDispatchResult = { outcome: 'fulfilled', value }
+        },
+        (error) => {
+          globalThis.__oldDispatchResult = { outcome: 'rejected', message: error.message }
+        },
       )
-      .then(
-        (value) => ({ outcome: 'fulfilled', value }),
-        (error) => ({ outcome: 'rejected', message: error.message }),
-      )
+      return { issued: true, timeOrigin: performance.timeOrigin }
+    }, targetTitle)
     await application.evaluate(async () => {
       const state = globalThis.__lifeDocumentDispatchProbe
       let timeout
@@ -575,7 +579,12 @@ async function run() {
         processFailures: state.processFailures,
       }
     })
-    proof.oldRendererResponse = await invocationObservation
+    proof.newRendererTimeOrigin = await page.evaluate(() => performance.timeOrigin)
+    assert.notEqual(proof.newRendererTimeOrigin, proof.oldRendererInvocation.timeOrigin)
+    proof.oldRendererResponse = {
+      outcome: 'originating document replaced',
+      nativeDispatchOutcome: proof.dispatch.outcome,
+    }
     assert.ok(['fulfilled', 'rejected'].includes(proof.dispatch.outcome))
     assert.equal(proof.dispatch.holdCount, 1)
     assert.ok(
@@ -613,8 +622,10 @@ async function run() {
           state?.release()
           state?.restore()
         })
-        await application.close()
-        proof.cleanup.electron = await waitForExit(applicationChild, 10_000)
+        const closing = application.close()
+        closing.catch(() => {})
+        proof.cleanup.electron = await waitForExit(applicationChild, 25_000)
+        await closing
       } catch (error) {
         proof.cleanup.electronError = error.message
         const child = applicationChild

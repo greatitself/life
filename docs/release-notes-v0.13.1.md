@@ -33,3 +33,5 @@ Studio now reconciles a native source generation’s recorded startup failure an
 Cold replay preserves an observed Codex turn completion when a later checkpoint on the shared provider process repeats an older active owner. Completed conversations no longer acquire a false process-exit error after restart; an incomplete turn still reports its native exit.
 
 Renderer handoff closes the old document’s history-write admission after its final flush and before draining accepted writes or revoking recovery tokens. Late unload writes cannot replace a proved history file with an unproved snapshot; a new native document receives fresh write admission.
+
+Concurrent native close callbacks join the same Studio history flush, preserving one acknowledged write of the final archive.

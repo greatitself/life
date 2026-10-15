@@ -527,7 +527,8 @@ async function init() {
           if (!isTrustedRendererSender(window, event)) throw new Error('Untrusted IPC sender')
           if (nativeDocuments.capture().documentId !== incomingDocumentId)
             throw new Error('The request belongs to an earlier Life document.')
-          assertRendererAdmission(name)
+          if (name === 'conversations:save' || name === 'conversations:checkpoint')
+            assertRendererAdmission(name)
         },
       })
     })

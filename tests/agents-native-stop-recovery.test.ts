@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Effect } from 'effect'
+import { Deferred, Effect } from 'effect'
 import type { ClientChannel } from 'ssh2'
 import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Agents } from '../src/main/agents'
@@ -1431,6 +1431,55 @@ describe('Agents native Stop recovery boundaries', () => {
         releaseSignal()
         await restoring
       }
+    }))
+
+  it('Stop during the pre-send owner checkpoint cannot dispatch a prompt after being acknowledged', () =>
+    withFixture('codex', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const channel = await recovered(fixture)
+      const first = fixture.agents.stop('life-session')
+      await vi.waitFor(() => expect(interrupts(channel)).toHaveLength(1))
+      await channel.reply(interrupted())
+      await first
+      const input = nextInput('codex')
+      const gate = Deferred.makeUnsafe<void>()
+      let held = false
+      const target = fixture.agents as unknown as {
+        recordRecoveryOwner: (
+          session: { input: StartInput; phase: string; stopRequested: boolean },
+          channel: ClientChannel,
+        ) => Promise<void>
+      }
+      const original = target.recordRecoveryOwner.bind(fixture.agents)
+      vi.spyOn(target, 'recordRecoveryOwner').mockImplementation(async (session, attachment) => {
+        await original(session, attachment)
+        if (
+          !held &&
+          session.input === input &&
+          session.phase === 'startingTurn' &&
+          !session.stopRequested
+        ) {
+          held = true
+          await run(Deferred.await(gate))
+        }
+      })
+      const starting = fixture.agents.start(input)
+      try {
+        await vi.waitFor(() => expect(held).toBe(true))
+        await fixture.agents.stop('life-session')
+        expect(
+          channel.nativeWrites.filter((entry) => entry.message.method === 'turn/start'),
+        ).toEqual([])
+      } finally {
+        Deferred.doneUnsafe(gate, Effect.void)
+        await starting
+      }
+      expect(channel.nativeWrites.filter((entry) => entry.message.method === 'turn/start')).toEqual(
+        [],
+      )
+      expect(interrupts(channel)).toHaveLength(1)
+      expect(stopEvents(fixture)).toHaveLength(2)
+      expect(fixture.agents.hasRunningSessions()).toBe(false)
     }))
 
   it('a subsequent explicit Send and Stop get a fresh completion boundary', () =>

@@ -595,9 +595,9 @@ jobs:
       - run: npx playwright install chromium --with-deps
       - name: Relevant ownership and release tests
         id: unit
-        continue-on-error: true
+        continue-on-error: false
         timeout-minutes: 10
-        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts
+        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts tests/agents-native-stop-recovery.test.ts
       - name: Studio focus regression
         id: focus
         continue-on-error: true

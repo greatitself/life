@@ -2440,7 +2440,11 @@ export class Agents {
         owner,
         processedInputSequences: [...(this.nativeProcessedInputs.get(id) || [])],
         root: {
-          state: session.busy ? (session.phase === 'initializing' ? 'starting' : 'active') : 'idle',
+          state: session.busy
+            ? session.phase === 'initializing' || session.phase === 'startingTurn'
+              ? 'starting'
+              : 'active'
+            : 'idle',
           nativeThreadId: session.remoteId,
           nativeTurnId: session.turnId,
           ownershipProven: !session.recoveryUnknown,
@@ -4935,6 +4939,7 @@ export class Agents {
       turn: { params: initialTurnParams },
     }
     await this.recordRecoveryOwner(session, rpc.channel)
+    if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     if (!session.remoteId || this.threadTransports.get(session.remoteId) !== rpc) {
       const resuming = Boolean(session.remoteId)
       this.event(input.sessionId, {
@@ -5025,6 +5030,7 @@ export class Agents {
     }
     session.nativeStartPlan = { ...session.nativeStartPlan, turn: { params: turnParams } }
     await this.recordRecoveryOwner(session, rpc.channel)
+    if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     const result = await rpc.request(
       'turn/start',
       turnParams,

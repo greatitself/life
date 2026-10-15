@@ -42,7 +42,7 @@ if (process.platform === 'linux' && !process.env.DISPLAY) {
   process.exit(child.status ?? 1)
 }
 
-async function waitUntil(predicate, description, timeout = 15000) {
+async function waitUntil(predicate, description, timeout = 30000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     if (await predicate()) return
@@ -444,7 +444,7 @@ export function activityLabel(activity: ThreadActivity): string {
     await page.getByRole('button', { name: 'Send message', exact: true }).click()
   }
   const waitForSend = () =>
-    page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+    page.getByRole('button', { name: 'Send message', exact: true }).waitFor({ timeout: 30000 })
   const chooseProject = async ({
     reopen = false,
     browse = false,

@@ -2827,6 +2827,16 @@ export class Agents {
       }
     }.bind(this),
   )
+  /** Resume an ordinary document after its platform guard, without opening native replay admission. */
+  readonly resumeOrdinaryRendererEffect = Effect.fn('Agents.resumeOrdinaryRenderer')(
+    function* (this: Agents, ownsDocument: () => boolean) {
+      if (!ownsDocument()) return
+      const policy = yield* this.recoveryPlatformEffect()
+      if (policy?.mode !== 'unsupported-clean') return
+      yield* policy.assertOrdinaryHistoryWriteEffect()
+      if (ownsDocument()) this.rendererSuspended = false
+    }.bind(this),
+  )
   readonly recoverEffect = Effect.fn('Agents.recover')(
     function* (
       this: Agents,

@@ -1048,11 +1048,12 @@ async function init() {
     ssh.trust(z.string().parse(id), z.boolean().parse(accepted)),
   )
   handle('agent:start', (input) => agents.start(startSchema.parse(input)))
-  handle('agent:recovery-support', async () => {
-    // Ordinary Windows documents have no durable replay to resume them after
-    // a source reload. The admitted document still rechecks protected state.
-    if (recoveryPolicy.mode === 'unsupported-clean') await agents.recover({ consumers: [] })
-    return recoveryPolicy.status
+  handle('agent:recovery-support', () => {
+    if (recoveryPolicy.mode !== 'unsupported-clean') return recoveryPolicy.status
+    const document = captureHistoryDocument(window)
+    return agents
+      .resumeOrdinaryRendererEffect(() => Boolean(document?.ownsDocument() && !quitting))
+      .pipe(Effect.as(recoveryPolicy.status))
   })
   handle('agent:reserve-recovery-owner', (input) => agents.reserveRecoveryOwner(input))
   handle('agent:attest-loaded-history', (input) => attestLoadedHistory(input))

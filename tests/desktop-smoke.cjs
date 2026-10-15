@@ -204,6 +204,13 @@ export function activityLabel(activity: ThreadActivity): string {
   const rendererErrorDetails = []
   const priorRendererEvents = []
   const nativeLogs = []
+  const recordCheckpointWait = (message) => {
+    const text = message.text()
+    if (text.startsWith('[Life] Studio checkpoint waiting:')) {
+      nativeLogs.push({ stream: 'renderer', text })
+      console.log(text)
+    }
+  }
   const attachmentDirectories = new Set()
   let application
   let page
@@ -233,6 +240,7 @@ export function activityLabel(activity: ThreadActivity): string {
           nativeLogs.shift()
       })
     page = await application.firstWindow()
+    page.on('console', recordCheckpointWait)
     page.setDefaultTimeout(15000)
     page.on('pageerror', (error) => {
       rendererErrors.push(error.message)
@@ -718,6 +726,7 @@ export function activityLabel(activity: ThreadActivity): string {
     getPage: () => page,
     setPage: (replacement) => {
       page = replacement
+      page.on('console', recordCheckpointWait)
       page.setDefaultTimeout(15000)
       page.on('pageerror', (error) => {
         rendererErrors.push(error.message)

@@ -123,6 +123,7 @@ export function useCustomizationStudio(options: StudioOptions) {
   const runs = useRef(new Map<string, StudioRun>())
   const historyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const historyDirty = useRef(false)
+  const historyWait = useRef('')
   const historyWrites = useRef<Promise<void>>(Promise.resolve())
   const historyFlush = useRef<Promise<void> | undefined>(undefined)
   const pendingSessionRegistrations = useRef(new Set<string>())
@@ -555,22 +556,38 @@ export function useCustomizationStudio(options: StudioOptions) {
           // Unchanged acknowledged bytes already own their private cache proof.
           // Changed native rows must prepare a new proof before replacing that cache.
           const unchanged = historyOwner.current.recoveryRow(session) === encodedRow
+          const waitForProof = (reason: string, details?: Record<string, unknown>) => {
+            const waiting = JSON.stringify({
+              sessionId: session.id,
+              reason,
+              ownerGeneration: owner?.ownerGeneration,
+              ownerTransport: owner?.transportId,
+              ...details,
+            })
+            if (historyWait.current !== waiting) {
+              historyWait.current = waiting
+              console.info('[Life] Studio checkpoint waiting:', waiting)
+            }
+          }
           // The terminal checkpoint owns the stopped result; retain its prior cache.
           if (run?.stopRequested || run?.awaitingGeneration) {
-            if (durable && !unchanged) return
+            if (durable && !unchanged) return waitForProof('pending generation or Stop')
             continue
           }
           for (const [transportId, cursor] of Object.entries(session.thread.nativeRecovery || {})) {
             if (!durable || !cursor.snapshotToken || cursor.ownerGeneration === undefined) continue
             if (unchanged) continue
-            if (!owner) return
+            if (!owner) return waitForProof('missing native owner')
             // Prior generations remain archived; only the current owner prepares this row.
             if (owner.transportId !== transportId) continue
             if (
               owner.snapshotToken !== cursor.snapshotToken ||
               owner.ownerGeneration !== cursor.ownerGeneration
             )
-              return
+              return waitForProof('owner generation', {
+                generation: cursor.ownerGeneration,
+                revision: cursor.appliedRevision,
+              })
             const persisted = stored?.[transportId]
             const proof = admitted?.get(transportId)
             if (
@@ -585,16 +602,27 @@ export function useCustomizationStudio(options: StudioOptions) {
               persisted.snapshotToken !== cursor.snapshotToken ||
               persisted.ownerGeneration !== cursor.ownerGeneration
             )
-              return
+              return waitForProof('projection', {
+                generation: cursor.ownerGeneration,
+                revision: cursor.appliedRevision,
+                hasProof: Boolean(proof),
+                sameCursor: proof?.cursor === cursor,
+                sameMessages: proof?.messages === session.thread.messages,
+                persisted,
+              })
             if (
               run &&
               (run.partsCursor?.transportId !== transportId ||
                 run.ownerGeneration !== cursor.ownerGeneration)
             )
-              return
+              return waitForProof('planner generation', {
+                generation: cursor.ownerGeneration,
+                plannerGeneration: run.ownerGeneration,
+              })
             // Keep the cache dirty until its original native owner is admitted.
             // Waiting for reconnect is not a failed history write.
-            if (owner.status !== 'running' && owner.status !== 'idle') return
+            if (owner.status !== 'running' && owner.status !== 'idle')
+              return waitForProof('native owner status', { status: owner.status })
             // Historical cursors remain in the transcript. Only its exact
             // current owner can prepare a cache checkpoint for this planner.
             // Rows sharing a provider transport have different bytes and owners.
@@ -651,6 +679,7 @@ export function useCustomizationStudio(options: StudioOptions) {
             'Native recovery replaced the pending Studio cache snapshot.',
           )
         historyOwner.current.commitPrepared(prepared, localStorage)
+        historyWait.current = ''
         historyDirty.current = current.current !== next
         for (const receipt of receipts) await api?.agent.acknowledgeRecoveryHistory?.(receipt)
       })

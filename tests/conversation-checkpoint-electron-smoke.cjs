@@ -380,6 +380,15 @@ async function run() {
     // finish before the fixture establishes its baseline, then leave UI state idle.
     phase = 'settle-empty-startup'
     await page.waitForTimeout(2500)
+    await page.evaluate(async () => {
+      await window.relay.connection.disconnect()
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+      await window.__lifeFlushConversationHistory?.()
+    })
+    assert.equal(
+      await page.evaluate(async () => (await window.relay.connection.state()).status),
+      'disconnected',
+    )
     const initial = await page.evaluate(() => window.relay.conversations.load())
     assert.ok(initial === null || initial.threads.length === 0)
     // DevTools evaluation preserves the app's CSP; adding an inline script tag

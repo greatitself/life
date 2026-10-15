@@ -547,9 +547,30 @@ export function useCustomizationStudio(options: StudioOptions) {
           )
           const admitted = admittedNativeOwners.current.get(session.id)
           const run = runs.current.get(session.id)
-          // The terminal checkpoint owns the stopped result; an interim cache cannot prune it.
-          if (run?.stopRequested || run?.awaitingGeneration) continue
+          const owner = recoveredNativeOwners.current.get(session.id)
+          const durable =
+            usesDurableRecovery() &&
+            api?.agent.updateRecoveryOwner &&
+            api.agent.acknowledgeRecoveryHistory
+          // Unchanged acknowledged bytes already own their private cache proof.
+          // Changed native rows must prepare a new proof before replacing that cache.
+          const unchanged = historyOwner.current.recoveryRow(session) === encodedRow
+          // The terminal checkpoint owns the stopped result; retain its prior cache.
+          if (run?.stopRequested || run?.awaitingGeneration) {
+            if (durable && !unchanged) return
+            continue
+          }
           for (const [transportId, cursor] of Object.entries(session.thread.nativeRecovery || {})) {
+            if (!durable || !cursor.snapshotToken || cursor.ownerGeneration === undefined) continue
+            if (unchanged) continue
+            if (!owner) return
+            // Prior generations remain archived; only the current owner prepares this row.
+            if (owner.transportId !== transportId) continue
+            if (
+              owner.snapshotToken !== cursor.snapshotToken ||
+              owner.ownerGeneration !== cursor.ownerGeneration
+            )
+              return
             const persisted = stored?.[transportId]
             const proof = admitted?.get(transportId)
             if (
@@ -564,18 +585,13 @@ export function useCustomizationStudio(options: StudioOptions) {
               persisted.snapshotToken !== cursor.snapshotToken ||
               persisted.ownerGeneration !== cursor.ownerGeneration
             )
-              continue
-            const owner = recoveredNativeOwners.current.get(session.id)
+              return
             if (
-              !owner ||
-              owner.transportId !== transportId ||
-              owner.snapshotToken !== cursor.snapshotToken ||
-              owner.ownerGeneration !== cursor.ownerGeneration ||
-              (run &&
-                (run.partsCursor?.transportId !== transportId ||
-                  run.ownerGeneration !== cursor.ownerGeneration))
+              run &&
+              (run.partsCursor?.transportId !== transportId ||
+                run.ownerGeneration !== cursor.ownerGeneration)
             )
-              continue
+              return
             // Keep the cache dirty until its original native owner is admitted.
             // Waiting for reconnect is not a failed history write.
             if (owner.status !== 'running' && owner.status !== 'idle') return

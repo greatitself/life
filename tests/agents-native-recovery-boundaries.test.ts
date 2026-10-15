@@ -4064,6 +4064,54 @@ describe('Agents native recovery boundaries', () => {
     },
   )
 
+  it.each([true, false])(
+    'keeps a recovered idle Codex owner known after intentional retirement (close before terminal proof: %s)',
+    async (closeBeforeExit) => {
+      await withFixture('codex', async (fixture) => {
+        await completeOriginal(fixture, false)
+        const recovered = await fixture.agents.recover({ consumers: [consumer()] })
+        expect(recovered.owners[0].status).toBe('idle')
+        const channel = fixture.attachments[0]
+        channel.closeAndWaitEffect = () =>
+          Effect.promise(async () => {
+            channel.isClosing = true
+            if (closeBeforeExit) channel.emit('close')
+            await channel.nativeExit()
+            return true
+          })
+        const inputs = (await run(fixture.store.readTransport(fixture.transport.id))).inputs
+        await expect(fixture.agents.releaseIdleProviders()).resolves.toEqual([true])
+        await fixture.agents.settleRendererHandoff()
+        expect(fixture.agents.hasPendingRendererWork()).toBe(false)
+        await expect(fixture.agents.rendererHandoffAdmitted()).resolves.toBe(true)
+        const retired = await run(fixture.store.readTransport(fixture.transport.id))
+        expect(retired.inputs).toEqual(inputs)
+        expect(retired.outputs).toContainEqual(
+          expect.objectContaining({
+            type: 'exit',
+            nativeExitConfirmed: true,
+          }),
+        )
+        expect(fixture.open).toHaveBeenCalledOnce()
+        expect(fixture.ssh.channel).not.toHaveBeenCalled()
+      })
+    },
+  )
+
+  it('keeps an unexpectedly disconnected recovered Codex owner unknown without native exit proof', async () => {
+    await withFixture('codex', async (fixture) => {
+      await completeOriginal(fixture, false)
+      await fixture.agents.recover({ consumers: [consumer()] })
+      fixture.attachments[0].emit('close')
+      expect(fixture.agents.hasPendingRendererWork()).toBe(true)
+      await expect(fixture.agents.rendererHandoffAdmitted()).resolves.toBe(false)
+      const retained = await run(fixture.store.readTransport(fixture.transport.id))
+      expect(retained.outputs.some((output) => output.type === 'exit')).toBe(false)
+      expect(fixture.open).toHaveBeenCalledOnce()
+      expect(fixture.ssh.channel).not.toHaveBeenCalled()
+    })
+  })
+
   it('holds a next Codex connection behind slow idle release and still requires a durable native exit after the wait times out', async () => {
     await withFixture('codex', async (fixture) => {
       await completeOriginal(fixture, false)

@@ -1924,7 +1924,12 @@ export class Agents {
           channel,
           (message) => this.handleCodexWire(message, rpc!),
           () => {
-            if (completed) return
+            if (
+              completed ||
+              (rpc && this.intentionalIdleClosing.has(rpc)) ||
+              this.terminalTransports.has(id)
+            )
+              return
             for (const owner of snapshot.transport.owners)
               if (this.sessions.get(owner.sessionId)?.recoveryTransportId === id)
                 this.markRecoveryUnknown(

@@ -1125,7 +1125,20 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
       await studio
         .getByRole('textbox', { name: 'Describe a Life customization' })
         .fill('Keep this query fixture request unsent.')
-      await studio.getByRole('button', { name: 'Send customization request', exact: true }).click()
+      assert.equal(
+        await studio
+          .getByRole('button', { name: 'Send customization request', exact: true })
+          .isDisabled(),
+        true,
+        `${mode}: Send remains unavailable until native recovery support is verified`,
+      )
+      // Keyboard submission still reaches the real React guard, proving that
+      // disabled UI alone is not what prevents a native request.
+      await studio.getByRole('textbox', { name: 'Describe a Life customization' }).press('Enter')
+      assert.equal(
+        await studio.getByRole('textbox', { name: 'Describe a Life customization' }).inputValue(),
+        'Keep this query fixture request unsent.',
+      )
       await studio
         .getByText(/verifying native recovery|could not be verified|read or export/i)
         .first()

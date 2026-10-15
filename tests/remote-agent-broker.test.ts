@@ -1299,7 +1299,10 @@ describe.skipIf(process.platform === 'win32')('remote agent broker SSH continuit
         const root = ${JSON.stringify(provider.root)};
         fs.appendFileSync(root + '/launches', process.pid + '\\n');
         let ticks = 0;
-        const tick = () => fs.writeFileSync(root + '/ticks', String(++ticks));
+        const tick = () => {
+          fs.writeFileSync(root + '/ticks.tmp', String(++ticks));
+          fs.renameSync(root + '/ticks.tmp', root + '/ticks');
+        };
         tick();
         setInterval(tick, 20);
         process.stdin.resume();

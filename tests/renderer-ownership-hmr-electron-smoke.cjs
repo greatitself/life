@@ -759,14 +759,13 @@ async function run() {
       await startupPicker.waitFor({ state: 'hidden' })
     }
     const reconnect = page.getByRole('dialog', { name: 'Choose an environment', exact: true })
-    if (!(await reconnect.isVisible())) {
+    // Hydration may already select this row and asynchronously open its actual
+    // credentials dialog. Clicking it again races the dialog's modal overlay.
+    if (
+      !(await reconnect.isVisible()) &&
+      (await archivedRow.getAttribute('aria-current')) !== 'page'
+    )
       await archivedRow.click()
-      if (!(await reconnect.isVisible())) {
-        const connect = page.getByRole('button', { name: 'Connect environment', exact: true })
-        if (await connect.isVisible()) await connect.click()
-        else await page.getByRole('button', { name: 'Connections', exact: true }).click()
-      }
-    }
     await reconnect.waitFor()
     assert.equal(
       await reconnect.getByPlaceholder('My development server').inputValue(),

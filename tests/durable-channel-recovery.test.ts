@@ -2106,7 +2106,6 @@ describe('durable provider channel cold recovery', () => {
         provider: 'codex',
       })
       fixture.channels.add(channel)
-      await channel.ready
       const stopping = channel.closeNativeAndWait(
         { kind: 'close', sessionId: 'owned-root', ownerGeneration: 8 },
         1_000,

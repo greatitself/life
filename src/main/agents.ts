@@ -7351,8 +7351,8 @@ export class Agents {
       )
     )
   }
-  hasPendingRendererWork(): boolean {
-    return (
+  hasPendingRendererWork(reportBlocked = false): boolean {
+    const pending =
       this.pendingNativeOperations.size > 0 ||
       this.pendingProviderExits.size > 0 ||
       this.hasRunningSessions() ||
@@ -7375,7 +7375,46 @@ export class Agents {
         ),
       ) ||
       [...this.codexTransports].some((rpc) => !this.codexTransportIdle(rpc))
-    )
+    if (pending && reportBlocked)
+      console.error('[Life] Native work still owns the renderer:', {
+        operations: this.pendingNativeOperations.size,
+        providerExits: this.pendingProviderExits.size,
+        acquisitions: this.pendingCodexAcquisitions.size,
+        starts: this.pendingStartAdmissions.size,
+        permissions: this.pendingPermissionResponses.size,
+        recoveryDecisions: [...this.pendingRecoveryDecisions].map(([id, entries]) => [
+          id,
+          entries.size,
+        ]),
+        durableOpening: this.durableOpening,
+        freshProviders: this.freshProviderChannels.size,
+        failedProviders: this.failedFreshProviders.size,
+        discoveries: this.discoveryChannels.size,
+        recoveryStarting: Boolean(this.recoveryStarting),
+        sessions: [...this.sessions].map(([id, session]) => ({
+          id,
+          busy: session.busy,
+          startup: Boolean(session.startup),
+          stopping: Boolean(session.stopping),
+          unknown: session.recoveryUnknown,
+          configuration: Boolean(session.configuration),
+          approvals: session.approvals.size,
+          controls: session.controls.size,
+          pendingDelivery: this.channelHasPendingDelivery(
+            session.channel as DurableChannel | undefined,
+          ),
+          channel: (session.channel as DurableChannel | undefined)?.recoveryId,
+          rpcChannel: (session.codexRPC?.channel as DurableChannel | undefined)?.recoveryId,
+          failure: this.recoveryFailures.get(id),
+        })),
+        codexTransports: [...this.codexTransports].map((rpc) => ({
+          id: (rpc.channel as DurableChannel).recoveryId,
+          closed: rpc.closed,
+          idle: this.codexTransportIdle(rpc),
+          pendingMutation: rpc.hasPendingMutation,
+        })),
+      })
+    return pending
   }
   /** A registered active provider can survive document replacement; allocation gaps cannot. */
   hasUntrackedRunningSessions(): boolean {

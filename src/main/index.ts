@@ -475,7 +475,7 @@ async function init() {
     // Native exit can enqueue its final owner/history receipts. Join those
     // accepted operations before checking whether the old document still owns work.
     await agents.settleRendererHandoff()
-    if (agents.hasPendingRendererWork())
+    if (agents.hasPendingRendererWork(true))
       throw new Error('Native work still owns this interface. Use Restart Interface to recover.')
   }
   releaseProvidersOnQuit = async () => {

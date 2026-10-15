@@ -100,6 +100,227 @@ jobs:
             output/linux-compiled-build.json
           if-no-files-found: error
 
+  linux-active-recovery:
+    name: Linux native active recovery
+    if: github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-linux-verified-build
+      - run: node tests/helpers/verified-ci-build.cjs
+      - run: npx playwright install-deps chromium
+      - name: Verify SSH recovery, source commits, and renderer reload
+        run: npm run test:active-recovery
+      - name: Verify Local Codex active recovery
+        run: node tests/active-recovery-run.cjs local-codex-stream
+      - name: Verify Local Claude approval recovery
+        run: node tests/active-recovery-run.cjs local-claude-approval
+      - name: Verify the original source and compiled build are preserved
+        run: node tests/helpers/verified-ci-build.cjs
+      - name: Save active recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-active-recovery-proof
+          path: output/playwright/active-recovery-run/
+          if-no-files-found: warn
+
+  linux-native-workflows:
+    name: Linux native ${{ matrix.name }}
+    if: github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {
+              name: local-switch,
+              fixture: local-switch-native-smoke.cjs,
+              external_display: true,
+              packaged: false,
+            }
+          - {
+              name: streaming,
+              fixture: conversation-streaming-electron-smoke.cjs,
+              external_display: true,
+              packaged: false,
+            }
+          - {
+              name: navigation,
+              fixture: renderer-navigation-electron-smoke.cjs,
+              external_display: true,
+              packaged: false,
+            }
+          - {
+              name: ownership,
+              fixture: renderer-ownership-hmr-electron-smoke.cjs,
+              external_display: true,
+              packaged: false,
+            }
+          - {
+              name: dispatch,
+              fixture: renderer-document-dispatch-electron-smoke.cjs,
+              external_display: false,
+              packaged: false,
+            }
+          - {
+              name: studio,
+              fixture: studio-native-checkpoint-smoke.cjs,
+              external_display: false,
+              packaged: false,
+            }
+          - {
+              name: ordinary-draft,
+              fixture: ordinary-draft-native-checkpoint-smoke.cjs,
+              external_display: false,
+              packaged: false,
+            }
+          - {
+              name: local-source,
+              fixture: local-native-smoke.cjs,
+              external_display: true,
+              packaged: false,
+            }
+          - {
+              name: helpers-source,
+              fixture: local-owned-helpers-native.cjs,
+              external_display: false,
+              packaged: false,
+            }
+          - {
+              name: local-package,
+              fixture: local-native-smoke.cjs,
+              external_display: true,
+              packaged: true,
+            }
+          - {
+              name: helpers-package,
+              fixture: local-owned-helpers-native.cjs,
+              external_display: false,
+              packaged: true,
+            }
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      LIFE_TEST_EXPECT_ARCHIVE_LOSS: '0'
+      LIFE_TEST_EXPECT_DRAFT_LOSS: '0'
+      LIFE_TEST_EXPECT_SOURCE_LOSS: '0'
+      LIFE_TEST_EXPECT_DOCUMENT_DISPATCH: rejected
+      LIFE_TEST_HMR_POLICY: guarded
+      LIFE_SWITCH_EXPECT_BEFORE: '0'
+      LIFE_SWITCH_ROUTES: disconnect,connect
+      LIFE_NAVIGATION_FIXTURE_XVFB: '1'
+      LIFE_TEST_PRIVATE_LOCAL_APPENDS_XVFB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-linux-verified-build
+      - run: node tests/helpers/verified-ci-build.cjs
+      - run: npx playwright install-deps chromium
+      - name: Package the exact compiled application
+        if: matrix.packaged
+        run: npx electron-builder --linux --x64 --dir --publish never
+      - name: Verify the packaged native filesystem
+        if: matrix.name == 'local-package'
+        env:
+          LIFE_RECOVERY_BUILD_PROVENANCE: output/recovery-release-build.json
+        run: |
+          node scripts/record-recovery-build.cjs seal output/linux-source-before.json release/linux-unpacked/life-desktop output/recovery-release-build.json
+          node tests/native-recovery-filesystem-probe.cjs release/linux-unpacked/life-desktop output/native-recovery-filesystem-probe/linux-x64.json
+      - name: Run the existing native fixture in this disposable runner
+        shell: bash
+        run: |
+          export LIFE_TEST_APP_ROOT="$PWD"
+          export LIFE_TEST_APP_PATH="$PWD"
+          export LIFE_TEST_ARTIFACTS_DIR="$PWD/output/release-native/${{ matrix.name }}"
+          export LIFE_TEST_SCREENSHOTS_DIR="$LIFE_TEST_ARTIFACTS_DIR/screenshots"
+          export LIFE_TEST_BACKGROUND_PID="$BASHPID"
+          if [[ '${{ matrix.packaged }}' == 'true' ]]; then
+            export LIFE_ELECTRON_BINARY="$PWD/release/linux-unpacked/life-desktop"
+            export LIFE_HELPER_SOURCE_ROOT="$PWD/release/linux-unpacked/resources/life-source/src"
+            export LIFE_TEST_SOURCE=0 LIFE_TEST_PACKAGED=1
+          else
+            export LIFE_HELPER_SOURCE_ROOT="$PWD/src"
+            export LIFE_TEST_SOURCE=1 LIFE_TEST_PACKAGED=0
+          fi
+          if [[ '${{ matrix.external_display }}' == 'true' ]]; then
+            xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp -extension MIT-SHM' node 'tests/${{ matrix.fixture }}'
+          else
+            node 'tests/${{ matrix.fixture }}'
+          fi
+      - name: Verify the original source and compiled build are preserved
+        run: node tests/helpers/verified-ci-build.cjs
+      - name: Save native workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-native-${{ matrix.name }}-proof
+          path: |
+            output/release-native/
+            output/playwright/
+            output/native-recovery-filesystem-probe/
+            output/recovery-release-build.json
+          if-no-files-found: warn
+
+  linux-metadata-quit:
+    name: Linux metadata quit ${{ matrix.mode }}
+    if: github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        mode: [local-allocated, ssh-allocated, local-preallocation, ssh-preallocation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: life-linux-verified-build
+      - id: build
+        run: node tests/helpers/verified-ci-build.cjs
+      - run: npx playwright install-deps chromium
+      - name: Verify normal quit during cold metadata startup
+        env:
+          LIFE_TEST_APP_PATH: ${{ github.workspace }}
+          LIFE_FIXTURE_REPOSITORY: ${{ github.workspace }}
+          LIFE_METADATA_QUIT_EXPECT_MAIN_SHA256: ${{ steps.build.outputs.main_sha256 }}
+          LIFE_METADATA_QUIT_CASE: ${{ matrix.mode }}
+          LIFE_METADATA_QUIT_ARTIFACTS: ${{ github.workspace }}/output/metadata-startup-quit/${{ matrix.mode }}
+        run: node tests/metadata-startup-quit/owned-runner.cjs
+      - name: Verify the original source and compiled build are preserved
+        run: node tests/helpers/verified-ci-build.cjs
+      - name: Save cold metadata quit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-linux-metadata-quit-${{ matrix.mode }}-proof
+          path: output/metadata-startup-quit/
+          if-no-files-found: warn
+
   windows-native-recovery:
     name: Windows packaged native compatibility
     runs-on: windows-latest

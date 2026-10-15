@@ -212,7 +212,11 @@ async function presentationChecks(page, checks) {
     const pending = await page.evaluate(() => {
       const test = window.controlsTest
       test.holdState(true)
-      return { starts: test.records.starts.length, held: test.records.heldStateReads }
+      return {
+        starts: test.records.starts.length,
+        stops: test.records.stops.length,
+        held: test.records.heldStateReads,
+      }
     })
     const cancelled = `  Cancel this ${provider} preparation exactly.\nNo late provider start.  `
     await composer.fill(cancelled)
@@ -248,10 +252,12 @@ async function presentationChecks(page, checks) {
       const test = window.controlsTest
       return {
         starts: test.records.starts.slice(before),
+        stops: test.records.stops.length,
         messages: test.stored().flatMap((thread) => thread.messages),
       }
     }, pending.starts)
     assert.equal(after.starts.length, 1)
+    assert.equal(after.stops, pending.stops)
     assert.equal(after.starts[0].prompt, following)
     assert.equal(after.starts[0].remoteId, `external-${provider}`)
     assert.equal(

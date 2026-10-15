@@ -2063,13 +2063,14 @@ export function App() {
     const submission = submitting.current?.id === active.id ? submitting.current : undefined
     // Stop can arrive while connection/context preparation still precedes the
     // start IPC. Cancel that exact submission before acknowledging interruption.
-    if (submission?.start && !submission.start.dispatched) submission.start.cancelled = true
+    const cancelledBeforeDispatch = Boolean(submission?.start && !submission.start.dispatched)
+    if (submission?.start && cancelledBeforeDispatch) submission.start.cancelled = true
     if (attachmentTransfer.current?.id === active.id) {
       attachmentTransfer.current.controller.abort()
       return
     }
     try {
-      await api.agent.stop(active.id)
+      if (!cancelledBeforeDispatch) await api.agent.stop(active.id)
       setThreads((previous) =>
         previous.map((thread) =>
           thread.id === active.id && thread.turn === active.turn && thread.busy

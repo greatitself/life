@@ -111,6 +111,7 @@ const extractedSource = [
   ),
   assignment('cancelRendererSessions'),
   assignment('flushNativeRecovery'),
+  assignment('settleRendererOperations'),
   assignment('finalizeRendererSuspension'),
   assignment('rendererHandoffAdmitted'),
   assignment('rendererWorkPending'),
@@ -278,6 +279,7 @@ function fixture(name: string) {
       hasUntrackedRunningSessions: (): boolean => context.busy,
       rendererHandoffAdmitted: async (): Promise<boolean> => !context.busy,
       flushRecovery: async (): Promise<void> => {},
+      settleRendererHandoff: async (): Promise<void> => {},
       finalizeRendererSuspension: () => {},
       suspendRendererConsumers: () => events.push('agents:suspend-consumers'),
       hasProviderRetirementTargets: (): boolean =>

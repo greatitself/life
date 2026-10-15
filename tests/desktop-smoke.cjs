@@ -1497,6 +1497,11 @@ export function activityLabel(activity: ThreadActivity): string {
         )
         const suspended = await ordinaryThread('continuity-delay', provider)
         assert.equal(suspended.busy, true, 'A lost SSH connection retains active remote work')
+        assert.equal(
+          await page.getByRole('dialog', { name: 'Choose an environment', exact: true }).count(),
+          0,
+          'Automatic native recovery retains Main’s reconnect without requesting credentials',
+        )
         await writeFile(join(fixture.root, `continuity-${provider}.release`), 'release')
         await waitUntil(
           async () =>

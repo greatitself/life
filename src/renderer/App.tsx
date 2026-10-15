@@ -763,6 +763,16 @@ export function App() {
         return true
       }
       if (result.kind === 'credentials') {
+        const currentThread = threadsCurrent.current.find((item) => item.id === thread.id)
+        if (
+          appContext.current.connection.profile?.id === thread.profileId &&
+          currentThread?.nativeRecoveryOwner &&
+          (currentThread.busy || nativeRecoveryBlocksMutation(currentThread))
+        ) {
+          // Main retains this active native owner and its reconnect. A delayed
+          // hydration reply must not replace that retry with new credentials.
+          return false
+        }
         setRequestedProfileId(result.profileId)
         setConnectOpen(true)
       } else if (result.kind === 'project') {

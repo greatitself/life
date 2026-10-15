@@ -1702,6 +1702,24 @@ export function activityLabel(activity: ThreadActivity): string {
     }
     proof.fixtureLog = await capture(() => fixture.log())
     proof.threads = await capture(() => readThreads())
+    proof.studioCache = await capture(() =>
+      page?.evaluate(() =>
+        Object.fromEntries(
+          Object.keys(localStorage)
+            .filter((key) => key.startsWith('life.studio.'))
+            .map((key) => [key, localStorage.getItem(key)]),
+        ),
+      ),
+    )
+    proof.nativeRegistry = await capture(async () => {
+      const directory = join(privateUserData, 'native-recovery')
+      const files = (await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.jsonl$/.test(name))
+      return Object.fromEntries(
+        await Promise.all(
+          files.map(async (name) => [name, await readFile(join(directory, name), 'utf8')]),
+        ),
+      )
+    })
     proof.nativeEvents = await capture(() =>
       application?.evaluate(() => globalThis.__lifeRendererProof),
     )

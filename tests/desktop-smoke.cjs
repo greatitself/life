@@ -218,6 +218,7 @@ export function activityLabel(activity: ThreadActivity): string {
       cwd: repository,
       env: {
         ...localFixture.env,
+        LIFE_TEST_NATIVE_LIFECYCLE: '1',
         XDG_CONFIG_HOME: configurationRoot,
         ...(process.platform === 'win32' ? { APPDATA: configurationRoot } : {}),
       },

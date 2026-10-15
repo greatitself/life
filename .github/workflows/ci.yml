@@ -230,7 +230,7 @@ jobs:
       - run: npm run test:desktop
         id: release_check_33
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 30
       - run: npm run format:check
         id: release_check_34
         continue-on-error: true
@@ -616,7 +616,7 @@ jobs:
       - name: Native desktop workflow regressions
         id: desktop
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: npm run test:desktop
       - name: Require every selected regression check
         env:

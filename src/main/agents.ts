@@ -2374,7 +2374,6 @@ export class Agents {
   private continueRecoveredStop(session: Session): Promise<void> {
     const sessionId = session.input.sessionId
     const previous = this.stopContinuations.get(sessionId)
-    this.traceNativeLifecycle('stop-continue', sessionId, session)
     if (previous) {
       // A queued callback can arrive after another callback acquired this Stop.
       // Retain its follow-up observation instead of losing the newer receipt.
@@ -2480,38 +2479,6 @@ export class Agents {
             codexApprovalStopDecisionId(approval.method, approval.params) !== null,
         })),
       })
-      if (process.env.LIFE_TEST_NATIVE_LIFECYCLE === '1')
-        console.error(
-          '[Life native Stop plan]',
-          JSON.stringify({
-            at: Date.now(),
-            sessionId,
-            sessionGeneration: session.recoveryGeneration,
-            registeredGeneration: owner.generation,
-            registeredPhase: owner.phase,
-            planStatus: plan.status,
-            reasons: plan.reasons,
-            actions: plan.actions.map((action) => ({
-              type: action.type,
-              ...('nativeThreadId' in action ? { nativeThreadId: action.nativeThreadId } : {}),
-              ...('nativeTurnId' in action ? { nativeTurnId: action.nativeTurnId } : {}),
-              ...('input' in action ? { inputSequence: action.input.sequence } : {}),
-            })),
-            inputs: snapshot.inputs
-              .filter((input) => input.semantic.sessionId === sessionId)
-              .slice(-8)
-              .map((input) => ({
-                sequence: input.sequence,
-                kind: input.semantic.kind,
-                generation: input.semantic.ownerGeneration,
-                method: input.semantic.method,
-                nativeTurnId: input.semantic.nativeTurnId,
-                written: input.written,
-                acknowledged: input.acknowledged,
-                receipt: input.deliveryReceipt?.status,
-              })),
-          }),
-        )
       if (plan.status === 'unknown') {
         if (
           plan.reasons.every(
@@ -2550,7 +2517,6 @@ export class Agents {
               )
           }
           if (action.type === 'interrupt-codex') {
-            this.traceNativeLifecycle('stop-before-native-interrupt', sessionId, session)
             await session.codexRPC?.request(
               'turn/interrupt',
               {
@@ -2570,7 +2536,6 @@ export class Agents {
                 details: { stopKey: action.stopKey },
               }),
             )
-            this.traceNativeLifecycle('stop-after-native-interrupt', sessionId, session)
           }
           if (action.type === 'interrupt-claude')
             await this.claudeControl(session, { subtype: 'interrupt' }, 10000)
@@ -2642,7 +2607,6 @@ export class Agents {
           finished = true
         }
         if (finished) {
-          this.traceNativeLifecycle('stop-finalize-completion', sessionId, session)
           this.recoveredStops.delete(sessionId)
           const completion = this.stopCompletions.get(session.input.sessionId)
           if (completion) Deferred.doneUnsafe(completion, Effect.void)
@@ -4273,48 +4237,7 @@ export class Agents {
       if (this.codexConfigStarting === starting) this.codexConfigStarting = undefined
     }
   }
-  private traceNativeLifecycle(step: string, sessionId: string, observed?: Session) {
-    if (process.env.LIFE_TEST_NATIVE_LIFECYCLE !== '1') return
-    const current = this.sessions.get(sessionId)
-    const admission = this.pendingStartAdmissions.get(sessionId)
-    const completion = this.stopCompletions.get(sessionId)
-    console.error(
-      '[Life native lifecycle]',
-      JSON.stringify({
-        step,
-        at: Date.now(),
-        sessionId,
-        current: current && {
-          generation: current.recoveryGeneration,
-          localTurn: current.input.localTurn,
-          phase: current.phase,
-          busy: current.busy,
-          stopRequested: current.stopRequested,
-          promptDispatchStarted: current.promptDispatchStarted,
-          nativeTurnId: current.turnId,
-          startup: Boolean(current.startup),
-          stopping: Boolean(current.stopping),
-          configuration: Boolean(current.configuration),
-          rpcAssigned: Boolean(current.codexRPC),
-          rpcClosed: current.codexRPC?.closed,
-          rpcPendingMutation: current.codexRPC?.hasPendingMutation,
-          transportState: (current.codexRPC?.channel as DurableChannel | undefined)?.transportState,
-        },
-        observedGeneration: observed?.recoveryGeneration,
-        observedIsCurrent: observed ? observed === current : undefined,
-        admission: admission && {
-          published: Boolean(admission.session),
-          cancelled: Boolean(admission.cancelled),
-        },
-        stopCompletion: completion && { done: Deferred.isDoneUnsafe(completion) },
-        continuingStop: this.continuingStops.has(sessionId),
-        stopContinuation: this.stopContinuations.has(sessionId),
-        recoveredStop: this.recoveredStops.has(sessionId),
-      }),
-    )
-  }
   async start(input: StartInput) {
-    this.traceNativeLifecycle(`start-enter:${input.localTurn}`, input.sessionId)
     this.assertEnvironmentAdmission()
     if (this.pendingStartAdmissions.has(input.sessionId))
       throw new Error('This thread is already starting')
@@ -4549,7 +4472,6 @@ export class Agents {
     }
     admission.session = activeSession
     this.sessions.set(input.sessionId, activeSession)
-    this.traceNativeLifecycle('start-published', input.sessionId, activeSession)
     const initialize = async () => {
       if (input.scope === 'life-customization') {
         activeSession.workspace = await stageStudioContext(
@@ -5124,7 +5046,6 @@ export class Agents {
     await this.recordRecoveryOwner(session, rpc.channel)
     if (session.stopRequested || this.sessions.get(input.sessionId) !== session) return
     session.promptDispatchStarted = true
-    this.traceNativeLifecycle('prompt-dispatch', session.input.sessionId, session)
     const result = await rpc.request(
       'turn/start',
       turnParams,
@@ -6888,7 +6809,6 @@ export class Agents {
     await this.flushRecovery()
   }
   async stop(sessionId: string) {
-    this.traceNativeLifecycle('stop-enter', sessionId)
     const admission = this.pendingStartAdmissions.get(sessionId)
     if (admission && !admission.session && !this.recoveryReservations.has(sessionId)) {
       // This Stop owns the new, not-yet-admitted turn. An earlier completed
@@ -6900,7 +6820,6 @@ export class Agents {
     }
     const pendingCompletion = this.stopCompletions.get(sessionId)
     if (pendingCompletion) {
-      this.traceNativeLifecycle('stop-join-existing-completion', sessionId)
       return runEffect(Deferred.await(pendingCompletion))
     }
     this.assertRecovered(sessionId)
@@ -6931,7 +6850,6 @@ export class Agents {
     if (session.recoveryTransportId && this.nativeRecovery) {
       const completion = Deferred.makeUnsafe<void, NativeRecoveryError>()
       this.stopCompletions.set(sessionId, completion)
-      this.traceNativeLifecycle('stop-created-completion', sessionId, session)
       this.recoveredStops.add(sessionId)
       session.stopRequested = true
       session.titleTask?.abort()

@@ -1412,6 +1412,11 @@ export function activityLabel(activity: ThreadActivity): string {
         )
         const baseline = (await fixture.log()).length
         await send('native-attachment-probe')
+        await waitUntil(
+          async () => (await promptsSince(baseline, provider)).includes('native-attachment-probe'),
+          'exact native attachment prompt reaches the provider',
+          30000,
+        )
         await waitForSend()
         const request = (await fixture.log())
           .slice(baseline)

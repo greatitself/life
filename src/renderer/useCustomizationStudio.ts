@@ -564,7 +564,18 @@ export function useCustomizationStudio(options: StudioOptions) {
             )
               continue
             const owner = recoveredNativeOwners.current.get(session.id)
-            if (!owner) continue
+            if (
+              !owner ||
+              owner.transportId !== transportId ||
+              owner.snapshotToken !== cursor.snapshotToken ||
+              owner.ownerGeneration !== cursor.ownerGeneration ||
+              (run &&
+                (run.partsCursor?.transportId !== transportId ||
+                  run.ownerGeneration !== cursor.ownerGeneration))
+            )
+              continue
+            // Historical cursors remain in the transcript. Only its exact
+            // current owner can prepare a cache checkpoint for this planner.
             const planner = run
               ? capturePlanner(session.id, run)
               : parseStudioPlannerRecovery(owner.clientRecovery)

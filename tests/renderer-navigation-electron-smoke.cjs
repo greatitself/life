@@ -602,7 +602,7 @@ async function run() {
               event.sessionId === thread.id &&
               event.type === 'text' &&
               event.text === 'Hello ' &&
-              event.itemId === nativeTurn.turnId.replace(/^turn-/, 'message-'),
+              event.itemId === nativeTurn.itemId,
           ),
       `${label}: this native turn's exact delta reaches the current renderer receiver`,
     )

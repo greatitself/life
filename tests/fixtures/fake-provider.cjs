@@ -585,7 +585,14 @@ if (provider === 'claude' && metadataWorkspace) {
     }
     active = turn
     codexActive.set(threadId, turn)
-    record({ kind: 'turn-started', threadId, turnId: turn.turnId, sequence, prompt: text })
+    record({
+      kind: 'turn-started',
+      threadId,
+      turnId: turn.turnId,
+      itemId: turn.itemId,
+      sequence,
+      prompt: text,
+    })
     send({ id: message.id, result: { turn: { id: turn.turnId } } })
     send({ method: 'turn/started', params: { threadId, turn: { id: turn.turnId } } })
     if (metadataWorkspace) {

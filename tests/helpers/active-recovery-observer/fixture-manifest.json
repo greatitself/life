@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 54864,
-      "sha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80"
+      "bytes": 55322,
+      "sha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 54864,
-      "sha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80"
+      "bytes": 55322,
+      "sha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -184,5 +184,12 @@
   },
   "nativeAuthority": "Observe only genuine agent:recover invocations/results and unchanged onAgent events. Use original real Allow click and original numbered native response bytes; never synthesize events or call recover for witness creation.",
   "localMapping": "Production logical brokerRoot/config root is retained unchanged; a deterministic fixture shell maps only physical storage to the owned private root, retaining the same native command/localRuntime and original provider/broker PID/startTicks across restart.",
-  "cleanup": "Retain original process identities, raw private state/session/native and remote journals/input digests before owned fixture teardown; verify private processes/display released. Abrupt external interruption retains observed leases for scoped follow-up cleanup."
+  "cleanup": "Retain original process identities, raw private state/session/native and remote journals/input digests before owned fixture teardown; verify private processes/display released. Abrupt external interruption retains observed leases for scoped follow-up cleanup.",
+  "intentionalFixtureCorrections": [
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "priorSha256": "82980c5315b85ada2b4361fd84599e04606ae58ae328eec3a7746e9de40e1e80",
+      "reason": "Final Codex native snapshot reveals final_answer. Assert the exact phase-qualified projected ID and unchanged origin timestamp; preserve all native replay, exact prompt, and once-only delivery checks."
+    }
+  ]
 }

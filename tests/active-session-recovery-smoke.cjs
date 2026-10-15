@@ -970,7 +970,18 @@ async function runFailedHistoryScenario(harness, scenario, index) {
   )
   assert.equal(user.id, originalUser.id)
   assert.equal(user.createdAt, originalUser.createdAt)
-  assert.equal(assistantReplies(afterRecovery, WITH_MIDDLE)[0].id, originalPartial.id)
+  const finalReply = assistantReplies(afterRecovery, WITH_MIDDLE)[0]
+  // The unchanged native item reveals its phase in the completed snapshot.
+  // Life uses that native phase in the projected key, while retaining origin time.
+  assert.equal(
+    finalReply.id,
+    scenario.provider === 'codex' ? `${originalPartial.id}:final_answer` : originalPartial.id,
+  )
+  assert.equal(
+    finalReply.phase,
+    scenario.provider === 'codex' ? 'final_answer' : originalPartial.phase,
+  )
+  assert.equal(finalReply.createdAt, originalPartial.createdAt)
   return {
     name,
     outcome: 'verified-native-tail-retained-without-history-ack',

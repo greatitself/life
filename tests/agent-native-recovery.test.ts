@@ -503,6 +503,45 @@ describe('native ledger replay ownership', () => {
 })
 
 describe('durable native event coordinator', () => {
+  it('rebuilds a missing Studio cache only from the current document’s exact delivered projection', () => {
+    const state = snapshot({ eventRevision: 1, events: [storedEvent(1)] })
+    const memory = memoryStore(state)
+    const coordinator = new NativeAgentRecovery(memory.store, vi.fn())
+    coordinator.seed(state)
+    const cursor = { appliedRevision: 1, snapshotToken: 'snapshot-native-1', ownerGeneration: 1 }
+    const claim = consumer({ applied: { transport: cursor } })
+    expect(coordinator.acceptedCursor(state, claim)).toBeUndefined()
+    const event = stampRecoveryEvent(storedEvent(1), 'transport')
+    const rollback = coordinator.noteReplayDelivery(event)
+    const admission = {
+      sessionId: 'session',
+      transportId: 'transport',
+      ...cursor,
+      deliveryToken: event.nativeRecovery!.deliveryToken!,
+    }
+    expect(coordinator.acceptedCursor(state, claim)).toBeUndefined()
+    expect(
+      coordinator.acceptedCursor(state, { ...claim, projectionAdmissions: [admission] }),
+    ).toEqual(cursor)
+    expect(
+      coordinator.acceptedCursor(state, {
+        ...claim,
+        projectionAdmissions: [{ ...admission, deliveryToken: 'stale-document-token' }],
+      }),
+    ).toBeUndefined()
+    expect(
+      coordinator.acceptedCursor(state, {
+        ...claim,
+        cacheHash: 'b'.repeat(64),
+        projectionAdmissions: [admission],
+      }),
+    ).toBeUndefined()
+    rollback()
+    expect(
+      coordinator.acceptedCursor(state, { ...claim, projectionAdmissions: [admission] }),
+    ).toBeUndefined()
+  })
+
   it('never emits an event before its storage admission resolves', async () => {
     const gate = Deferred.makeUnsafe<void>()
     const memory = memoryStore(snapshot(), gate)

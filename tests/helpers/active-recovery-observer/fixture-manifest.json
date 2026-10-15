@@ -76,8 +76,8 @@
     },
     {
       "path": "tests/helpers/active-recovery-observer/runner-contract.cjs",
-      "bytes": 18923,
-      "sha256": "c3cf3e2c9c8ab0af855f3dbd92d2f7c14812cacc6ceef104ca9ac4d2e09a4249"
+      "bytes": 19077,
+      "sha256": "780a333e569caf70b14d1a88e5613f661d75408dd954afb42fd0d57f8ce472d2"
     },
     {
       "path": "tests/helpers/active-recovery-observer/local-proof.cjs",
@@ -106,8 +106,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 37619,
-      "sha256": "c88409471557f8b293fae8df27c6a2c5c8206a0ffcd4fcb99339cbfb4958219d"
+      "bytes": 38218,
+      "sha256": "eeb7f9c5bace1d09512f753951cb53b7ac7924fd31fd122a3dad67156783df4c"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -126,8 +126,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 25417,
-      "sha256": "e3cebc803fa0093b7af88f8bf827f76e072241c2778232c379a94088b7b881ce"
+      "bytes": 26263,
+      "sha256": "56e5478ff4cc820bbac7d90dd4a8445e623993d73a2400ca5d226d21545b0d21"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",
@@ -143,8 +143,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 37433,
-      "sha256": "b9e66c1ffc7ea05ed018db68a5c8e84490fd2cf0367f6f7e1ad20fbb01b5b088"
+      "bytes": 38218,
+      "sha256": "eeb7f9c5bace1d09512f753951cb53b7ac7924fd31fd122a3dad67156783df4c"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -163,8 +163,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 25417,
-      "sha256": "e3cebc803fa0093b7af88f8bf827f76e072241c2778232c379a94088b7b881ce"
+      "bytes": 26263,
+      "sha256": "56e5478ff4cc820bbac7d90dd4a8445e623993d73a2400ca5d226d21545b0d21"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",
@@ -203,6 +203,14 @@
     {
       "path": "tests/active-session-recovery-smoke.cjs",
       "reason": "Observe unadmitted ownership from genuine hash-verified Main recovery results; await Studio cache checkpoint and hydration, and tolerate only not-yet-created source state while polling the native commit boundary."
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "reason": "Restore owned fixture gates before bounded application teardown; a forced cleanup terminates only its recorded native child and fails the fixture rather than hanging."
+    },
+    {
+      "path": "tests/active-session-reload-smoke.cjs",
+      "reason": "Probe a genuine same-session mutation before requesting reload during pending native exit, require native handoff refusal, then retain original close, once-only prompt, writer, and actual terminal-exit assertions."
     }
   ]
 }

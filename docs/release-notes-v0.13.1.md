@@ -41,3 +41,5 @@ Studio enables Send after both document recovery and the recovered planner finis
 Automatic development reloads wait until active native turns are idle, preserving the current interface, Stop control, and draft. Explicit reloads retain the verified durable handoff.
 
 Disconnected documents load their original committed native ledger before replay delivery, so viewing saved history does not require attaching a provider. An unadmitted ordinary startup remains protected without a privately proven startup intent.
+
+Studio can rebuild a missing cache from the current document’s exact native replay deliveries. Saved cursors, stale document tokens, and mismatched cache hashes cannot authorize reconstruction.

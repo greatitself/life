@@ -174,8 +174,10 @@ async function applicationIdentity(repository, appPath, options = {}) {
     dependencyRoot,
     'The selected application resolves the same fingerprinted dependency store',
   )
-  const dependencies = await tree(dependencyRoot, '', { dependencies: true })
+  // Resolve stock Electron first: its package may install the binary lazily.
+  // The initial immutable dependency graph must include that installation.
   const electronPath = options.electronPath || require('electron')
+  const dependencies = await tree(dependencyRoot, '', { dependencies: true })
   const nodePath = options.nodePath || process.execPath
   const electron = {
     executable: electronPath,

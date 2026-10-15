@@ -396,7 +396,8 @@ async function slowExitReload(harness) {
   let pending, reload, observed, releaseAt, guardObservation
   try {
     assert.equal(alive(record.started.pid), true)
-    reload = await reloadDocument(harness)
+    // Probe the real existing document before attempting a reload that must be
+    // refused while the original provider has not produced its terminal receipt.
     pending = await harness.page.evaluate(
       (input) => {
         window.__lifeSlowExitAttempt = { input, invokedAt: Date.now(), status: 'pending' }
@@ -483,6 +484,26 @@ async function slowExitReload(harness) {
       0,
     )
     assertWrittenCloseReceipt(observed.journal)
+    await harness.application.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.reload()
+    })
+    await waitUntil(
+      () =>
+        harness.nativeLogs
+          .flat()
+          .some((line) => line.includes('Native renderer handoff admission refused')),
+      'the actual native reload refuses document admission before the original provider exits',
+      2000,
+    )
+    reload = {
+      actualWebContentsReload: true,
+      admitted: false,
+      nativeHandoffRefused: true,
+      pendingNativeExit: true,
+      observedAt: Date.now(),
+    }
+    assert.equal(alive(record.started.pid), true)
+    assert.equal(harness.log().filter((entry) => entry.kind === 'turn-started').length, 1)
     assert.ok(
       Date.now() - accepted.at < 4500,
       'Finish the deterministic slow-close boundary before the real broker force-kill deadline',

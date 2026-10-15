@@ -516,7 +516,26 @@ export class NativeAgentRecovery {
     }
     if (revision === 0) return cursor
     if (consumer.kind === 'studio') {
-      if (!consumer.cacheHash) return
+      if (!consumer.cacheHash) {
+        // A missing cache can be rebuilt from events delivered in this document.
+        // Saved cursors alone never grant this authority, and a supplied cache
+        // hash must still match the exact privately prepared bytes below.
+        return this.projectionAdmitted(
+          consumer.projectionAdmissions ?? [],
+          snapshot.transport.id,
+          consumer.sessionId,
+          cursor,
+        ) &&
+          revision <=
+            this.deliveredRevision(
+              snapshot.transport.id,
+              consumer.sessionId,
+              cursor.snapshotToken,
+              cursor.ownerGeneration,
+            )
+          ? cursor
+          : undefined
+      }
       const prepared = snapshot.historyPrepares.find(
         (prepare) =>
           prepare.fileHash === consumer.cacheHash &&

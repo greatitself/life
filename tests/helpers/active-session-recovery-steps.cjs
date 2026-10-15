@@ -931,11 +931,31 @@ class RecoveryHarness {
   }
 
   async close() {
-    if (this.application) await this.application.close().catch(() => {})
-    this.application = undefined
     await this.restoreHistoryWrites()
     await this.restoreActionTerminal()
+    let forced = false
+    if (this.application) {
+      const application = this.application
+      const native = application.process()
+      let timer
+      try {
+        await Promise.race([
+          application.close().catch(() => {}),
+          new Promise((resolve) => {
+            timer = setTimeout(() => {
+              forced = true
+              if (native.exitCode === null && native.signalCode === null) native.kill('SIGKILL')
+              resolve()
+            }, 8000)
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    this.application = undefined
     if (this.fixture) await this.fixture.close()
+    assert.equal(forced, false, 'The owned fixture application must close without forced teardown')
   }
 }
 

@@ -1115,6 +1115,9 @@ export function useCustomizationStudio(options: StudioOptions) {
       latest.current.connection.profile?.id !== run.profileId
     )
       return false
+    const failedAction = run.recovery?.action
+    if (failedAction?.kind === 'reload-source' && failedAction.status === 'failed')
+      receipt(id, 'Startup recovered', diagnostics, 'completed', failedAction.id)
     const repairs = run.repairs + 1
     // Capture the admitted attempt before advancing its counter and intent together.
     const recovery = parseStudioPlannerRecovery({

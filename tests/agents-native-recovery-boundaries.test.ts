@@ -912,7 +912,14 @@ describe('Agents native recovery boundaries', () => {
       expect(restored.owners.find((owner) => owner.sessionId === 'life-session')?.status).toBe(
         'idle',
       )
-      const usage = fixture.events.filter((event) => event.details?.usageScope === 'session')
+      const usage = fixture.events.filter(
+        (event): event is AgentEvent & { details: Record<string, unknown> } =>
+          typeof event.details === 'object' &&
+          event.details !== null &&
+          !Array.isArray(event.details) &&
+          'usageScope' in event.details &&
+          event.details.usageScope === 'session',
+      )
       expect(usage).toHaveLength(2)
       expect(usage.map((event) => event.details?.usageCallId)).toEqual([
         fixture.transport.id + ':generation:3',

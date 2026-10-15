@@ -1830,6 +1830,19 @@ export function activityLabel(activity: ThreadActivity): string {
         return planners
       }),
     )
+    proof.nativeHistory = await capture(async () =>
+      Object.fromEntries(
+        await Promise.all(
+          ['conversations.json', 'conversations.recovery-receipts.json'].map(async (name) => {
+            try {
+              return [name, await readFile(join(privateUserData, name), 'utf8')]
+            } catch (error) {
+              return [name, { code: error.code }]
+            }
+          }),
+        ),
+      ),
+    )
     proof.nativeRegistry = await capture(async () => {
       const directory = join(privateUserData, 'native-recovery')
       const files = (await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.jsonl$/.test(name))

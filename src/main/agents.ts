@@ -1,7 +1,7 @@
 import type { ClientChannel } from 'ssh2'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { Deferred, Effect, Exit, Schema, Semaphore, type Scope } from 'effect'
+import { Deferred, Effect, Exit, Option, Schema, Semaphore, type Scope } from 'effect'
 import type {
   AgentConfigureResult,
   AgentEvent,

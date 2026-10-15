@@ -61,8 +61,8 @@
     },
     {
       "path": "tests/helpers/active-recovery-observer/fixture-observer.cjs",
-      "bytes": 7075,
-      "sha256": "fe3e2b34acdc1bec9505ca2fe28b4ad04d91dbe5adf95980138b5bc2d8911b79"
+      "bytes": 7268,
+      "sha256": "a4505724aa2f568c24288e9d200d00a3d765b2b069ec527156b2b107b5d002de"
     },
     {
       "path": "tests/helpers/active-recovery-observer/source-artifacts.cjs",
@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 57241,
-      "sha256": "341878d4105d2032a0130760015b868f4439f8ba5006fba0145ba381285b94a6"
+      "bytes": 58224,
+      "sha256": "e0884436f1d6810887894d31da575880329e5c47a73ac0a0c8e2cf88905c8034"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -126,8 +126,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 25191,
-      "sha256": "73271d85416d16fd549b0c5f1ce897f9e710ea4f944da1eefb9f05b115861b1f"
+      "bytes": 25417,
+      "sha256": "e3cebc803fa0093b7af88f8bf827f76e072241c2778232c379a94088b7b881ce"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 57241,
-      "sha256": "341878d4105d2032a0130760015b868f4439f8ba5006fba0145ba381285b94a6"
+      "bytes": 58224,
+      "sha256": "e0884436f1d6810887894d31da575880329e5c47a73ac0a0c8e2cf88905c8034"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -163,8 +163,8 @@
     },
     {
       "path": "tests/active-session-reload-smoke.cjs",
-      "bytes": 25191,
-      "sha256": "73271d85416d16fd549b0c5f1ce897f9e710ea4f944da1eefb9f05b115861b1f"
+      "bytes": 25417,
+      "sha256": "e3cebc803fa0093b7af88f8bf827f76e072241c2778232c379a94088b7b881ce"
     },
     {
       "path": "tests/helpers/active-session-reload-provider.cjs",
@@ -195,6 +195,14 @@
       "path": "tests/active-session-recovery-smoke.cjs",
       "priorSha256": "1fcee76fb6352217854a454d67785b63095070610f2b5c0c49e0476fd6c4b000",
       "reason": "An ordinary thread/start acknowledgment is not a privately claimed Studio start intent. Verify the unadmitted turn remains unknown with its exact user message, upstream thread and original live process retained, zero prompt submissions and no competing writer."
+    },
+    {
+      "path": "tests/active-session-reload-smoke.cjs",
+      "reason": "Retain exact phase-qualified final Codex item ID and original timestamp after native completion; initial and append-only snapshots still require the original unphased ID."
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "reason": "Observe unadmitted ownership from genuine hash-verified Main recovery results; await Studio cache checkpoint and hydration, and tolerate only not-yet-created source state while polling the native commit boundary."
     }
   ]
 }

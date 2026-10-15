@@ -26,6 +26,10 @@ function install({ electron, RecoveryHarness, appPath, artifacts, baseline, main
     assert.equal(launch.pid, harness.launches.at(-1).pid)
     return readTape(launch.tape, launch.pid, appPath)
   }
+  // Read only the hash-verified current Main tape; never invoke recovery to create evidence.
+  RecoveryHarness.prototype.observeNativeRecovery = function () {
+    return currentTape(this)
+  }
   async function agentTape(harness, label) {
     const events = await harness.page.evaluate(() => window.__activeRecoveryEvents)
     const bytes = serialize(events)

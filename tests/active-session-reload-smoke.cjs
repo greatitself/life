@@ -322,7 +322,10 @@ async function activeReload(harness, provider) {
   }, 'the original turn completes exactly once in the replacement document')
   const after = await harness.assertOwnership(record)
   assert.equal(writerStarts(harness, provider).length, 1)
-  assert.equal(assistants(after, withMiddle)[0].id, partial.id)
+  const completed = assistants(after, withMiddle)[0]
+  assert.equal(completed.id, provider === 'codex' ? `${partial.id}:final_answer` : partial.id)
+  assert.equal(completed.phase, provider === 'codex' ? 'final_answer' : partial.phase)
+  assert.equal(completed.createdAt, partial.createdAt)
   assert.equal(
     harness
       .log()

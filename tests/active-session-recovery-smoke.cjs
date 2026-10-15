@@ -371,10 +371,22 @@ async function runScenario(harness, scenario, index) {
   if (original.awaitingInitialSubmission) {
     // Ordinary starts have no privately claimed Studio startup reservation.
     // A created upstream thread alone cannot authorize its unadmitted user turn.
-    await waitUntil(async () => {
-      const current = await harness.thread(prompt)
-      return current?.nativeRecoveryStatus === 'unknown'
-    }, 'the unadmitted original start remains protected without a proven startup intent')
+    let blockedOwner
+    await waitUntil(() => {
+      const observed = harness.observeNativeRecovery()
+      blockedOwner = observed.records
+        .filter((entry) => entry.kind === 'recover-fulfilled')
+        .flatMap((entry) => entry.value.result.owners)
+        .findLast(
+          (owner) =>
+            owner.sessionId === original.thread.id &&
+            owner.remoteId === original.thread.remoteId &&
+            owner.status === 'unknown',
+        )
+      return Boolean(blockedOwner)
+    }, 'genuine Main recovery retains the unadmitted original native start as unknown')
+    assert.match(blockedOwner.message, /startup intent|private source proof/i)
+
     const retained = await harness.thread(prompt)
     assert.equal(retained.id, original.thread.id)
     assert.equal(retained.profileId, original.thread.profileId)
@@ -408,6 +420,7 @@ async function runScenario(harness, scenario, index) {
     return {
       name,
       outcome: 'verified-unadmitted-native-start-retained-without-resubmission',
+      blockedOwner,
       shutdown,
       beforeShutdown,
       restoredInitially,
@@ -684,6 +697,11 @@ async function runStudioScenario(harness, scenario, index) {
     )
     return session?.stage === 'planning' && session.thread.busy && Boolean(originalPartial)
   }, 'the current native Studio partial response is saved before a cold crash')
+  await harness.page.evaluate(async () => {
+    if (typeof window.__lifeFlushStudioHistory !== 'function')
+      throw new Error('The actual Studio history checkpoint is unavailable')
+    await window.__lifeFlushStudioHistory()
+  })
   const beforeShutdown = await current()
   const expectedTurns = scenario.phase === 'request' ? 1 : scenario.phase === 'source-read' ? 2 : 3
   assert.equal(starts().length, expectedTurns)
@@ -744,6 +762,10 @@ async function runStudioScenario(harness, scenario, index) {
       recoveryObservationMs: performance.now() - recoveryStarted,
     }
   }
+  await waitUntil(
+    async () => (await current())?.id === record.session.id,
+    'the actual saved Studio session hydrates before inspecting its recovered native identity',
+  )
   const activeRestored = await current()
   assert.equal(activeRestored.id, record.session.id)
   assert.equal(activeRestored.thread.id, record.session.thread.id)
@@ -1160,7 +1182,12 @@ async function runSourceCommitScenario(harness, scenario, index) {
   let committedState
   await waitUntil(
     async () => {
-      committedState = JSON.parse(await readFile(join(sourceBefore.path, 'state.json'), 'utf8'))
+      try {
+        committedState = JSON.parse(await readFile(join(sourceBefore.path, 'state.json'), 'utf8'))
+      } catch (error) {
+        if (error.code === 'ENOENT') return false
+        throw error
+      }
       return committedState.recoveryActions?.some((entry) => entry.actionId === boundary.actionId)
     },
     'Source activation commits its native action marker while terminal ledger writes are blocked',

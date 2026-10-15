@@ -7493,9 +7493,9 @@ export class Agents {
     return runEffect(this.settleRendererHandoffEffect(timeoutMs))
   }
   readonly rendererHandoffAdmittedEffect = Effect.fn('Agents.rendererHandoffAdmitted')(
-    function* (this: Agents) {
+    function* (this: Agents, reportBlocked = false) {
       const blocked = (reason: string) => {
-        if (this.rendererSuspended)
+        if (this.rendererSuspended || reportBlocked)
           console.error('[Life] Native renderer handoff admission refused:', {
             reason,
             pending: {
@@ -7668,8 +7668,8 @@ export class Agents {
       )
     }.bind(this),
   )
-  rendererHandoffAdmitted(): Promise<boolean> {
-    return runEffect(this.rendererHandoffAdmittedEffect())
+  rendererHandoffAdmitted(reportBlocked = false): Promise<boolean> {
+    return runEffect(this.rendererHandoffAdmittedEffect(reportBlocked))
   }
   /** Current and retiring provider channels still requiring terminal confirmation. */
   hasProviderRetirementTargets(): boolean {

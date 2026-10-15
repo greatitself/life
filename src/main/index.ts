@@ -668,11 +668,20 @@ async function init() {
       timer = scheduled
       sourceReloadTimer = scheduled
     }
+    const reloadRequestedAt = Date.now()
+    let reportedHandoffBlock = false
     const canHandoff = async () => {
-      if (localApplies) return false
+      const reportBlocked = !reportedHandoffBlock && Date.now() - reloadRequestedAt >= 2000
+      if (reportBlocked) reportedHandoffBlock = true
+      if (localApplies) {
+        if (reportBlocked)
+          console.error('[Life] Source reload is waiting for local changes:', { localApplies })
+        return false
+      }
       try {
-        if (await agents.rendererHandoffAdmitted()) return true
-      } catch {
+        if (await agents.rendererHandoffAdmitted(reportBlocked)) return true
+      } catch (error) {
+        if (reportBlocked) console.error('[Life] Source reload ownership check failed:', error)
         return false
       }
       return (

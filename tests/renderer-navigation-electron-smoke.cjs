@@ -213,20 +213,24 @@ async function run() {
   const clickControl = async (button, label) => {
     assert.ok(await button.isVisible(), `The actual ${label} control is visible`)
     assert.ok(await button.isEnabled(), `The actual ${label} control is enabled`)
-    const bounds = await page.evaluate(async (label) => {
-      // Composer autosizing runs after React's input update. Let both the
-      // layout effect and a compositor frame settle before locating the hit.
-      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
-      const name = label === 'Stop' ? 'Stop agent and pause queued messages' : 'Send message'
-      const matches = [...document.querySelectorAll('button')].filter(
-        (button) => button.getAttribute('aria-label') === name,
-      )
-      if (matches.length !== 1) throw new Error(`Expected one actual ${name} button`)
-      const { x, y, width, height } = matches[0].getBoundingClientRect()
-      const hit = document.elementFromPoint(x + width / 2, y + height / 2)?.closest('button')
-      if (hit !== matches[0]) throw new Error(`Actual pointer hit does not target ${name}`)
-      return { x, y, width, height, name }
-    }, label)
+    let bounds
+    await waitUntil(async () => {
+      bounds = await page.evaluate(async (label) => {
+        // Autosizing and transient native feedback may cover the target after
+        // React's input update. Wait before dispatching any real pointer event.
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))
+        const name = label === 'Stop' ? 'Stop agent and pause queued messages' : 'Send message'
+        const matches = [...document.querySelectorAll('button')].filter(
+          (button) => button.getAttribute('aria-label') === name,
+        )
+        if (matches.length !== 1 || matches[0].disabled) return undefined
+        const { x, y, width, height } = matches[0].getBoundingClientRect()
+        const hit = document.elementFromPoint(x + width / 2, y + height / 2)?.closest('button')
+        if (hit !== matches[0] || width <= 0 || height <= 0) return undefined
+        return { x, y, width, height, name }
+      }, label)
+      return Boolean(bounds)
+    }, `the actual ${label} control is an unobstructed native pointer target`)
     assert.ok(bounds?.width > 0 && bounds.height > 0)
     // Electron prevents these navigation attempts before commit. Playwright's
     // locator action prechecks can still wait on the canceled provisional

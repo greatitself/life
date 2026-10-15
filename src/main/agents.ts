@@ -4801,14 +4801,29 @@ export class Agents {
     if (channel) await this.recordRecoveryOwner(session, channel)
     return result
   }
-  private assertSessionMachine(session: Session) {
-    if (this.ssh.state.status !== 'connected' || session.machineIdentity !== this.machineIdentity())
+  private assertSessionMachine(
+    session: Session,
+    channel = session.input.provider === 'codex' ? session.codexRPC?.channel : session.channel,
+  ) {
+    const transport = channel as
+      | (ClientChannel & { readonly machineIdentity?: string; readonly transportState?: string })
+      | undefined
+    // A socket can disappear after admission while the original durable
+    // channel is opening. Keep its machine binding; never acquire a new one offline.
+    const ownedTransport =
+      transport?.machineIdentity === session.machineIdentity &&
+      (transport.transportState === 'connected' || transport.transportState === 'suspended') &&
+      !transport.destroyed
+    if (
+      session.machineIdentity !== this.machineIdentity() ||
+      (this.ssh.state.status !== 'connected' && !ownedTransport)
+    )
       throw new Error('The connected machine changed before this agent’s native startup')
   }
   private async startCodex(session: Session) {
     this.assertSessionMachine(session)
     const rpc = await this.getCodex(session.machineIdentity)
-    this.assertSessionMachine(session)
+    this.assertSessionMachine(session, rpc.channel)
     session.codexRPC = rpc
     const { input } = session
     if (this.sessions.get(input.sessionId) !== session || session.stopRequested) return

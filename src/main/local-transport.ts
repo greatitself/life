@@ -33,6 +33,10 @@ const TERMINATION_GRACE_MS = 250
 // Electron's inspector can leave non-CLOEXEC sockets in its process. Close
 // inherited descriptors before the selected shell/provider runs, without
 // changing its argv, standard streams, or authentication environment.
+// Dash only accepts single-digit redirection descriptors. Use Bash for this
+// internal cleanup, with startup files/functions disabled, then exec the exact
+// selected shell. Its own startup environment remains available unchanged.
+const LOCAL_EXEC_BOOTSTRAP = '/bin/bash'
 const LOCAL_EXEC_TRAMPOLINE = `
 set -- "$@" "\${life_local_fd_directory+x}" "\${life_local_fd_directory-}" "\${life_local_fd_path+x}" "\${life_local_fd_path-}" "\${life_local_fd_number+x}" "\${life_local_fd_number-}"
 if [ -d /dev/fd ]; then
@@ -57,7 +61,17 @@ exec "$1" "$2" "$3"
 `
 
 function localExecArguments(shell: string, command: string) {
-  return ['-c', LOCAL_EXEC_TRAMPOLINE, 'life-local', shell, '-c', command]
+  return [
+    '--noprofile',
+    '--norc',
+    '-p',
+    '-c',
+    LOCAL_EXEC_TRAMPOLINE,
+    'life-local',
+    shell,
+    '-c',
+    command,
+  ]
 }
 
 function executableShell(value: string | undefined): value is string {
@@ -545,7 +559,7 @@ class PtyChannel extends LocalChannel {
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`)
     const terminalProcess = binding.fork(
-      '/bin/sh',
+      LOCAL_EXEC_BOOTSTRAP,
       localExecArguments(shell, command),
       environment,
       process.cwd(),
@@ -741,7 +755,7 @@ export class LocalClient extends EventEmitter {
         this.own(channel)
         queueMicrotask(() => this.adopt(channel, callback))
       } else {
-        const child = spawn('/bin/sh', localExecArguments(this.shell, command), {
+        const child = spawn(LOCAL_EXEC_BOOTSTRAP, localExecArguments(this.shell, command), {
           env: this.env,
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],

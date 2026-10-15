@@ -13,7 +13,13 @@ vi.mock('../src/main/provider-titles', () => ({
 }))
 
 type Wire = Record<string, any>
-type InputFrame = { type: string; sequence: number; data?: string; signal?: string }
+type InputFrame = {
+  type: string
+  sequence: number
+  data?: string
+  signal?: string
+  writerLease?: { epoch: number; token: string }
+}
 const prompt = '  Exact original prompt\r\n🧪 e\u0301 中  '
 const answer = '  Native answer\r\n🧪 e\u0301 中 \ud800  '
 const localId = 'local-document-thread'
@@ -66,6 +72,12 @@ class Broker {
   readonly remoteId = 'exact-native-thread'
   readonly turnId = 'exact-native-turn'
 
+  acknowledgedSequence() {
+    let sequence = 0
+    while (this.received.has(sequence + 1) && !this.held.has(sequence + 1)) sequence++
+    return sequence
+  }
+
   receive(attachment: Attachment, frame: InputFrame) {
     const message =
       frame.type === 'write'
@@ -73,9 +85,11 @@ class Broker {
         : undefined
     const nativeResponse = message?.id === wireId || message?.response?.request_id === wireId
     if (nativeResponse && this.holdNativeResponse) this.held.add(frame.sequence)
-    else attachment.frame({ type: 'ack', sequence: frame.sequence })
-    if (this.received.has(frame.sequence)) return
+    const duplicate = this.received.has(frame.sequence)
     this.received.add(frame.sequence)
+    const acknowledged = this.acknowledgedSequence()
+    if (acknowledged > 0) attachment.frame({ type: 'ack', sequence: acknowledged })
+    if (duplicate) return
     if (!message) return
     this.messages.push(message)
     if (message.type === 'control_request') {
@@ -116,7 +130,7 @@ class Broker {
 
   ack(sequence: number) {
     this.held.delete(sequence)
-    this.attachment!.frame({ type: 'ack', sequence })
+    this.attachment!.frame({ type: 'ack', sequence: this.acknowledgedSequence() })
   }
 
   exit() {
@@ -165,7 +179,16 @@ class Host extends EventEmitter implements DurableChannelHost {
     broker.attachment = attachment
     this.attachments.push(attachment)
     setImmediate(() => {
-      attachment.frame({ type: 'ready', cursor: broker.cursor })
+      attachment.frame({
+        type: 'ready',
+        protocol: 2,
+        cursor: broker.cursor,
+        lastInputSequence: broker.acknowledgedSequence(),
+        writerLease: {
+          epoch: this.attachments.length,
+          token: `fixture-writer-${this.attachments.length}`,
+        },
+      })
       for (const frame of broker.journal)
         if (frame.cursor > (config.cursor ?? 0)) attachment.frame(frame)
     })
@@ -211,8 +234,8 @@ afterEach(async () => {
       attachment.stderr.destroy()
     }
     await turn()
-    expect(host.listenerCount('state')).toBe(0)
-    // Agents keeps its host-level listener; every durable attachment must retire its own.
+    // Agents keeps its host-level listeners; every durable attachment must retire its own.
+    expect(host.listenerCount('state')).toBe(1)
     expect(host.listenerCount('disconnected')).toBe(1)
     host.removeAllListeners()
   }
@@ -254,8 +277,11 @@ type Fixture = Awaited<ReturnType<typeof fixture>>
 async function provePendingDelivery(context: Fixture, expected: Wire) {
   const { agents, host, channel, broker, release, events } = context
   const encoded = Buffer.from(JSON.stringify(expected) + '\n').toString('base64')
-  await vi.waitFor(() => expect(pendingFrames(channel)).toHaveLength(1))
-  const queued = pendingFrames(channel)[0]
+  await vi.waitFor(() =>
+    expect(pendingFrames(channel).filter((frame) => frame.data === encoded)).toHaveLength(1),
+  )
+  const pending = pendingFrames(channel)
+  const queued = pending.find((frame) => frame.data === encoded)!
   expect(queued).toEqual({ type: 'write', data: encoded, sequence: queued.sequence })
   expect(agents.hasRunningSessions()).toBe(false)
   const guard = agents.hasPendingRendererWork()
@@ -280,7 +306,7 @@ async function provePendingDelivery(context: Fixture, expected: Wire) {
     settled: true,
     result: [false],
     closing: false,
-    pending: [queued],
+    pending,
   })
 
   if (host.state.status === 'connected') host.disconnect()
@@ -289,7 +315,12 @@ async function provePendingDelivery(context: Fixture, expected: Wire) {
   const second = host.attachments[1]
   await vi.waitFor(() => expect(channel.transportState).toBe('connected'))
   await turn()
-  expect.soft(second.inputs).toEqual([queued])
+  expect.soft(second.inputs).toEqual([
+    ...pending.map((frame) => ({
+      ...frame,
+      writerLease: { epoch: 2, token: 'fixture-writer-2' },
+    })),
+  ])
   expect.soft(agents.hasPendingRendererWork()).toBe(true)
 
   // Another lost ACK must retry the original sequence, never a second native response.
@@ -299,7 +330,12 @@ async function provePendingDelivery(context: Fixture, expected: Wire) {
   const third = host.attachments[2]
   await vi.waitFor(() => expect(channel.transportState).toBe('connected'))
   await turn()
-  expect.soft(third.inputs).toEqual([queued])
+  expect.soft(third.inputs).toEqual([
+    ...pending.map((frame) => ({
+      ...frame,
+      writerLease: { epoch: 3, token: 'fixture-writer-3' },
+    })),
+  ])
   expect(host.configurations.map((config) => ({ id: config.id, launch: config.launch }))).toEqual([
     { id: channel.sessionId, launch: true },
     { id: channel.sessionId, launch: false },
@@ -356,7 +392,7 @@ async function provePendingDelivery(context: Fixture, expected: Wire) {
 describe('native response delivery owns renderer retirement until the broker ACK', () => {
   it('retains an exact Codex root decision after its native turn becomes idle', async () => {
     const context = await fixture('codex')
-    const { agents, broker, events, complete, channel } = context
+    const { agents, broker, events, complete } = context
     broker.reply({
       id: wireId,
       method: 'item/commandExecution/requestApproval',
@@ -374,7 +410,6 @@ describe('native response delivery owns renderer retirement until the broker ACK
     await agents.respond(localId, request.requestId!, true, undefined, 'codex-approval:0')
     complete()
     await vi.waitFor(() => expect(agents.hasRunningSessions()).toBe(false))
-    await vi.waitFor(() => expect(pendingFrames(channel)).toHaveLength(1))
     await provePendingDelivery(context, { id: wireId, result: { decision } })
   })
 

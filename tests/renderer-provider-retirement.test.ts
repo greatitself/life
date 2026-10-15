@@ -317,7 +317,7 @@ describe('provider ownership during renderer retirement', () => {
     agents.close('Explicit renderer retirement')
     ready()
     expect({ outcome: await starting, prompts: prompts() }).toEqual({
-      outcome: { error: 'Agent startup cancelled' },
+      outcome: { error: 'Agent startup cancelled because its environment changed' },
       prompts: [],
     })
     expect(rendererWorkPending(agents)).toBe(false)
@@ -650,7 +650,7 @@ describe('actual Agents idle-provider release results', () => {
 })
 
 describe('unconfirmed provider exit ownership across release retries', () => {
-  it('protects new Codex work after interrupted retirement leaves its RPC open', async () => {
+  it('blocks new Codex work until interrupted retirement confirms the original native exit', async () => {
     const { agents, channels, start, complete, prompts } = await idleCodex()
     const channel = channels[0]
     const exited = terminalExit(channel)
@@ -673,22 +673,33 @@ describe('unconfirmed provider exit ownership across release retries', () => {
     }
     expect(channel.closes).toBe(0)
     expect(rpc.closed).toBe(false)
-    await start({ prompt: nextPrompt })
+    await expect(start({ prompt: nextPrompt })).rejects.toMatchObject({
+      _tag: 'NativeRecoveryError',
+      operation: 'closing',
+      reason: 'uncertain',
+    })
     expect(channels).toHaveLength(1)
+    expect(prompts()).toEqual([firstPrompt])
     let settled = false
     const retry = agents.releaseIdleProviders().then((result) => {
       settled = true
       return result
     })
-    await vi.waitFor(() => expect(settled || channel.closes > 0).toBe(true))
-    const live = { closes: channel.closes, running: agents.hasRunningSessions() }
-    if (live.running) complete()
+    await vi.waitFor(() => expect(channel.closes).toBe(1))
+    expect(settled).toBe(false)
+    expect(agents.hasRunningSessions()).toBe(false)
     exited()
-    const result = await retry
-    expect({ live, result }).toEqual({ live: { closes: 0, running: true }, result: [false] })
+    await expect(retry).resolves.toEqual([true])
+    await start({ prompt: nextPrompt })
+    expect(channels).toHaveLength(2)
     expect(prompts()).toEqual([firstPrompt, nextPrompt])
     expect(channel.of('turn/interrupt')).toEqual([])
-    await expect(agents.releaseIdleProviders()).resolves.toEqual([true])
+    complete(channels[1])
+    const nextExited = terminalExit(channels[1])
+    const finalRelease = agents.releaseIdleProviders()
+    await vi.waitFor(() => expect(channels[1].closes).toBe(1))
+    nextExited()
+    await expect(finalRelease).resolves.toEqual([true])
     await expect(agents.releaseIdleProviders()).resolves.toEqual([])
   })
 
@@ -841,29 +852,38 @@ describe('unconfirmed provider exit ownership across release retries', () => {
 })
 
 describe('new native targets while a prior release memo is pending', () => {
-  it('recollects an idle Codex RPC acquired before a new caller joins the older release', async () => {
+  it('holds new Codex acquisition behind the previous exit and then retires the new idle target', async () => {
     const { agents, channels, ssh } = await idleCodex()
     const previousExited = terminalExit(channels[0])
     const previous = agents.releaseIdleProviders()
     await vi.waitFor(() => expect(channels[0].closes).toBe(1))
     ssh.state.codex = 'codex-cli 0.163.0'
-    await agents.models('codex')
+    let acquired = false
+    const discovery = agents.models('codex').then((models) => {
+      acquired = true
+      return models
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(acquired).toBe(false)
+    expect(channels).toHaveLength(1)
+    expect(agents.releaseIdleProviders()).toBe(previous)
+    previousExited()
+    await expect(previous).resolves.toEqual([true])
+    await discovery
     const current = channels[1]
     const currentExited = terminalExit(current)
-    expect(agents.releaseIdleProviders()).toBe(previous)
     let settled = false
     const preparing = drainRetirementTargets(agents).then((passes) => {
       settled = true
       return passes
     })
-    previousExited()
     await vi.waitFor(() => expect(settled || current.closes === 1).toBe(true))
     const beforeCurrentExit = { settled, closes: current.closes }
     currentExited()
     const passes = await preparing
     expect({ beforeCurrentExit, passes }).toEqual({
       beforeCurrentExit: { settled: false, closes: 1 },
-      passes: 2,
+      passes: 1,
     })
     await expect(agents.releaseIdleProviders()).resolves.toEqual([])
   })

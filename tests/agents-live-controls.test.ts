@@ -1312,6 +1312,7 @@ describe('durable agent state and asynchronous ownership', () => {
       const { start, agents, ssh, events } = fixture({ durable: true })
       const channel = new Channel()
       channel.transportState = 'suspended'
+      Object.assign(channel, { machineIdentity: 'test-machine' })
       let open!: (channel: ClientChannel) => void
       ssh.durableChannel = vi.fn(
         () =>
@@ -1336,6 +1337,26 @@ describe('durable agent state and asynchronous ownership', () => {
       expect(events).toContainEqual(expect.objectContaining({ type: 'status', status: 'resumed' }))
     },
   )
+
+  it('rejects an offline Codex startup whose opened channel belongs to another machine', async () => {
+    const { start, ssh } = fixture({ durable: true })
+    const channel = new Channel()
+    channel.transportState = 'suspended'
+    Object.assign(channel, { machineIdentity: 'another-machine' })
+    let open!: (channel: ClientChannel) => void
+    ssh.durableChannel = vi.fn(() => new Promise<ClientChannel>((resolve) => (open = resolve)))
+    const starting = start({ provider: 'codex' })
+    const outcome = starting.catch((error: Error) => error)
+    await vi.waitFor(() => expect(ssh.durableChannel).toHaveBeenCalledTimes(1))
+    ssh.state.status = 'disconnected'
+    ssh.emit('disconnected')
+    open(channel as unknown as ClientChannel)
+    expect(await outcome).toMatchObject({
+      message: 'The connected machine changed before this agent’s native startup',
+    })
+    expect(channel.of('thread/start')).toHaveLength(0)
+    expect(channel.of('turn/start')).toHaveLength(0)
+  })
 
   it.each(['codex', 'claude'] as const)(
     'keeps %s running through SSH loss and resumes the same turn',

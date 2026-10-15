@@ -12,6 +12,7 @@ import {
 import { runEffect } from '../src/main/effect-runtime'
 import { PersistenceError } from '../src/main/persistence-effects'
 import { RendererDocumentAdmission, RendererReloadFlights } from '../src/main/renderer-recovery'
+import { NativeDocumentReadiness } from '../src/main/native-document-readiness'
 
 const productionPath = resolve(
   process.env.LIFE_IDLE_RETIREMENT_INDEX ?? resolve(import.meta.dirname, '../src/main/index.ts'),
@@ -109,7 +110,18 @@ const extractedSource = [
     (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'cancelRendererWork',
   ),
   assignment('cancelRendererSessions'),
+  assignment('flushNativeRecovery'),
+  assignment('finalizeRendererSuspension'),
+  assignment('rendererHandoffAdmitted'),
+  assignment('rendererWorkPending'),
+  assignment('providerRetirementPending'),
   assignment('releaseIdleProviders'),
+  declaration('rendererHandoff'),
+  declaration('suspendedRendererDocument'),
+  uniqueSource(
+    'beginRendererHandoff function',
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'beginRendererHandoff',
+  ),
   declaration('sourceReloads'),
   declaration('reloadSource'),
   listener('ipcMain', 'terminal:write'),
@@ -185,6 +197,7 @@ type Owner = {
 
 function fixture(name: string) {
   const events: string[] = []
+  const nativeDocuments = new NativeDocumentReadiness()
   const historyLifecycle = new ConversationHistoryLifecycle()
   const admission = new RendererDocumentAdmission()
   historyLifecycle.commitDocument(admission)
@@ -200,6 +213,7 @@ function fixture(name: string) {
       mainFrame: {},
       reload: () => {
         events.push('renderer:reload')
+        nativeDocuments.commit(owner)
         historyLifecycle.commitDocument(admission)
         events.push('renderer:commit')
         if (retirementWriters.some((writer) => !writer.exited))
@@ -207,6 +221,7 @@ function fixture(name: string) {
       },
     },
   }
+  nativeDocuments.commit(owner)
   const rendererAdmissions = new WeakMap([[owner, admission]])
   const nativeListeners = new Map<string, (...args: unknown[]) => void>()
   const appListeners = new Map<string, () => void>()
@@ -214,6 +229,11 @@ function fixture(name: string) {
     window: owner as Owner | null,
     rendererAdmissions,
     historyLifecycle,
+    nativeDocuments,
+    commitDocument: (next: RendererDocumentAdmission): void => {
+      nativeDocuments.commit(context.window ?? owner)
+      historyLifecycle.commitDocument(next)
+    },
     Effect,
     runEffect,
     RendererReloadFlights,
@@ -255,6 +275,11 @@ function fixture(name: string) {
     agents: {
       hasRunningSessions: (): boolean => context.busy,
       hasPendingRendererWork: (): boolean => context.busy,
+      hasUntrackedRunningSessions: (): boolean => context.busy,
+      rendererHandoffAdmitted: async (): Promise<boolean> => !context.busy,
+      flushRecovery: async (): Promise<void> => {},
+      finalizeRendererSuspension: () => {},
+      suspendRendererConsumers: () => events.push('agents:suspend-consumers'),
       hasProviderRetirementTargets: (): boolean =>
         retirementWriters.some((writer) => !writer.exited),
       close: () => {
@@ -356,7 +381,7 @@ afterAll(() => {
 })
 
 describe('production source reload waits for idle native writers', () => {
-  it('suspends admission and awaits both terminal exits before closing Agents or admitting a new document', async () => {
+  it('suspends consumers and awaits both terminal exits before admitting a new document', async () => {
     const { coordinator, writers, events, snapshot } = fixture(
       'idle Codex and Claude terminal barrier',
     )
@@ -394,9 +419,10 @@ describe('production source reload waits for idle native writers', () => {
     expect(afterExit.events).not.toContain('renderer:cold-resume-before-writer-exit')
     for (const provider of ['codex', 'claude'])
       expect(events.indexOf(`${provider}:terminal-exit`)).toBeLessThan(
-        events.indexOf('agents:close'),
+        events.indexOf('renderer:reload'),
       )
-    expect(events.indexOf('agents:close')).toBeLessThan(events.indexOf('history:flush'))
+    expect(events.indexOf('history:flush')).toBeLessThan(events.indexOf('agents:suspend-consumers'))
+    expect(afterExit.events).not.toContain('agents:close')
     expect(events.indexOf('history:settled')).toBeLessThan(events.indexOf('renderer:reload'))
   })
 
@@ -490,7 +516,7 @@ describe('production source reload waits for idle native writers', () => {
   it('abandons a scheduled source request after another native document commits', async () => {
     const { context, coordinator, admission, snapshot } = fixture('stale document control')
     const acknowledgement = coordinator.reloadSource()
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     await vi.advanceTimersByTimeAsync(200)
     await acknowledgement
     const fresh = snapshot('scheduled old request observed a fresh native document')
@@ -506,12 +532,10 @@ describe('production source reload waits for idle native writers', () => {
     await vi.advanceTimersByTimeAsync(200)
     await acknowledgement
     const awaitingOldExit = snapshot('old document received close ACKs and awaits real exit')
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     events.push('manual-renderer:commit')
-    expect(admission.allows('agent:start')).toBe(true)
-    context.busy = true
-    events.push('fresh-native-work:accepted')
-    snapshot('fresh committed document owns accepted native work')
+    expect(admission.allows('agent:start')).toBe(false)
+    snapshot('fresh document waits for the original native terminal barrier')
     writers.codex.exit()
     writers.claude.exit()
     await vi.advanceTimersByTimeAsync(0)
@@ -521,19 +545,23 @@ describe('production source reload waits for idle native writers', () => {
     expect(awaitingOldExit.events).not.toContain('agents:close')
     expect(oldExitCompleted.documentRevision).toBeGreaterThan(awaitingOldExit.documentRevision)
     expect(oldExitCompleted.permitsNewWork).toBe(true)
+    const freshBoundary = events.length
+    context.busy = true
+    events.push('fresh-native-work:accepted')
+    await vi.advanceTimersByTimeAsync(200)
+    const afterFreshAdmission = events.slice(freshBoundary)
     expect(context.busy).toBe(true)
     expect(oldExitCompleted.events).not.toContain('fresh-native-work:cancelled')
     expect(oldExitCompleted.events).not.toContain('agents:close')
-    expect(oldExitCompleted.events).not.toContain('research:clear')
-    expect(oldExitCompleted.events).not.toContain('ssh:cancel-requests')
-    expect(oldExitCompleted.events).not.toContain('history:cancel')
-    expect(oldExitCompleted.events).not.toContain('history:flush')
-    expect(oldExitCompleted.events).not.toContain('history:settled')
+    expect(afterFreshAdmission).not.toContain('research:clear')
+    expect(afterFreshAdmission).not.toContain('ssh:cancel-requests')
+    expect(afterFreshAdmission).not.toContain('history:cancel')
+    expect(afterFreshAdmission).not.toContain('history:flush')
     expect(oldExitCompleted.events).not.toContain('renderer:reload')
     expect(oldExitCompleted.events.some((event) => event.startsWith('dialog:'))).toBe(false)
   })
 
-  it('does not report a failed old terminal wait against a fresh committed document', async () => {
+  it('keeps a fresh document paused when an original native terminal exit remains unconfirmed', async () => {
     const { context, coordinator, admission, writers, events, snapshot } = fixture(
       'old failed terminal wait completes after fresh document admission',
     )
@@ -541,22 +569,20 @@ describe('production source reload waits for idle native writers', () => {
     await vi.advanceTimersByTimeAsync(200)
     await acknowledgement
     snapshot('old renderer awaits its unconfirmed native writer')
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     events.push('manual-renderer:commit')
-    expect(admission.allows('agent:start')).toBe(true)
-    context.busy = true
-    events.push('fresh-native-work:accepted')
+    expect(admission.allows('agent:start')).toBe(false)
     writers.codex.failExit('unconfirmed')
     writers.claude.exit()
     await vi.advanceTimersByTimeAsync(0)
     const staleFailure = snapshot('old terminal failure is scoped away from the fresh document')
     expect(staleFailure.documentRevision).toBe(2)
-    expect(staleFailure.permitsNewWork).toBe(true)
+    expect(staleFailure.permitsNewWork).toBe(false)
     expect(staleFailure.permitsCheckpoint).toBe(true)
-    expect(context.busy).toBe(true)
+    expect(context.busy).toBe(false)
     expect(staleFailure.events).not.toContain('agents:close')
     expect(staleFailure.events).not.toContain('fresh-native-work:cancelled')
-    expect(staleFailure.events).not.toContain('history:flush')
+    expect(staleFailure.events.filter((event) => event === 'history:flush')).toHaveLength(1)
     expect(staleFailure.events).not.toContain('renderer:reload')
     expect(staleFailure.events.some((event) => event.startsWith('dialog:'))).toBe(false)
   })
@@ -580,19 +606,20 @@ describe('production source reload waits for idle native writers', () => {
     writers.claude.exit()
     await vi.advanceTimersByTimeAsync(0)
     const oldCancellation = snapshot('old native owners closed while renderer cancellation is held')
-    expect(oldCancellation.events).toContain('agents:close')
-    expect(oldCancellation.events).not.toContain('history:flush')
-    context.historyLifecycle.commitDocument(admission)
+    expect(oldCancellation.events).toContain('agents:suspend-consumers')
+    expect(oldCancellation.events.filter((event) => event === 'history:flush')).toHaveLength(1)
+    context.commitDocument(admission)
     events.push('manual-renderer:commit')
-    expect(admission.allows('agent:start')).toBe(true)
-    context.busy = true
-    events.push('fresh-native-work:accepted')
-    const freshBoundary = events.length
+    expect(admission.allows('agent:start')).toBe(false)
     settleRequests(0)
     await vi.advanceTimersByTimeAsync(0)
     const settledOldRequests = snapshot(
       'old cancellation continuation leaves the fresh document owned',
     )
+    const freshBoundary = events.length
+    context.busy = true
+    events.push('fresh-native-work:accepted')
+    await vi.advanceTimersByTimeAsync(200)
     const afterFreshAdmission = events.slice(freshBoundary)
     expect(settledOldRequests.documentRevision).toBe(2)
     expect(settledOldRequests.permitsNewWork).toBe(true)
@@ -605,7 +632,7 @@ describe('production source reload waits for idle native writers', () => {
     expect(afterFreshAdmission.some((event) => event.startsWith('dialog:'))).toBe(false)
   })
 
-  it('recollects a fresh document target after joining an older provider retirement snapshot', async () => {
+  it('serializes new document admission and its idle target behind the original native exit', async () => {
     const { context, coordinator, admission, writers, events, snapshot, registerIdleWriter } =
       fixture('fresh document joins an old retirement memo before acquiring a new idle target')
     const codexTargets = [writers.codex]
@@ -639,51 +666,55 @@ describe('production source reload waits for idle native writers', () => {
     await oldAcknowledgement
     snapshot('document 1 awaits its captured native retirement snapshot')
     expect(codexReleaseCalls).toBe(1)
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     events.push('manual-renderer:commit')
+    expect(admission.allows('agent:start')).toBe(false)
+    expect(codexReleaseCalls).toBe(1)
+    expect(events).not.toContain('renderer:reload')
+    writers.codex.exit()
+    writers.claude.exit()
+    await vi.advanceTimersByTimeAsync(0)
     expect(admission.allows('agent:start')).toBe(true)
+    expect(events).not.toContain('renderer:reload')
     const freshTarget = registerIdleWriter('codex', 'codex-document-2')
     codexTargets.push(freshTarget)
     events.push('fresh-native-idle-target:accepted')
     const freshAcknowledgement = coordinator.reloadSource()
     await vi.advanceTimersByTimeAsync(200)
     await freshAcknowledgement
-    const joinedOldSnapshot = snapshot('document 2 joined the older pending retirement snapshot')
-    expect(codexReleaseCalls).toBe(2)
-    expect(joinedOldSnapshot.events).toContain('codex:old-retirement-snapshot-joined')
-    expect(joinedOldSnapshot.events).not.toContain('codex-document-2:release-start')
-    writers.codex.exit()
-    writers.claude.exit()
-    await vi.advanceTimersByTimeAsync(0)
     const recollectedFreshTarget = snapshot(
-      'only document 2 recollects its newly owned idle target',
+      'the admitted document retires its independently acquired idle target',
     )
-    expect(codexReleaseCalls).toBe(3)
+    expect(codexReleaseCalls).toBe(2)
     expect(recollectedFreshTarget.permitsNewWork).toBe(false)
     expect(recollectedFreshTarget.permitsCheckpoint).toBe(true)
     expect(recollectedFreshTarget.events).toContain('codex:fresh-retirement-snapshot-collected')
     expect(recollectedFreshTarget.events).toContain('codex-document-2:release-start')
     expect(recollectedFreshTarget.events).not.toContain('agents:close')
-    expect(recollectedFreshTarget.events).not.toContain('history:flush')
+    expect(recollectedFreshTarget.events.filter((event) => event === 'history:flush')).toHaveLength(
+      2,
+    )
     expect(recollectedFreshTarget.events).not.toContain('renderer:reload')
     expect(recollectedFreshTarget.events.some((event) => event.startsWith('dialog:'))).toBe(false)
 
     freshTarget.exit()
     await vi.advanceTimersByTimeAsync(0)
     const allTargetsExited = snapshot('document 2 reloads only after its own native target exits')
-    expect(codexReleaseCalls).toBe(3)
+    expect(codexReleaseCalls).toBe(2)
     expect(context.agents.hasPendingRendererWork()).toBe(false)
     expect(context.agents.hasProviderRetirementTargets()).toBe(false)
     expect(allTargetsExited.liveWriters).toEqual([])
     expect(allTargetsExited.documentRevision).toBe(3)
     expect(allTargetsExited.permitsNewWork).toBe(true)
-    expect(allTargetsExited.events.filter((event) => event === 'agents:close')).toHaveLength(1)
+    expect(
+      allTargetsExited.events.filter((event) => event === 'agents:suspend-consumers'),
+    ).toHaveLength(2)
     expect(allTargetsExited.events.filter((event) => event === 'renderer:reload')).toHaveLength(1)
     expect(allTargetsExited.events).not.toContain('agents:close-with-pending-native-work')
     expect(allTargetsExited.events).not.toContain('agents:close-with-unconfirmed-native-target')
     expect(allTargetsExited.events).not.toContain('renderer:cold-resume-before-writer-exit')
     expect(events.indexOf('codex-document-2:terminal-exit')).toBeLessThan(
-      events.indexOf('agents:close'),
+      events.indexOf('renderer:reload'),
     )
     expect(allTargetsExited.events.some((event) => event.startsWith('dialog:'))).toBe(false)
   })
@@ -703,16 +734,31 @@ describe('production source reload waits for idle native writers', () => {
     expect(replaced.permitsNewWork).toBe(true)
   })
 
-  it('preserves forced recovery without waiting for idle provider terminal exits', async () => {
-    const { coordinator, owner, snapshot } = fixture('forced recovery control')
-    await coordinator.cancelRendererWork(owner)
-    const forced = snapshot('manual recovery completed before the delayed native exits')
-    expect(forced.permitsNewWork).toBe(false)
-    expect(forced.liveWriters).toEqual(['codex', 'claude'])
-    expect(forced.events).toContain('agents:close')
-    expect(forced.events).toContain('history:settled')
-    expect(forced.events).not.toContain('codex:release-start')
-    expect(forced.events).not.toContain('claude:release-start')
+  it('keeps manual recovery paused until idle providers confirm their native exits', async () => {
+    const { coordinator, owner, writers, snapshot } = fixture('manual recovery terminal barrier')
+    let settled = false
+    const recovery = coordinator.cancelRendererWork(owner).then(() => {
+      settled = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    const waiting = snapshot('manual recovery retains both original native writers')
+    expect(settled).toBe(false)
+    expect(waiting.permitsNewWork).toBe(false)
+    expect(waiting.liveWriters).toEqual(['codex', 'claude'])
+    expect(waiting.events).not.toContain('agents:close')
+    expect(waiting.events).toContain('agents:suspend-consumers')
+    expect(waiting.events).toContain('codex:release-start')
+    expect(waiting.events).toContain('claude:release-start')
+    writers.codex.exit()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false)
+    writers.claude.exit()
+    await recovery
+    const confirmed = snapshot('manual recovery observes both actual terminal acknowledgements')
+    expect(confirmed.liveWriters).toEqual([])
+    expect(confirmed.permitsNewWork).toBe(false)
+    expect(confirmed.events).toContain('history:settled')
+    expect(confirmed.events).not.toContain('agents:close')
   })
 
   it('admits native terminal sends only from the current healthy frame', () => {
@@ -729,9 +775,11 @@ describe('production source reload waits for idle native writers', () => {
   })
 
   it('holds fresh document and terminal admission until the current history proof completes', async () => {
-    const { context, coordinator, admission, owner, nativeListeners, events, snapshot } = fixture(
-      'native commit during healthy history proof',
-    )
+    const { context, coordinator, admission, owner, writers, nativeListeners, events, snapshot } =
+      fixture('native commit during healthy history proof')
+    writers.codex.exit()
+    writers.claude.exit()
+    events.length = 0
     let acknowledge!: (effect: Effect.Effect<void, PersistenceError>) => void
     context.conversations.settledWithinEffect = () =>
       Effect.callback((resume) => {
@@ -742,9 +790,9 @@ describe('production source reload waits for idle native writers', () => {
     expect(admission.allows('agent:start')).toBe(false)
     await vi.advanceTimersByTimeAsync(0)
     expect(events).toContain('history:proof-pending')
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     const fresh = new RendererDocumentAdmission()
-    context.historyLifecycle.commitDocument(fresh)
+    context.commitDocument(fresh)
     const event = { sender: owner.webContents, senderFrame: owner.webContents.mainFrame }
     nativeListeners.get('terminal:write')!(event, 'must stay paused')
     nativeListeners.get('terminal:resize')!(event, 120, 30)
@@ -765,9 +813,12 @@ describe('production source reload waits for idle native writers', () => {
   })
 
   it('does not leave a fresh document paused when its commit wins the handoff acquisition boundary', async () => {
-    const { context, coordinator, admission, owner, events, snapshot } = fixture(
+    const { context, coordinator, admission, owner, writers, events, snapshot } = fixture(
       'native commit before history resource acquisition',
     )
+    writers.codex.exit()
+    writers.claude.exit()
+    events.length = 0
     let committedBeforeAcquire = false
     class CommitBeforeAcquireScheduler extends Scheduler.MixedScheduler {
       override shouldYield(fiber: Parameters<Scheduler.MixedScheduler['shouldYield']>[0]) {
@@ -776,7 +827,7 @@ describe('production source reload waits for idle native writers', () => {
           Reflect.get(context.historyLifecycle, 'activeHandoffs') === 0
         ) {
           committedBeforeAcquire = true
-          context.historyLifecycle.commitDocument(admission)
+          context.commitDocument(admission)
           events.push('manual-renderer:commit-before-history-acquire')
           expect(admission.allows('agent:start')).toBe(true)
           return true
@@ -855,7 +906,7 @@ describe('production source reload waits for idle native writers', () => {
     writers.codex.exit()
     writers.claude.exit()
     await vi.advanceTimersByTimeAsync(0)
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     expect(admission.allows('agent:start')).toBe(false)
     complete(
       Effect.fail(
@@ -870,14 +921,16 @@ describe('production source reload waits for idle native writers', () => {
     await vi.advanceTimersByTimeAsync(0)
     const failure = context.historyLifecycle.failure!
     expect(failure.operation).toBe('shutdown-uncertain')
-    expect(events.filter((event) => event.startsWith('dialog:Life reload failed:'))).toHaveLength(1)
+    // The native UUID changed while the old proof was pending. Its stale
+    // callback must not display an old-document dialog in the new document.
+    expect(events.filter((event) => event.startsWith('dialog:Life reload failed:'))).toHaveLength(0)
     expect(events).not.toContain('renderer:reload')
     // The old callback cannot turn the failed effect into a successful handoff.
     complete(Effect.void)
     context.conversations.settledWithinEffect = () => Effect.void
-    context.historyLifecycle.commitDocument(admission)
+    context.commitDocument(admission)
     const fresh = new RendererDocumentAdmission()
-    context.historyLifecycle.commitDocument(fresh)
+    context.commitDocument(fresh)
     await expect(coordinator.reloadSource()).rejects.toBe(failure)
     await expect(coordinator.cancelRendererWork(owner)).rejects.toBe(failure)
     const event = { sender: owner.webContents, senderFrame: owner.webContents.mainFrame }

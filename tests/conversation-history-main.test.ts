@@ -306,8 +306,11 @@ describe('actual Main conversation lifecycle during startup and quit', () => {
     expect(
       events.filter((event) => event.startsWith('reported:Life could not confirm')),
     ).toHaveLength(2)
-    expect(events.indexOf('history:close')).toBeLessThan(events.indexOf('runtime:dispose'))
-    expect(events.indexOf('source:close')).toBeLessThan(events.indexOf('runtime:dispose'))
+    // Stop admitting native request fibers before retiring providers. Accepted
+    // history writes remain owned by their store and close before final quit.
+    expect(events.indexOf('runtime:dispose')).toBeLessThan(events.indexOf('providers:release'))
+    expect(events.indexOf('runtime:dispose')).toBeLessThan(events.indexOf('history:close'))
+    expect(events.indexOf('source:close')).toBeLessThan(events.indexOf('app:quit'))
     expect(events.at(-1)).toBe('app:quit')
     quit()
     expect(events.filter((event) => event === 'app:quit')).toHaveLength(1)

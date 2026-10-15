@@ -267,6 +267,23 @@ describe.skipIf(process.platform === 'win32')('native local transport', () => {
     expect(process.env.CODEX_HOME).toBe(inheritedCodex)
   })
 
+  it('runs the selected Bash startup environment once for each local launch path', async () => {
+    const startup = join(directory, `startup-${++sequence}.sh`)
+    const log = join(directory, `startup-${sequence}.log`)
+    await writeFile(startup, 'printf "started\\n" >> "$LOCAL_STARTUP_LOG"\n')
+    const value = client({
+      shell: '/bin/bash',
+      env: { ...process.env, BASH_ENV: startup, LOCAL_STARTUP_LOG: log },
+    })
+    for (const pty of [undefined, { cols: 80, rows: 24 }]) {
+      const result = collect(await open(value, node('process.stdout.write("started")'), pty))
+      expect((await result.closed).code).toBe(0)
+      expect(result.text()).toBe('started')
+      expect(result.errors).toEqual([])
+    }
+    expect(await readFile(log, 'utf8')).toBe('started\nstarted\n')
+  })
+
   it.skipIf(process.platform !== 'linux')(
     'closes inherited non-CLOEXEC native descriptors before both local launch paths',
     async () => {

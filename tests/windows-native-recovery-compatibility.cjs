@@ -1063,7 +1063,7 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
   const messagesBefore = fixture.messages.length
   const results = []
   for (const mode of ['hold', 'reject']) {
-    const before = hash(await readFile(join(userData, 'conversations.json')))
+    const beforeReload = hash(await readFile(join(userData, 'conversations.json')))
     const studioHistoryBefore = await page.evaluate(() =>
       localStorage.getItem('life.studio.sessions.v1'),
     )
@@ -1090,6 +1090,12 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
           (await application.evaluate(() => globalThis.__windowsRecoveryQueryFixture.queries)) > 0,
         'the real production recovery-support IPC query',
       )
+      // Main admits this new document's read only after the preceding
+      // document's accepted history checkpoint has drained. Measure passive
+      // behavior from that boundary, including the refused action below.
+      const admittedHistory = await page.evaluate(() => window.relay.conversations.load())
+      assert(admittedHistory.threads.length >= 2)
+      const before = hash(await readFile(join(userData, 'conversations.json')))
       await page.getByRole('button', { name: 'Customize', exact: true }).click()
       const studio = page.getByRole('region', { name: 'Life Customization Studio', exact: true })
       await studio.waitFor()
@@ -1131,6 +1137,7 @@ async function passiveRecoveryQueryWorkflow(application, page, userData, fixture
       results.push({
         mode,
         rawMarkers: stored,
+        beforeReloadHistorySha256: beforeReload,
         historySha256: before,
         historyThreads: history.threads.length,
       })

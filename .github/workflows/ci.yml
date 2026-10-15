@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      regressions_only:
+        description: 'Run release regression checks without the full native matrix'
+        required: false
+        default: false
+        type: boolean
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -18,7 +23,7 @@ permissions:
 jobs:
   unit-tests:
     name: Unit shard ${{ matrix.shard }}/4
-    if: inputs.windows_only != true
+    if: inputs.windows_only != true && inputs.regressions_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -48,7 +53,7 @@ jobs:
           if-no-files-found: warn
 
   verify:
-    if: inputs.windows_only != true
+    if: inputs.windows_only != true && inputs.regressions_only != true
     needs: unit-tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -500,6 +505,7 @@ jobs:
           if-no-files-found: warn
 
   windows-native-recovery:
+    if: inputs.regressions_only != true
     name: Windows packaged native compatibility
     runs-on: windows-latest
     timeout-minutes: 25
@@ -536,7 +542,7 @@ jobs:
 
   matched-renderer-performance:
     name: Matched renderer performance
-    if: inputs.windows_only != true
+    if: inputs.windows_only != true && inputs.regressions_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -571,3 +577,63 @@ jobs:
           path: |
             output/playwright/transcript-performance-v011/v0131-*.json
             .performance-baseline/output/playwright/transcript-performance-v011/v0130-*.json
+
+  release-regressions:
+    name: Release regression checks
+    if: inputs.regressions_only == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx playwright install chromium --with-deps
+      - name: Relevant ownership and release tests
+        id: unit
+        continue-on-error: true
+        timeout-minutes: 10
+        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts
+      - name: Studio focus regression
+        id: focus
+        continue-on-error: true
+        timeout-minutes: 3
+        run: node tests/studio-layout-smoke.cjs
+      - name: Exact native history load and checkpoint regression
+        id: history
+        continue-on-error: true
+        timeout-minutes: 10
+        run: npm run test:loads
+      - name: Native desktop workflow regressions
+        id: desktop
+        continue-on-error: true
+        timeout-minutes: 15
+        run: npm run test:desktop
+      - name: Require every selected regression check
+        env:
+          REGRESSION_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict')
+          const steps = JSON.parse(process.env.REGRESSION_RESULTS)
+          const results = ['unit','focus','history','desktop'].map(name => ({name,outcome:steps[name]?.outcome || 'missing'}))
+          console.log(JSON.stringify(results,null,2))
+          assert(results.every(row => row.outcome === 'success'), 'All release regression checks must pass')
+          NODE
+      - name: Preserve regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-release-regression-proof
+          if-no-files-found: warn
+          path: |
+            output/playwright/**/*failure*.json
+            output/playwright/**/failed-fixture-cleanup.json
+            output/playwright/desktop-smoke.json
+            output/playwright/conversation-load-electron/*.json
+            output/playwright/studio-layout/proof.json
+            output/playwright/**/*.png

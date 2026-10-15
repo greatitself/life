@@ -601,6 +601,30 @@ async function run() {
   if (!selectedBinary)
     assert.ok(existsSync(join(repository, 'out/main/index.js')), 'Run npm run build first.')
   const configurationRoot = await mkdtemp(join(tmpdir(), 'life-conversation-load-'))
+  const privateUserData = join(configurationRoot, 'chromium')
+  const offlineProfile = {
+    id: 'history-fixture-disconnected',
+    transport: 'ssh',
+    name: 'History fixture (disconnected)',
+    host: 'history-fixture.invalid',
+    port: 22,
+    username: 'fixture',
+    auth: 'agent',
+    privateKeyPath: '',
+    workspace: '/',
+  }
+  await mkdir(privateUserData, { recursive: true })
+  // This history-only fixture must not discover or launch ambient Local CLIs.
+  // Retaining an explicitly selected SSH profile starts disconnected in Life.
+  await writeFile(
+    join(privateUserData, 'connections.json'),
+    JSON.stringify({
+      profiles: [offlineProfile],
+      knownHosts: {},
+      selectedProfileId: offlineProfile.id,
+    }),
+    { flag: 'wx' },
+  )
   const rendererErrors = []
   const nativeLogs = []
   const phases = []
@@ -619,7 +643,7 @@ async function run() {
         ...(selectedBinary ? [] : [repository]),
         ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
         '--disable-dev-shm-usage',
-        `--user-data-dir=${join(configurationRoot, 'chromium')}`,
+        `--user-data-dir=${privateUserData}`,
       ],
       cwd: repository,
       env: {
@@ -640,6 +664,9 @@ async function run() {
     page.setDefaultTimeout(30_000)
     page.on('pageerror', (error) => rendererErrors.push(error.message))
     await page.locator('.app-shell').waitFor()
+    const environment = await page.evaluate(() => window.relay.connection.state())
+    assert.equal(environment.status, 'disconnected')
+    assert.equal(environment.profile?.id, offlineProfile.id)
     await page.waitForFunction(() => typeof window.relay?.conversations?.loadEncoded === 'function')
     launchProof = await application.evaluate(({ app, BrowserWindow }) => {
       const fs = process.getBuiltinModule('node:fs'),

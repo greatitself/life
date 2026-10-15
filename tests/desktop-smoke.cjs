@@ -1197,9 +1197,25 @@ export function activityLabel(activity: ThreadActivity): string {
         await composer().press('Tab')
         const queued = page.getByRole('region', { name: 'Queued follow-up messages', exact: true })
         await queued.waitFor()
+        // The provider timer and the native checkpoint/next-turn admission are
+        // separate boundaries. Keep a bounded deadline for each actual event.
+        await waitUntil(
+          async () =>
+            (await fixture.log())
+              .slice(baseline)
+              .some(
+                (entry) =>
+                  entry.provider === provider &&
+                  (entry.completionEvidence?.prompt ||
+                    (entry.kind === 'turn-completed' ? entry.prompt : undefined)) === 'queue-delay',
+              ),
+          `${provider} authoritative delayed-turn completion`,
+          30000,
+        )
         await waitUntil(
           async () => (await promptsSince(baseline, provider)).includes('native-queued-follow-up'),
           `${provider} queued message follows genuine completed turn`,
+          30000,
         )
         await waitForSend()
         await queued.waitFor({ state: 'hidden' })

@@ -701,7 +701,7 @@ jobs:
         run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
       - name: Verify native recovery boundary regressions
         if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail' || matrix.suite == 'studio-source'
-        run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts
+        run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts tests/renderer-idle-retirement.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
       - run: npm run build

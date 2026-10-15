@@ -460,6 +460,70 @@ describe('production source reload waits for idle native writers', () => {
     expect(events).not.toContain('renderer:cold-resume-before-writer-exit')
   })
 
+  it('joins accepted work produced by idle native exit before reloading', async () => {
+    const { context, coordinator, writers, events, snapshot } = fixture(
+      'idle native exit final receipts',
+    )
+    let finishReceipts!: () => void
+    const receipts = new Promise<void>((resolve) => {
+      finishReceipts = resolve
+    })
+    context.agents.releaseIdleProviders = async () => {
+      const released = await writers.codex.release()
+      context.busy = true
+      events.push('native:final-receipts-pending')
+      return released
+    }
+    context.agents.settleRendererHandoff = async () => {
+      if (!context.busy) return
+      await receipts
+      context.busy = false
+      events.push('native:final-receipts-settled')
+    }
+    const acknowledgement = coordinator.reloadSource()
+    await vi.advanceTimersByTimeAsync(200)
+    await acknowledgement
+    writers.codex.exit()
+    writers.claude.exit()
+    await vi.advanceTimersByTimeAsync(0)
+    const pending = snapshot('confirmed exits still have accepted final receipts')
+    expect(pending.permitsNewWork).toBe(false)
+    expect(events).toContain('native:final-receipts-pending')
+    expect(events).not.toContain('renderer:reload')
+    expect(events.some((event) => event.startsWith('dialog:'))).toBe(false)
+    finishReceipts()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(events.indexOf('native:final-receipts-settled')).toBeLessThan(
+      events.indexOf('renderer:reload'),
+    )
+    expect(events).toContain('renderer:reload')
+    expect(events).not.toContain('renderer:cold-resume-before-writer-exit')
+  })
+
+  it('refuses reload when work still owns the document after native-exit settlement', async () => {
+    const { context, coordinator, writers, events, snapshot } = fixture(
+      'idle native exit retains uncertain work',
+    )
+    context.agents.releaseIdleProviders = async () => {
+      const released = await writers.codex.release()
+      context.busy = true
+      return released
+    }
+    const acknowledgement = coordinator.reloadSource()
+    await vi.advanceTimersByTimeAsync(200)
+    await acknowledgement
+    writers.codex.exit()
+    writers.claude.exit()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(snapshot('settlement did not clear uncertain work').permitsNewWork).toBe(false)
+    expect(events).not.toContain('renderer:reload')
+    expect(
+      events.some((event) =>
+        event.endsWith('Native work still owns this interface. Use Restart Interface to recover.'),
+      ),
+    ).toBe(true)
+  })
+
   it('suspends consumers and awaits both terminal exits before admitting a new document', async () => {
     const { coordinator, writers, events, snapshot } = fixture(
       'idle Codex and Claude terminal barrier',

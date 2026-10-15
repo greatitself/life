@@ -472,6 +472,9 @@ async function init() {
       throw new Error(
         'An idle provider has not confirmed its exit. The current interface is paused; use Restart Interface to recover.',
       )
+    // Native exit can enqueue its final owner/history receipts. Join those
+    // accepted operations before checking whether the old document still owns work.
+    await agents.settleRendererHandoff()
     if (agents.hasPendingRendererWork())
       throw new Error('Native work still owns this interface. Use Restart Interface to recover.')
   }

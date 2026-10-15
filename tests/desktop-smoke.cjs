@@ -539,7 +539,11 @@ export function activityLabel(activity: ThreadActivity): string {
   }
 
   const checks = []
-  const readThreads = () => readSavedThreads(page)
+  let lastSavedThreads = []
+  const readThreads = async () => {
+    lastSavedThreads = await readSavedThreads(page)
+    return lastSavedThreads
+  }
   const promptFrom = (entry) => {
     if (entry.kind === 'title-metadata') return undefined
     return entry.message?.method === 'turn/start' || entry.message?.method === 'turn/steer'
@@ -1655,34 +1659,84 @@ export function activityLabel(activity: ThreadActivity): string {
   } catch (error) {
     failed = true
     console.error(`Native Electron smoke failed during ${phase}:`, error)
-    try {
-      await page?.screenshot({ path: join(artifacts, 'desktop-failure.png') })
-      await writeFile(join(artifacts, 'desktop-failure-dom.html'), (await page?.content()) || '')
-      await writeFile(
-        join(artifacts, 'desktop-failure-proof.json'),
-        JSON.stringify(
-          {
-            phase,
-            error: String(error?.stack || error),
-            checks,
-            rendererErrors,
-            rendererErrorDetails,
-            nativeLogs,
-            threads: await readThreads(),
-            fixtureLog: await fixture.log(),
-            nativeEvents: await application?.evaluate(() => globalThis.__lifeRendererProof),
-          },
-          null,
-          2,
-        ),
-      )
-    } catch (captureError) {
-      console.error('Failure artifact capture:', captureError)
+    const proof = {
+      phase,
+      error: String(error?.stack || error),
+      checks,
+      rendererErrors,
+      rendererErrorDetails,
+      nativeLogs,
+      lastSavedThreads,
     }
+    const proofPath = join(artifacts, 'desktop-failure-proof.json')
+    // Save Main's logs before querying a renderer that may be blocked by a
+    // native failure dialog. Optional diagnostics cannot hide the first failure.
+    await writeFile(proofPath, JSON.stringify(proof, null, 2))
+    const capture = async (operation) => {
+      let timer
+      try {
+        return await Promise.race([
+          operation(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Failure diagnostic timed out')), 2000)
+          }),
+        ])
+      } catch (captureError) {
+        return { captureError: String(captureError) }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    proof.fixtureLog = await capture(() => fixture.log())
+    proof.threads = await capture(() => readThreads())
+    proof.nativeEvents = await capture(() =>
+      application?.evaluate(() => globalThis.__lifeRendererProof),
+    )
+    await writeFile(proofPath, JSON.stringify(proof, null, 2))
+    await capture(() => page?.screenshot({ path: join(artifacts, 'desktop-failure.png') }))
+    await capture(async () =>
+      writeFile(join(artifacts, 'desktop-failure-dom.html'), (await page?.content()) || ''),
+    )
     throw error
   } finally {
     clearInterval(progressTimer)
-    if (application) await application.close().catch(() => {})
+    if (application) {
+      if (!failed) await application.close()
+      else {
+        let timer
+        let closed = false
+        try {
+          await Promise.race([
+            application.close().then(() => {
+              closed = true
+            }),
+            new Promise((resolve) => {
+              timer = setTimeout(resolve, 5000)
+            }),
+          ]).catch(() => {})
+        } finally {
+          clearTimeout(timer)
+        }
+        if (!closed) {
+          const child = application.process()
+          const forced = child.exitCode === null && child.signalCode === null
+          if (forced) child.kill('SIGKILL')
+          await writeFile(
+            join(artifacts, 'failed-fixture-cleanup.json'),
+            JSON.stringify(
+              {
+                pid: child.pid,
+                forcedOwnMain: forced,
+                nativeProtocolExitConfirmed: false,
+                reason: 'Only failed fixture cleanup; the original assertion remains failed',
+              },
+              null,
+              2,
+            ),
+          )
+        }
+      }
+    }
     await fixture.close()
     await localFixture.close()
     await new Promise((resolveClose) => remoteService.close(resolveClose))

@@ -225,6 +225,17 @@ async function presentationChecks(page, checks) {
       .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
       .click()
     await page.getByRole('button', { name: 'Send message', exact: true }).waitFor()
+    await page.waitForFunction(
+      (text) =>
+        window.controlsTest
+          .stored()
+          .some((thread) =>
+            thread.messages.some(
+              (message) => message.text === text && message.finishStatus === 'interrupted',
+            ),
+          ),
+      cancelled,
+    )
     await page.evaluate(() => window.controlsTest.releaseStates())
     const following = `  Explicit ${provider} follow-up after Stop.  `
     await composer.fill(following)

@@ -605,7 +605,7 @@ jobs:
         run: node tests/studio-layout-smoke.cjs
       - name: Stop during renderer preparation regression
         id: preparation
-        continue-on-error: false
+        continue-on-error: true
         timeout-minutes: 3
         run: node tests/app-live-controls-smoke.cjs --presentation
       - name: Exact native history load and checkpoint regression

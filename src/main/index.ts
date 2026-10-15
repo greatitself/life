@@ -197,6 +197,7 @@ async function cancelRendererWork(
         try: async () => {
           await requests
           await history
+          document?.admission.sealHistoryWrites(document.revision)
           await runEffect(historyLifecycle.settledEffect(conversations, document))
           const retired = await retirement
           // A joined idle release may cover an older target snapshot. Recollect
@@ -526,6 +527,7 @@ async function init() {
           if (!isTrustedRendererSender(window, event)) throw new Error('Untrusted IPC sender')
           if (nativeDocuments.capture().documentId !== incomingDocumentId)
             throw new Error('The request belongs to an earlier Life document.')
+          assertRendererAdmission(name)
         },
       })
     })
@@ -1300,6 +1302,7 @@ function createWindow(previous?: BrowserWindow, extensionRecovery = false) {
             Effect.tryPromise({
               try: async () => {
                 await flushConversationHistory(owner, document)
+                document?.admission.sealHistoryWrites(document.revision)
                 cancelRendererSessions()
                 await runEffect(historyLifecycle.settledEffect(conversations, document))
                 await flushNativeRecovery()
@@ -1557,7 +1560,12 @@ app.on('before-quit', (event) => {
         historyLifecycle.handoffEffect(
           conversations,
           document,
-          boundary(() => flushConversationHistory(owner, document)).pipe(Effect.asVoid),
+          boundary(() => flushConversationHistory(owner, document)).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => document?.admission.sealHistoryWrites(document.revision)),
+            ),
+            Effect.asVoid,
+          ),
         ),
         Effect.sync(() => nativeDocuments.close()),
         Effect.sync(() => cancelRendererSessions()),

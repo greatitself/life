@@ -280,6 +280,8 @@ export function activityLabel(activity: ThreadActivity): string {
         'agent:attest-recovery-cache',
         'agent:recover',
         'agent:start',
+        'conversations:save',
+        'conversations:checkpoint',
       ]) {
         const original = ipcMain._invokeHandlers?.get(channel)
         if (!original) continue
@@ -289,6 +291,15 @@ export function activityLabel(activity: ThreadActivity): string {
             channel,
             startedAt: Date.now(),
             hash: input?.hash,
+            ...(channel.startsWith('conversations:')
+              ? {
+                  savedAt: channel === 'conversations:save' ? args[1] : input?.savedAt,
+                  baseSavedAt: input?.baseSavedAt,
+                  admissionCount:
+                    (channel === 'conversations:save' ? args[2] : input?.projectionAdmissions)
+                      ?.length || 0,
+                }
+              : {}),
             ...(channel === 'agent:start'
               ? {
                   sessionId: input?.sessionId,
@@ -319,7 +330,10 @@ export function activityLabel(activity: ThreadActivity): string {
           try {
             const result = await original(event, ...args)
             record.finishedAt = Date.now()
-            if (channel === 'agent:attest-loaded-history')
+            if (channel.startsWith('conversations:')) {
+              record.committedSavedAt = result?.savedAt
+              record.hasNativeRecovery = Boolean(result?.nativeRecovery)
+            } else if (channel === 'agent:attest-loaded-history')
               record.admissions = result?.map(
                 ({ transportId, sessionId, snapshotToken, ownerGeneration, appliedRevision }) => ({
                   transportId,

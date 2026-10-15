@@ -94,6 +94,7 @@ const recoverySafeChannels = new Set([
 export class RendererDocumentAdmission {
   private suspended = true
   private revision = 0
+  private historySealed = false
 
   get documentRevision(): number {
     return this.revision
@@ -105,7 +106,12 @@ export class RendererDocumentAdmission {
 
   commitMainDocument(admitted = true): void {
     this.revision++
+    this.historySealed = false
     this.suspended = !admitted
+  }
+
+  sealHistoryWrites(revision: number): void {
+    if (this.revision === revision) this.historySealed = true
   }
 
   resume(): void {
@@ -113,6 +119,8 @@ export class RendererDocumentAdmission {
   }
 
   allows(channel: string): boolean {
+    if (this.historySealed && ['conversations:save', 'conversations:checkpoint'].includes(channel))
+      return false
     return !this.suspended || recoverySafeChannels.has(channel)
   }
 }

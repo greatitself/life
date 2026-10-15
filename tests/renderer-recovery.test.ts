@@ -132,6 +132,31 @@ describe('renderer recovery restart budget', () => {
 })
 
 describe('renderer document admission during native recovery', () => {
+  it('seals late history writes after the final flush while keeping reads and rescue available', () => {
+    const admission = new RendererDocumentAdmission()
+    admission.commitMainDocument()
+    admission.suspend()
+    expect(admission.allows('conversations:checkpoint')).toBe(true)
+    admission.sealHistoryWrites(admission.documentRevision)
+    for (const channel of ['conversations:save', 'conversations:checkpoint'])
+      expect(admission.allows(channel)).toBe(false)
+    for (const channel of ['conversations:load', 'conversations:loadEncoded', 'window:restart'])
+      expect(admission.allows(channel)).toBe(true)
+    admission.resume()
+    expect(admission.allows('conversations:save')).toBe(false)
+    admission.commitMainDocument()
+    expect(admission.allows('conversations:save')).toBe(true)
+  })
+
+  it('cannot seal a newly committed document from an old history drain', () => {
+    const admission = new RendererDocumentAdmission()
+    admission.commitMainDocument()
+    const oldRevision = admission.documentRevision
+    admission.commitMainDocument()
+    admission.sealHistoryWrites(oldRevision)
+    expect(admission.allows('conversations:checkpoint')).toBe(true)
+  })
+
   it('keeps snapshots and rescue controls usable while rejecting fresh native work', () => {
     const admission = new RendererDocumentAdmission()
     admission.commitMainDocument()

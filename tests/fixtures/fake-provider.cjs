@@ -19,6 +19,15 @@ const record = (value) =>
     }) + '\n',
   )
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
+const waitForContinuityRelease = (complete) => {
+  const release = join(dirname(process.env.RELAY_TEST_LOG), `continuity-${provider}.release`)
+  const pending = setInterval(() => {
+    if (!existsSync(release)) return
+    clearInterval(pending)
+    record({ kind: 'continuity-released' })
+    complete()
+  }, 25)
+}
 const codexModels = [
   {
     id: 'fixture-model',
@@ -706,7 +715,7 @@ if (provider === 'claude' && metadataWorkspace) {
       return
     }
     if (text === 'continuity-delay') {
-      setTimeout(() => codexComplete(turn, 'Continued after transport interruption.'), 2500)
+      waitForContinuityRelease(() => codexComplete(turn, 'Continued after transport interruption.'))
       return
     }
     if (text === 'hang' || text === 'delay-start') return
@@ -1022,7 +1031,9 @@ if (provider === 'claude' && metadataWorkspace) {
     }
     if (text === 'continuity-delay') {
       const turn = active
-      setTimeout(() => claudeComplete('Continued after transport interruption.', turn), 2500)
+      waitForContinuityRelease(() =>
+        claudeComplete('Continued after transport interruption.', turn),
+      )
       return
     }
     if (text === 'hang') return

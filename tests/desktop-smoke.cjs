@@ -1488,6 +1488,7 @@ export function activityLabel(activity: ThreadActivity): string {
           'provider turn starts before actual SSH cut',
         )
         const original = await ordinaryThread('continuity-delay', provider)
+        assert.equal(original.busy, true, 'The native turn is active before cutting SSH')
         fixture.dropConnections()
         await waitUntil(
           async () =>
@@ -1496,6 +1497,7 @@ export function activityLabel(activity: ThreadActivity): string {
         )
         const suspended = await ordinaryThread('continuity-delay', provider)
         assert.equal(suspended.busy, true, 'A lost SSH connection retains active remote work')
+        await writeFile(join(fixture.root, `continuity-${provider}.release`), 'release')
         await waitUntil(
           async () =>
             (await page.evaluate(() => window.relay.connection.state())).status === 'connected',

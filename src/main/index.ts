@@ -871,7 +871,7 @@ async function init() {
   )
   handle('source-code:rollback', () => applyLocal(() => sourceCode.rollback()))
   handle('source-code:disable', () => sourceCode.disable())
-  handle('source-code:reload', reloadSource)
+  handle('source-code:reload', () => reloadSource())
   handle('source-code:ready', (value) => {
     const revision = z.number().int().min(0).parse(value)
     if (sourceCode.get().active?.revision === revision) {

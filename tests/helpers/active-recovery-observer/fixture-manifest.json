@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 59543,
-      "sha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b"
+      "bytes": 61348,
+      "sha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 59543,
-      "sha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b"
+      "bytes": 61348,
+      "sha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -215,6 +215,11 @@
     {
       "path": "tests/active-session-recovery-smoke.cjs",
       "reason": "Count and verify initial, requested, repair-index and repair-files native source reads separately; the original fixture omitted the initial source-context action. Retain exact terminal receipt and once-only native continuation guards."
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "previousSha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b",
+      "reason": "After a SIGKILL following source commit, assert the existing unclean-start safety fallback: built-in interface active, exact compiled revision and private commit preserved, original apply receipt reconciled once, disabled-source reload explicitly unknown, no new compilation or native planner turn. Open and select the original real Studio request before waiting for receipt reconciliation; never auto-enable source to satisfy the fixture."
     }
   ]
 }

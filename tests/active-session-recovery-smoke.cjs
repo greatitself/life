@@ -1243,14 +1243,41 @@ async function runSourceCommitScenario(harness, scenario, index) {
   const shutdown = await harness.shutdown('crash', [record.started.pid])
   await harness.restoreActionTerminal()
   await harness.reopen()
-  await waitForNativeSource(harness)
-  await harness.openStudio()
-  await waitUntil(async () => {
-    const session = await harness.studioSession(prompt)
-    return session?.stage === 'complete' && !session.thread.busy
-  }, 'the recovered planner reconciles its already committed source receipt and completes')
+  // An unclean custom-source shutdown deliberately starts the built-in interface.
+  // Mount the real Studio so its original committed action can be reconciled,
+  // without treating that historical receipt as permission to reactivate source.
   const sourceAfter = await harness.page.evaluate(() => window.relay.sourceCode.get())
-  assert.equal(sourceAfter.active.revision, revision)
+  assert.equal(sourceAfter.enabled, false)
+  assert.equal(sourceAfter.active, undefined)
+  assert.equal(sourceAfter.recovered, true)
+  assert.match(sourceAfter.error, /did not close cleanly/)
+  assert.equal(await harness.page.getByTestId('life-active-recovery-source').count(), 0)
+  const studioDialog = await harness.openStudio()
+  await waitUntil(
+    async () => (await harness.studioSession(prompt))?.id === record.session.id,
+    'the exact saved Studio request hydrates after the source safety fallback',
+  )
+  const studioSearch = studioDialog.getByRole('textbox', {
+    name: 'Search customization conversations',
+    exact: true,
+  })
+  await studioSearch.fill(prompt.split('\n')[0])
+  const restoredRow = studioDialog.locator('.studio-session')
+  assert.equal(await restoredRow.count(), 1)
+  await restoredRow.click()
+  await studioSearch.fill('')
+  await waitUntil(async () => {
+    const receipts = await harness.studioActionReceipts(record.session.id)
+    return (
+      receipts.some((entry) => entry.kind === 'source-apply' && entry.status === 'succeeded') &&
+      receipts.some((entry) => entry.kind === 'reload' && entry.status === 'unknown')
+    )
+  }, 'the original source commit reconciles once while disabled-source reload stays uncertain')
+  const restored = await harness.studioSession(prompt)
+  assert.equal(restored.id, record.session.id)
+  assert.equal(restored.thread.id, record.session.thread.id)
+  assert.equal(restored.thread.remoteId, record.session.thread.remoteId)
+  assert.equal(restored.thread.busy, false)
   assert.equal(sha256(await readFile(compiled)), compiledSha256)
   assert.deepEqual(
     (await readdir(revisionsPath)).sort(),
@@ -1267,10 +1294,14 @@ async function runSourceCommitScenario(harness, scenario, index) {
   assert.equal(applies.length, 1)
   assert.equal(applies[0].actionId, boundary.actionId)
   assert.equal(applies[0].status, 'succeeded')
-  assert.equal(
-    receipts.filter((entry) => entry.kind === 'reload' && entry.status === 'succeeded').length,
-    1,
-  )
+  const reloads = receipts.filter((entry) => entry.kind === 'reload')
+  assert.equal(reloads.length, 1)
+  assert.equal(reloads[0].status, 'unknown')
+  assert.match(reloads[0].error, /source revision is no longer active/)
+  assert.equal(stateAfter.current, revision)
+  assert.equal(stateAfter.enabled, false)
+  assert.equal((await harness.page.evaluate(() => window.relay.sourceCode.get())).enabled, false)
+  assert.equal(await harness.page.getByTestId('life-active-recovery-source').count(), 0)
   assert.deepEqual(
     starts().map((entry) => entry.phase),
     ['request', 'source-read'],
@@ -1283,7 +1314,7 @@ async function runSourceCommitScenario(harness, scenario, index) {
   )
   return {
     name,
-    outcome: 'verified-source-commit-before-terminal-reconciled',
+    outcome: 'verified-source-commit-reconciled-with-crash-safety-fallback',
     scope: 'candidate-only new durable action protocol boundary',
     boundary,
     shutdown,

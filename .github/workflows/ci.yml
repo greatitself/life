@@ -16,6 +16,17 @@ on:
         required: false
         default: false
         type: boolean
+      native_diagnostics:
+        description: 'Run focused native diagnostics; never qualifies for release publication'
+        required: false
+        default: false
+        type: boolean
+      native_suite:
+        description: 'Native diagnostic suite'
+        required: false
+        default: all
+        type: choice
+        options: [all, active-recovery, navigation, ownership, ssh-allocated]
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -594,7 +605,7 @@ jobs:
 
   release-regressions:
     name: Release regression checks
-    if: inputs.regressions_only == true
+    if: inputs.regressions_only == true && inputs.native_diagnostics != true
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -659,3 +670,106 @@ jobs:
             output/playwright/conversation-load-electron/*.json
             output/playwright/studio-layout/proof.json
             output/playwright/**/*.png
+
+  native-diagnostics:
+    name: Focused native diagnostic / ${{ matrix.suite }}
+    if: inputs.regressions_only == true && inputs.native_diagnostics == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        suite: ${{ fromJSON(inputs.native_suite == 'all' && '["active-recovery","navigation","ownership","ssh-allocated"]' || format('["{0}"]', inputs.native_suite)) }}
+    env:
+      LIFE_TEST_EXPECT_ARCHIVE_LOSS: '0'
+      LIFE_TEST_EXPECT_DRAFT_LOSS: '0'
+      LIFE_TEST_EXPECT_SOURCE_LOSS: '0'
+      LIFE_TEST_HMR_POLICY: guarded
+      LIFE_NAVIGATION_FIXTURE_XVFB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Capture source before the Linux build
+        run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
+      - run: npm run build
+      - name: Record the Linux compiled build
+        shell: bash
+        run: |
+          node scripts/record-recovery-build.cjs capture-source output/linux-source-after.json
+          node <<'NODE'
+          const assert = require('node:assert/strict')
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const crypto = require('node:crypto')
+          const child = require('node:child_process')
+          const before = JSON.parse(fs.readFileSync('output/linux-source-before.json'))
+          const after = JSON.parse(fs.readFileSync('output/linux-source-after.json'))
+          assert.deepEqual(after, before, 'Source changed during the build')
+          const compiled = []
+          function visit(name) {
+            const stat = fs.lstatSync(name)
+            assert(!stat.isSymbolicLink(), 'Compiled links are rejected')
+            if (stat.isDirectory()) {
+              for (const entry of fs.readdirSync(name).sort()) visit(path.join(name, entry))
+            } else {
+              assert(stat.isFile())
+              const bytes = fs.readFileSync(name)
+              compiled.push({ path: name, mode: stat.mode & 0o7777, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') })
+            }
+          }
+          visit('out')
+          const sourceCommit = child.execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+          fs.writeFileSync('output/linux-compiled-build.json', JSON.stringify({ sourceCommit, platform: process.platform, arch: process.arch, source: before.sourceBefore, compiled }, null, 2) + '\n')
+          NODE
+      - id: build
+        run: node tests/helpers/verified-ci-build.cjs
+      - run: npx playwright install-deps chromium
+      - name: Run the selected existing native fixture
+        shell: bash
+        env:
+          NATIVE_SUITE: ${{ matrix.suite }}
+          LIFE_METADATA_QUIT_EXPECT_MAIN_SHA256: ${{ steps.build.outputs.main_sha256 }}
+        run: |
+          export LIFE_TEST_APP_ROOT="$PWD" LIFE_TEST_APP_PATH="$PWD"
+          export LIFE_FIXTURE_REPOSITORY="$PWD"
+          export LIFE_TEST_ARTIFACTS_DIR="$PWD/output/native-diagnostics/$NATIVE_SUITE"
+          export LIFE_TEST_SCREENSHOTS_DIR="$LIFE_TEST_ARTIFACTS_DIR/screenshots"
+          export LIFE_TEST_BACKGROUND_PID="$BASHPID"
+          export LIFE_HELPER_SOURCE_ROOT="$PWD/src"
+          export LIFE_TEST_SOURCE=1 LIFE_TEST_PACKAGED=0
+          case "$NATIVE_SUITE" in
+            active-recovery)
+              npm run test:active-recovery
+              node tests/active-recovery-run.cjs local-codex-stream
+              node tests/active-recovery-run.cjs local-claude-approval
+              ;;
+            ssh-allocated)
+              export LIFE_METADATA_QUIT_CASE=ssh-allocated
+              export LIFE_METADATA_QUIT_ARTIFACTS="$LIFE_TEST_ARTIFACTS_DIR"
+              node tests/metadata-startup-quit/owned-runner.cjs
+              ;;
+            navigation)
+              xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp -extension MIT-SHM' node tests/renderer-navigation-electron-smoke.cjs
+              ;;
+            ownership)
+              xvfb-run -a -s '-screen 0 1920x1080x24 -nolisten tcp -extension MIT-SHM' node tests/renderer-ownership-hmr-electron-smoke.cjs
+              ;;
+            *) exit 2 ;;
+          esac
+      - name: Verify the original source and compiled build are preserved
+        run: node tests/helpers/verified-ci-build.cjs
+      - name: Save focused native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-native-diagnostic-${{ matrix.suite }}-proof
+          path: |
+            output/native-diagnostics/
+            output/playwright/active-recovery-run/
+          if-no-files-found: warn

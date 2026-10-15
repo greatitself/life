@@ -702,6 +702,17 @@ async function run() {
     page = undefined
     const snapshot = await readDisk()
     const raw = snapshot.threads.find((thread) => thread.id === threadId)
+    // Editing private disk invalidates the prior exact-byte cache receipt.
+    // Seed an archive, not a claim that its changed bytes already consumed the
+    // native journal. Genuine recovery must replay and admit the original owner.
+    proof.archivalRecoveryHints = {
+      applied: raw.nativeRecovery,
+      owner: raw.nativeRecoveryOwner,
+      status: raw.nativeRecoveryStatus,
+    }
+    delete raw.nativeRecovery
+    delete raw.nativeRecoveryOwner
+    delete raw.nativeRecoveryStatus
     raw.title = title
     raw.titleSource = 'manual'
     raw.futureThreadField = {

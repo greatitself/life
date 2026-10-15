@@ -255,7 +255,11 @@ function nativeObservers({ app, BrowserWindow, ipcMain }, options) {
         args[0] === 'codex' &&
         connection?.status === 'connected' &&
         (connection.profile?.transport === 'local' ? 'local' : 'ssh') === options.transport &&
-        connection.workspace === options.workspace
+        // Allocated catalog discovery belongs to the environment; its original
+        // request can remain pending while the user selects that environment's
+        // project. A preallocation read is held only after project selection so
+        // it cannot prevent the fixture from reaching its selected environment.
+        (options.phase === 'allocated' || connection.workspace === options.workspace)
       let result
       try {
         if (targetEnvironment) {

@@ -907,7 +907,11 @@ async function run() {
             await startVite()
           }
           await readyDocument(before, name)
-          const after = await assertPreserved(name, { busy: false })
+          await waitUntil(async () => {
+            await flush()
+            return (await savedThread())?.nativeRecoveryStatus === 'idle'
+          }, `${name}: recovered idle owner reaches the acknowledged native history`)
+          const after = await assertPreserved(name, { busy: false, uiIdle: true })
           assert.deepEqual(after.document.draftStorage, before.document.draftStorage)
           const recoveredHistory = await readSavedThreads(page)
           assert.equal(
@@ -994,7 +998,11 @@ async function run() {
           // stub, is what makes the main-owned deferred reload eligible.
           await clickStop()
           await readyDocument(before, name)
-          const after = await assertPreserved(name, { busy: false })
+          await waitUntil(async () => {
+            await flush()
+            return (await savedThread())?.nativeRecoveryStatus === 'idle'
+          }, `${name}: recovered idle owner reaches the acknowledged native history`)
+          const after = await assertPreserved(name, { busy: false, uiIdle: true })
           assert.equal(after.document.draftStorage, before.document.draftStorage)
           await record(name, before, { deferred, after })
         } else if (name === 'native-busy-reload') {

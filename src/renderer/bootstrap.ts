@@ -71,7 +71,9 @@ async function boot() {
       return
     }
     await api!.sourceCode.ready(revision)
-    localStorage.removeItem('life.pendingSourceApply')
+    // Native recovery keeps legacy pending requests as passive archives. A
+    // successful mount confirms this document, not completion of that request.
+    if (!api!.agent?.recover) localStorage.removeItem('life.pendingSourceApply')
     ready = true
     window.removeEventListener('error', onError)
     window.removeEventListener('unhandledrejection', onRejection)

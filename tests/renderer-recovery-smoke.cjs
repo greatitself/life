@@ -144,6 +144,12 @@ async function run() {
       }
       window.sourceReady = []
       window.sourceErrors = []
+      window.archivedSourceRequest = JSON.stringify({
+        id: 'archived-original-request',
+        request: '  Original request\r\n🧪 e\u0301 中 \ud800  ',
+      })
+      localStorage.setItem('life.pendingSourceApply', window.archivedSourceRequest)
+      window.nativeRecoveryCalls = 0
       window.relay = {
         sourceCode: {
           get: async () => structuredClone(window.sourceSnapshot),
@@ -155,6 +161,13 @@ async function run() {
           },
         },
       }
+      if (new URL(location.href).searchParams.has('nativeRecovery'))
+        window.relay.agent = {
+          recover: async () => {
+            window.nativeRecoveryCalls++
+            throw new Error('A successful source mount cannot authorize native recovery')
+          },
+        }
     }, savedThread)
     const url = `http://127.0.0.1:${server.address().port}`
     await page.goto(url)
@@ -315,6 +328,11 @@ async function run() {
     await page.goto(`${url}/bootstrap`)
     await page.getByRole('heading', { name: 'Healthy workspace' }).waitFor()
     await page.waitForFunction(() => window.sourceReady.length === 1)
+    assert.equal(
+      await page.evaluate(() => localStorage.getItem('life.pendingSourceApply')),
+      null,
+      'Legacy source mounts still retire their completed pending marker',
+    )
     await page.evaluate(() => {
       void Promise.reject(new Error('Ordinary post-start network failure'))
     })
@@ -341,6 +359,16 @@ async function run() {
       [],
       'An old window cannot roll back a newer source revision',
     )
+    await page.goto(`${url}/bootstrap?nativeRecovery=1`)
+    await page.getByRole('heading', { name: 'Healthy workspace' }).waitFor()
+    await page.waitForFunction(() => window.sourceReady.length === 1)
+    assert.equal(
+      await page.evaluate(() => localStorage.getItem('life.pendingSourceApply')),
+      await page.evaluate(() => window.archivedSourceRequest),
+      'A ready native document preserves the exact passive archived request',
+    )
+    assert.equal(await page.evaluate(() => window.nativeRecoveryCalls), 0)
+    assert.deepEqual(await page.evaluate(() => window.sourceErrors), [])
     assert.deepEqual(browserErrors, [], 'Recovery produces no unexpected browser errors')
     assert.equal(
       intentionalBrowserErrors.length,
@@ -360,6 +388,7 @@ async function run() {
         currentRevisionGuard: true,
         desktopNativeRestart: true,
         browserOnlyLocalRetry: true,
+        archivedNativeRequestPreserved: true,
         browserErrors,
         intentionalBrowserErrors,
       }),

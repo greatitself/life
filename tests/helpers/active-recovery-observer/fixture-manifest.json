@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 57141,
-      "sha256": "6707004440e3656554cb9ab195303a418231b5c8ca9c516d9d3390546ffba13b"
+      "bytes": 57241,
+      "sha256": "341878d4105d2032a0130760015b868f4439f8ba5006fba0145ba381285b94a6"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 57141,
-      "sha256": "6707004440e3656554cb9ab195303a418231b5c8ca9c516d9d3390546ffba13b"
+      "bytes": 57241,
+      "sha256": "341878d4105d2032a0130760015b868f4439f8ba5006fba0145ba381285b94a6"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",

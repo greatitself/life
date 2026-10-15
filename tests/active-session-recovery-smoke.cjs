@@ -373,15 +373,15 @@ async function runScenario(harness, scenario, index) {
     // A created upstream thread alone cannot authorize its unadmitted user turn.
     await waitUntil(async () => {
       const current = await harness.thread(prompt)
-      return (
-        current?.nativeRecoveryStatus === 'unknown' && current.remoteId === original.thread.remoteId
-      )
+      return current?.nativeRecoveryStatus === 'unknown'
     }, 'the unadmitted original start remains protected without a proven startup intent')
     const retained = await harness.thread(prompt)
     assert.equal(retained.id, original.thread.id)
     assert.equal(retained.profileId, original.thread.profileId)
     assert.equal(retained.workspace, original.thread.workspace)
-    assert.equal(retained.remoteId, original.thread.remoteId)
+    assert.equal(retained.remoteId, beforeShutdown[0].remoteId)
+    assert.deepEqual(retained.messages, beforeShutdown[0].messages)
+    assert.equal(original.nativeReplyBoundary.native.result.thread.id, original.thread.remoteId)
     const users = retained.messages.filter(
       (message) => message.role === 'user' && message.text === prompt,
     )

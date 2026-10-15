@@ -864,7 +864,7 @@ export function useCustomizationStudio(options: StudioOptions) {
         ...session,
         stage,
         updatedAt: finishedAt,
-        thread: {
+        thread: carryNativeProjectionAuthoredTransition(finished, {
           ...finished,
           busy: false,
           pending: finished.pending.filter((request) => Boolean(request.agentId)),
@@ -881,7 +881,7 @@ export function useCustomizationStudio(options: StudioOptions) {
                   },
                 ]
               : finished.messages,
-        },
+        }),
       }
     })
     if (run && usesDurableRecovery() && api?.agent.updateRecoveryOwner)

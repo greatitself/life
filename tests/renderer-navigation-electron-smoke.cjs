@@ -1030,29 +1030,56 @@ async function run() {
           })
           await readyDocument(before, name)
           await waitUntil(
-            async () =>
-              !(await stopButton().isVisible()) &&
-              (await page.getByRole('button', { name: 'Send message', exact: true }).isEnabled()),
-            'intentional native reload invalidates old live UI ownership and permits continuation',
+            async () => (await stopButton().isVisible()) && (await stopButton().isEnabled()),
+            'intentional native reload recovers the original active turn with an actionable Stop',
           )
-          // Lossless recovery keeps the previous raw busy marker archived until
-          // a real owned turn changes it. Check actual live UI admission here;
-          // the subsequent completed turn must durably settle busy=false.
-          const afterReload = await assertPreserved(`${name}: fresh document`, { uiIdle: true })
+          const afterReload = await assertPreserved(`${name}: fresh document`, { busy: true })
           assert.equal(afterReload.document.draftStorage, before.document.draftStorage)
-          const continuation = '  Native reload follow-up\n\tKeep café e\u0301 漢字 🧪 exactly.  '
-          const continuationProof = await completedContinuation(continuation, name)
-          await setDraft(draft)
-          const afterFollowup = await assertPreserved(`${name}: follow-up`, { busy: false })
+          const originalOwner = before.history.find((value) => value.id === thread.id)
+          const recoveredOwner = await savedThread()
+          assert.deepEqual(recoveredOwner.nativeRecoveryOwner, originalOwner.nativeRecoveryOwner)
+          assert.deepEqual(recoveredOwner.messages, originalOwner.messages)
+          assert.equal(recoveredOwner.turn, originalOwner.turn)
+          const originalTurn = (await fixture.log())
+            .slice(0, before.providerLogLength)
+            .findLast((entry) => entry.kind === 'turn-started' && entry.prompt === 'hang')
+          assert.ok(originalTurn, 'The original native turn is recorded before replacement')
+          assert.equal(
+            (await fixture.log())
+              .slice(before.providerLogLength)
+              .some(
+                (entry) =>
+                  entry.argv ||
+                  entry.message?.method === 'turn/start' ||
+                  entry.message?.method === 'turn/interrupt',
+              ),
+            false,
+            'Native reload neither replaces the provider, resubmits the prompt, nor interrupts it',
+          )
+          await stopHang(`${name}: recovered Stop`)
           assert.ok(
             (await fixture.log())
               .slice(before.providerLogLength)
               .some(
                 (entry) =>
-                  entry.message?.method === 'thread/resume' &&
-                  entry.message.params.threadId === thread.remoteId,
+                  entry.message?.method === 'turn/interrupt' &&
+                  entry.message.params.threadId === originalTurn.threadId &&
+                  entry.message.params.turnId === originalTurn.turnId,
               ),
-            'Fresh native ownership resumes the existing upstream provider thread',
+            'The recovered real Stop control interrupts the exact original native turn',
+          )
+          const afterStop = await assertPreserved(`${name}: recovered Stop`, { busy: false })
+          assert.equal(afterStop.document.documentId, afterReload.document.documentId)
+          const continuation = '  Native reload follow-up\n\tKeep café e\u0301 漢字 🧪 exactly.  '
+          const continuationProof = await completedContinuation(continuation, name)
+          await setDraft(draft)
+          const afterFollowup = await assertPreserved(`${name}: follow-up`, { busy: false })
+          assert.equal(
+            (await fixture.log())
+              .slice(before.providerLogLength)
+              .some((entry) => entry.argv || entry.message?.method === 'thread/start'),
+            false,
+            'The recovered continuation retains the existing provider process and upstream thread',
           )
           assert.equal(
             await page
@@ -1063,6 +1090,8 @@ async function run() {
           )
           await record(name, before, {
             afterReload,
+            afterStop,
+            originalTurn,
             continuation: continuationProof,
             afterFollowup,
           })

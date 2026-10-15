@@ -4,7 +4,7 @@ const { createServer } = require('node:http')
 const { mkdtemp, readFile, rm } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 async function run() {

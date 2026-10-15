@@ -8,7 +8,7 @@ const { mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { promisify } = require('node:util')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 const execute = promisify(execFile)

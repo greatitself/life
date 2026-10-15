@@ -13,7 +13,7 @@ const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
 const { spawnSync } = require('node:child_process')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { _electron: electron } = require('playwright')
 
 const repository = resolve(__dirname, '..')

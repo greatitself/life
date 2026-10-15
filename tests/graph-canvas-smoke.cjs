@@ -7,7 +7,7 @@ const { createServer } = require('node:http')
 const { mkdtemp, readFile, writeFile, mkdir, rm } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 const repository = resolve(__dirname, '..')

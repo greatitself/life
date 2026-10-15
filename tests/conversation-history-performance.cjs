@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict')
 const { createServer } = require('node:http')
 const { resolve } = require('node:path')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 async function run() {

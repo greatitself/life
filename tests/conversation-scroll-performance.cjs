@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process')
 const { mkdtemp, readFile, writeFile, mkdir, rm } = require('node:fs/promises')
 const { join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 const baselineRevision = 'a1b3facb8bc3c07b1521ed21965f4f8b88acd268'

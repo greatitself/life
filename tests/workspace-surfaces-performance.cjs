@@ -8,7 +8,7 @@ const { mkdtemp, mkdir, readFile, writeFile, rm } = require('node:fs/promises')
 const { basename, join, resolve } = require('node:path')
 const { tmpdir } = require('node:os')
 const { execFileSync } = require('node:child_process')
-const { build } = require('esbuild')
+const { build } = require('./helpers/browser-build.cjs')
 const { chromium } = require('playwright')
 
 async function run() {

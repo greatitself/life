@@ -1666,6 +1666,29 @@ describe('Agents native Stop recovery boundaries', () => {
       )
     }))
 
+  it('a failed Stop receipt cannot block handoff after the original native exit is confirmed', () =>
+    withFixture('claude', async (fixture) => {
+      await admitOriginalPrompt(fixture)
+      const channel = await recovered(fixture)
+      await expect(fixture.agents.stop('life-session')).rejects.toMatchObject({
+        operation: 'stop',
+      })
+      fixture.agents.suspendRendererConsumers()
+      await fixture.agents.settleRendererHandoff()
+      expect(await fixture.agents.rendererHandoffAdmitted()).toBe(false)
+      await channel.nativeExit()
+      await fixture.agents.settleRendererHandoff()
+      expect(await fixture.agents.rendererHandoffAdmitted()).toBe(true)
+      const restored = await fixture.agents.recover({ consumers: [consumer()] })
+      expect(restored.owners[0]).toMatchObject({
+        sessionId: 'life-session',
+        transportId: fixture.transport.id,
+        status: 'idle',
+      })
+      expect(interrupts(channel)).toHaveLength(1)
+      expect(channel.nativeWrites.filter((entry) => entry.message.type === 'user')).toEqual([])
+    }))
+
   it('a handoff timeout preserves the original pending native Stop', () =>
     withFixture('codex', async (fixture) => {
       await admitOriginalPrompt(fixture)

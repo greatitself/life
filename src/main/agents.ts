@@ -7455,9 +7455,12 @@ export class Agents {
           }
           // Provider completion may reach the UI before Stop's final owner/history
           // receipt. Join that original completion; never infer an exit from UI state.
-          yield* Effect.all([...this.stopCompletions.values()].map(Deferred.await), {
-            concurrency: 'unbounded',
-          })
+          yield* Effect.all(
+            [...this.stopCompletions.values()].map((completion) =>
+              Deferred.await(completion).pipe(Effect.exit),
+            ),
+            { concurrency: 'unbounded' },
+          )
           yield* Effect.all(
             [
               ...this.pendingNativeOperations,

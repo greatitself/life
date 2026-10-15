@@ -1031,7 +1031,9 @@ export function useCustomizationStudio(options: StudioOptions) {
               profileId: run.profileId,
               ...(session.thread.workspace ? { workspace: session.thread.workspace } : {}),
               ...(input.remoteId ? { remoteId: input.remoteId } : {}),
-              ...(session.thread.nativeRecovery ? { applied: session.thread.nativeRecovery } : {}),
+              // This live handshake binds the newly admitted generation. Its
+              // buffered output is replayed without claiming a cached prefix;
+              // durable history hydration supplies its separate cache hash.
               ...(nativeProjectionAdmissions([session.thread])
                 ? {
                     projectionAdmissions: nativeProjectionAdmissions([session.thread]),

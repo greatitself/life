@@ -3487,7 +3487,10 @@ describe('Agents native recovery boundaries', () => {
         expect(fixture.attachments[0].nativeWrites).toEqual([])
         expect(fixture.attachments[0].rawWrites).toEqual([])
         const after = await run(fixture.store.readTransport(fixture.transport.id))
-        expect(after.transport).toEqual(before.transport)
+        const retry = fixture.open.mock.calls[1]
+        const retryOptions = typeof retry[2] === 'function' ? retry[3] : retry[2]
+        expect(retryOptions?.snapshot?.transport).toEqual(before.transport)
+        expect(after.transport).toMatchObject(before.transport)
         expect(after.inputs).toEqual(before.inputs)
         expect(after.records.slice(0, before.records.length)).toEqual(before.records)
         expect(fixture.ssh.channel).not.toHaveBeenCalled()

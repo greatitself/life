@@ -248,6 +248,7 @@ function destinationSnapshot(
 function resolution(
   source: AsyncQuestionOrigin,
   status: 'answered' | 'dismissed',
+  claim?: { transportId: string; sequence: number },
 ): NativeRecoveryStoredEvent {
   const eventId = `${source.transportId}:local:${status}`
   return {
@@ -259,7 +260,10 @@ function resolution(
       type: 'request-resolved',
       requestId: asyncQuestionRequestId(source),
       status,
-      details: { asyncQuestionSource: structuredClone(source) },
+      details: {
+        asyncQuestionSource: structuredClone(source),
+        ...(claim !== undefined ? { asyncQuestionClaim: claim } : {}),
+      },
       nativeRecovery: {
         transportId: source.transportId,
         eventId,
@@ -274,12 +278,13 @@ function resolution(
 function withResolution(
   source: AsyncQuestionOrigin,
   status: 'answered' | 'dismissed',
+  claim?: { transportId: string; sequence: number },
 ): NativeRecoverySnapshot {
   return snapshot(
     source,
     source.transportId,
     [owner(source)],
-    [questionEvent(source), resolution(source, status)],
+    [questionEvent(source), resolution(source, status, claim)],
   )
 }
 
@@ -470,12 +475,87 @@ describe('canonical asynchronous native questions', () => {
     expect(local.allocatedInputSequence).toBe(0)
   })
 
-  it.each([false, true])(
-    'fails closed on dismissal plus any reserved reply in either journal order (reverse=%s)',
-    (reverse) => {
+  it.each([
+    { written: false, reverse: false },
+    { written: false, reverse: true },
+    { written: true, reverse: false },
+    { written: true, reverse: true },
+  ])(
+    'fails closed on dismissal without a claim plus a reserved reply (written=$written, reverse=$reverse)',
+    ({ written, reverse }) => {
       const source = originalSource()
       const snapshots = [
         withResolution(source, 'dismissed'),
+        destinationSnapshot(source, [replyInput(source, { written })]),
+      ]
+      expect(() => collectAsyncQuestions(reverse ? snapshots.reverse() : snapshots)).toThrow(
+        AsyncQuestionError,
+      )
+    },
+  )
+
+  it.each([
+    { written: false, reverse: false },
+    { written: false, reverse: true },
+    { written: true, reverse: false },
+    { written: true, reverse: true },
+  ])(
+    'dismisses the exact reserved claim while retaining its recovery fence (written=$written, reverse=$reverse)',
+    ({ written, reverse }) => {
+      const source = originalSource()
+      const prompt = promptFor(source)
+      const clientRecovery = {
+        kind: 'main',
+        userMessage: {
+          id: 'claimed-stable-user-message',
+          role: 'user',
+          text: prompt,
+          turn: 8,
+          createdAt: 200,
+        },
+        threadSeed: {
+          id: source.sessionId,
+          profileId: source.profileId,
+          provider: 'codex',
+          workspace: source.workspace,
+          turn: 8,
+        },
+      }
+      const binding = { ...replyBinding(source), clientRecovery }
+      const input = replyInput(source, { written, binding })
+      const snapshots = [
+        withResolution(source, 'dismissed', {
+          transportId: 'destination-transport',
+          sequence: input.sequence,
+        }),
+        destinationSnapshot(source, [input]),
+      ]
+      const before = structuredClone(snapshots)
+      const ordered = reverse ? [...snapshots].reverse() : snapshots
+      const record = collectAsyncQuestions(ordered).get(asyncQuestionRequestId(source))!
+      expect(record.state).toBe('dismissed')
+      expect(record.source).toEqual(source)
+      expect(record.reply?.transportId).toBe('destination-transport')
+      expect(record.reply?.input).toEqual(input)
+      expect(record.reply?.input.written).toBe(written)
+      expect(record.reply?.binding).toEqual(binding)
+      expect(record.reply?.binding.clientRecovery).toEqual(clientRecovery)
+      expect(snapshots).toEqual(before)
+    },
+  )
+
+  it.each(
+    [
+      { label: 'foreign transport', transportId: 'foreign-destination', sequence: 1 },
+      { label: 'different sequence', transportId: 'destination-transport', sequence: 2 },
+      { label: 'original source transport', transportId: 'source-transport', sequence: 1 },
+    ].flatMap((claim) => [false, true].map((reverse) => ({ ...claim, reverse }))),
+  )(
+    'rejects dismissal of a $label claim (reverse=$reverse)',
+    ({ transportId, sequence, reverse }) => {
+      const source = originalSource()
+      const snapshots = [
+        withResolution(source, 'dismissed', { transportId, sequence }),
         destinationSnapshot(source, [replyInput(source)]),
       ]
       expect(() => collectAsyncQuestions(reverse ? snapshots.reverse() : snapshots)).toThrow(
@@ -483,6 +563,18 @@ describe('canonical asynchronous native questions', () => {
       )
     },
   )
+
+  it('rejects a claimed dismissal without any bound reply', () => {
+    const source = originalSource()
+    expect(() =>
+      collectAsyncQuestions([
+        withResolution(source, 'dismissed', {
+          transportId: 'destination-transport',
+          sequence: 1,
+        }),
+      ]),
+    ).toThrow(AsyncQuestionError)
+  })
 
   it('fails closed when two transports each reserve a reply to the same original question', () => {
     const source = originalSource()

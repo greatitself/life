@@ -383,6 +383,62 @@ describe('Agents asynchronous native Codex message questions', () => {
     expect(channel.sent).toHaveLength(before)
   })
 
+  it('locally dismisses a failed bound reply without retrying it and permits a fresh composer message', async () => {
+    const { agents, channel, events, message, question, reply } = await fixture()
+    message()
+    const requestId = question().requestId
+    const input: AgentSteerInput = {
+      sessionId: 'local',
+      prompt: replyPrompt,
+      questionReply: reply(),
+    }
+    channel.heldMethods.add('turn/steer')
+    const submitting = agents.steer(input)
+    const rejected = expect(submitting).rejects.toThrow('Fixture rejected the native answer')
+    await vi.waitFor(() =>
+      expect(
+        channel.nativeWrites.filter((write) => write.message.method === 'turn/steer'),
+      ).toHaveLength(1),
+    )
+    const boundWrite = channel.nativeWrites.findLast(
+      (write) => write.message.method === 'turn/steer',
+    )!
+    expect(boundWrite.semantic).toMatchObject({
+      responseBinding: { mode: 'async-question', requestId, prompt: replyPrompt },
+    })
+    channel.reply({
+      id: boundWrite.message.id,
+      error: { code: -32000, message: 'Fixture rejected the native answer' },
+    })
+    await rejected
+    expect(events.some((event) => event.type === 'request-resolved')).toBe(false)
+
+    const writesBeforeDismiss = channel.nativeWrites.slice()
+    await agents.respond('local', requestId, false)
+    expect(channel.nativeWrites).toEqual(writesBeforeDismiss)
+    expect(events.filter((event) => event.type === 'request-resolved')).toEqual([
+      expect.objectContaining({ sessionId: 'local', requestId, status: 'dismissed' }),
+    ])
+    await expect(agents.steer(input)).rejects.toThrow(/no longer open|awaiting delivery/)
+    expect(channel.nativeWrites).toEqual(writesBeforeDismiss)
+
+    channel.heldMethods.delete('turn/steer')
+    const freshPrompt = '  A fresh user-authored composer message\r\n🌍  '
+    await agents.steer({ sessionId: 'local', prompt: freshPrompt })
+    const freshWrite = channel.nativeWrites.findLast(
+      (write) => write.message.method === 'turn/steer',
+    )!
+    expect(freshWrite.message.params).toEqual({
+      threadId: nativeThread,
+      expectedTurnId: nativeTurn,
+      input: [{ type: 'text', text: freshPrompt }],
+    })
+    expect(freshWrite.semantic).not.toHaveProperty('responseBinding')
+    expect(
+      channel.nativeWrites.filter((write) => write.semantic?.responseBinding !== undefined),
+    ).toEqual([boundWrite])
+  })
+
   it('retains a child question identity and refuses to answer through the parent conversation', async () => {
     const { agents, channel, events, message, question, reply } = await fixture()
     channel.reply({

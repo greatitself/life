@@ -649,3 +649,94 @@ describe('pending question native field names', () => {
     expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore)
   })
 })
+
+describe('uncertain message question dismissal', () => {
+  it('keeps answers locked while an explicit Dismiss retries and preserves drafts until its ACK', async () => {
+    const store = createPendingQuestionDraftStore()
+    const event = request({
+      status: 'responding',
+      responseMode: 'message',
+      canDismiss: true,
+    })
+    const firstDelivery = deferred()
+    const retryDelivery = deferred()
+    const respond = vi
+      .fn<
+        (event: AgentEvent, accepted: boolean, answers?: Record<string, string[]>) => Promise<void>
+      >()
+      .mockImplementationOnce(() => firstDelivery.promise)
+      .mockImplementationOnce(() => retryDelivery.promise)
+    const answers = { approach: ['  Preserve this uncertain response.\r\n'] }
+    const customAnswers = { approach: '  Unselected custom draft.\n' }
+    const customQuestions = { approach: false }
+    store.update(event, { answers, customAnswers, customQuestions, step: 1 })
+
+    expect(store.submit(event, respond, true)).toBe(false)
+    expect(respond).not.toHaveBeenCalled()
+    expect(store.submit(event, respond, false)).toBe(true)
+    expect(store.get(event)).toMatchObject({
+      answers,
+      customAnswers,
+      customQuestions,
+      step: 1,
+      status: 'sending',
+      error: '',
+    })
+    expect(store.submit(event, respond, false)).toBe(false)
+    expect(store.submit(event, respond, true)).toBe(false)
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1))
+    firstDelivery.reject(new Error('Dismiss acknowledgement was not received.'))
+    await vi.waitFor(() => expect(store.get(event).status).toBe('idle'))
+    expect(store.get(event)).toMatchObject({
+      answers,
+      customAnswers,
+      customQuestions,
+      step: 1,
+    })
+    expect(store.get(event).error).toContain('Dismiss acknowledgement was not received')
+    expect(store.submit(event, respond, true)).toBe(false)
+    expect(store.submit(event, respond, false)).toBe(true)
+    expect(store.get(event)).toMatchObject({
+      answers,
+      customAnswers,
+      customQuestions,
+      status: 'sending',
+      error: '',
+    })
+    expect(store.submit(event, respond, false)).toBe(false)
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2))
+    retryDelivery.resolve()
+    await vi.waitFor(() => expect(store.get(event).status).toBe('submitted'))
+    expect(store.get(event)).toMatchObject({
+      answers: {},
+      customAnswers: {},
+      customQuestions: {},
+      error: '',
+    })
+    expect(respond.mock.calls).toEqual([
+      [event, false, undefined],
+      [event, false, undefined],
+    ])
+  })
+
+  it.each([
+    ['native responding request', { status: 'responding', canDismiss: true }],
+    [
+      'responding message without dismissal permission',
+      { status: 'responding', responseMode: 'message', canDismiss: false },
+    ],
+  ] as const)('does not dismiss a %s', (_name, policy) => {
+    const store = createPendingQuestionDraftStore()
+    const event = request(policy)
+    const answers = { approach: ['  Keep the pending draft.\n'] }
+    store.update(event, { answers, step: 1 })
+    const snapshot = store.get(event)
+    const respond = vi.fn(async () => {})
+
+    expect(store.submit(event, respond, false)).toBe(false)
+    expect(store.submit(event, respond, true)).toBe(false)
+    expect(store.get(event)).toBe(snapshot)
+    expect(store.get(event)).toMatchObject({ answers, step: 1, status: 'idle' })
+    expect(respond).not.toHaveBeenCalled()
+  })
+})

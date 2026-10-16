@@ -99,7 +99,15 @@ const decodeResolution = Schema.decodeUnknownOption(
     type: Schema.Literal('request-resolved'),
     requestId: nonempty,
     status: Schema.Literals(['answered', 'dismissed']),
-    details: Schema.Struct({ asyncQuestionSource: asyncQuestionOriginSchema }),
+    details: Schema.Struct({
+      asyncQuestionSource: asyncQuestionOriginSchema,
+      asyncQuestionClaim: Schema.optionalKey(
+        Schema.Struct({
+          transportId: nonempty,
+          sequence: natural.check(Schema.isGreaterThan(0)),
+        }),
+      ),
+    }),
     nativeRecovery: Schema.Struct({
       transportId: nonempty,
       ownerGeneration: natural,
@@ -387,10 +395,19 @@ export function collectAsyncQuestions(
         resolution.nativeRecovery.snapshotToken === question.source.snapshotToken &&
         isDeepStrictEqual(question.source, resolution.details.asyncQuestionSource)
       ) {
-        if (resolution.status === 'dismissed' && question.reply)
-          throw new AsyncQuestionError({
-            message: 'A native question reply and dismissal both claimed the same question.',
-          })
+        if (resolution.status === 'dismissed') {
+          const claim = resolution.details.asyncQuestionClaim
+          const matchingClaim =
+            question.reply &&
+            claim &&
+            claim.transportId === question.reply.transportId &&
+            claim.sequence === question.reply.input.sequence
+          if (question.reply ? !matchingClaim : claim !== undefined)
+            throw new AsyncQuestionError({
+              message:
+                'A native question reply and dismissal do not identify the same exact claimed input.',
+            })
+        }
         if (resolution.status === 'answered' && !question.reply?.input.written)
           throw new AsyncQuestionError({
             message: 'An asynchronous question resolution has no written native reply.',

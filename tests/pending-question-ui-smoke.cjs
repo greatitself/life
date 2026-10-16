@@ -564,6 +564,106 @@ async function run() {
       'Only dismissible message questions offer Dismiss; blocking callbacks offer Decline and send the explicit negative native response',
     )
 
+    const uncertainRequest = {
+      sessionId: 'uncertain-async',
+      requestId: 'uncertain-async-reply',
+      type: 'question',
+      responseMode: 'message',
+      canDismiss: true,
+      questions: [
+        {
+          id: 'followup',
+          question: 'Which uncertain follow-up?',
+          options: [{ label: 'Suggested follow-up' }],
+        },
+      ],
+    }
+    await request(uncertainRequest)
+    await panel()
+      .getByRole('radio', { name: /^Other answer/ })
+      .check()
+    const uncertainAnswer = () =>
+      panel().getByRole('textbox', {
+        name: 'Your answer · Which uncertain follow-up?',
+        exact: true,
+      })
+    const exactUncertainAnswer = '  Preserve this failed answer.\n'
+    await uncertainAnswer().fill(exactUncertainAnswer)
+    await page.evaluate(() => {
+      window.rejectResponse = true
+    })
+    await send().click()
+    await panel()
+      .getByRole('alert')
+      .filter({ hasText: 'The response was not delivered.' })
+      .waitFor()
+    await page.evaluate((event) => window.setQuestionRequest(event), {
+      ...uncertainRequest,
+      status: 'responding',
+    })
+    assert.equal(await uncertainAnswer().inputValue(), exactUncertainAnswer)
+    assert.equal(await uncertainAnswer().isDisabled(), true)
+    assert.equal(
+      await panel().getByRole('radio', { name: 'Suggested follow-up', exact: true }).isDisabled(),
+      true,
+    )
+    assert.equal(
+      await panel().getByRole('button', { name: 'Sending…', exact: true }).isDisabled(),
+      true,
+    )
+    const uncertainDismiss = () => panel().getByRole('button', { name: 'Dismiss', exact: true })
+    assert.equal(await uncertainDismiss().isEnabled(), true)
+    await page.evaluate(() => {
+      window.rejectResponse = false
+      window.holdResponse = true
+    })
+    await uncertainDismiss().evaluate((button) => {
+      button.click()
+      button.click()
+    })
+    await page.waitForFunction(() => window.responseCalls.length === 2)
+    assert.equal(await uncertainDismiss().isDisabled(), true)
+    assert.equal(await uncertainAnswer().inputValue(), exactUncertainAnswer)
+    assert.deepEqual(await responses(), [
+      {
+        requestId: uncertainRequest.requestId,
+        accepted: true,
+        answers: { followup: [exactUncertainAnswer] },
+      },
+      { requestId: uncertainRequest.requestId, accepted: false, answers: null },
+    ])
+    await page.evaluate(() => {
+      window.holdResponse = false
+      window.releaseResponse()
+    })
+    await complete()
+    assert.equal(await uncertainAnswer().count(), 0)
+    assert.equal(
+      await panel()
+        .getByRole('radio', { name: /^Other answer/ })
+        .isChecked(),
+      false,
+    )
+    assert.equal((await responses()).length, 2)
+    await request({
+      responseMode: 'native',
+      canDismiss: true,
+      status: 'responding',
+      questions: [{ id: 'native-uncertain', question: 'Uncertain native callback?' }],
+    })
+    assert.equal(await panel().getByRole('button', { name: 'Dismiss', exact: true }).count(), 0)
+    const uncertainDecline = panel().getByRole('button', { name: 'Decline', exact: true })
+    assert.equal(await uncertainDecline.isDisabled(), true)
+    assert.equal(
+      await panel().getByRole('button', { name: 'Sending…', exact: true }).isDisabled(),
+      true,
+    )
+    await uncertainDecline.evaluate((button) => button.click())
+    assert.deepEqual(await responses(), [])
+    checks.push(
+      'An uncertain async answer keeps its exact draft and duplicate fence while allowing one acknowledged Dismiss; responding native callbacks never gain a local dismissal',
+    )
+
     await request({
       questions: [
         {

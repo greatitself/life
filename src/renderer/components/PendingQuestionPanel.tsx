@@ -59,6 +59,7 @@ export function PendingQuestionPanel({
   const locked = disabled || uncertain || draft.status !== 'idle'
   const policy = event as AgentEvent & { responseMode?: 'native' | 'message'; canDismiss?: boolean }
   const canDismiss = policy.responseMode === 'message' && policy.canDismiss === true
+  const dismissLocked = disabled || draft.status !== 'idle' || (uncertain && !canDismiss)
   const stopAdvance = useCallback(() => {
     cancelAdvance.current?.()
     cancelAdvance.current = undefined
@@ -163,7 +164,8 @@ export function PendingQuestionPanel({
 
   function submit(accepted: boolean) {
     stopAdvance()
-    if (!locked && active) pendingQuestionDrafts.submit(event, onRespond, accepted)
+    if (active && !(accepted ? locked : dismissLocked))
+      pendingQuestionDrafts.submit(event, onRespond, accepted)
   }
 
   function handleKeyboard(e: KeyboardEvent<HTMLElement>) {
@@ -456,12 +458,18 @@ export function PendingQuestionPanel({
               {draft.error}
             </p>
           ) : null}
+          {uncertain && canDismiss && draft.status === 'idle' ? (
+            <p className="pending-question-context" role="status">
+              Your answer may still reach the agent. Dismiss to keep working without sending it
+              again.
+            </p>
+          ) : null}
           <footer className="pending-question-footer">
             {policy.responseMode !== 'message' || canDismiss ? (
               <button
                 type="button"
                 className="pending-question-decline"
-                disabled={locked}
+                disabled={dismissLocked}
                 onClick={() => submit(false)}
               >
                 <X size={13} aria-hidden="true" />

@@ -156,7 +156,10 @@ export function createPendingQuestionDraftStore() {
     },
     submit(event: AgentEvent, onRespond: PendingQuestionResponder, accepted = true) {
       const { key, entry } = entryFor(event)
-      if (entry.snapshot.status !== 'idle' || event.status === 'responding') return false
+      if (entry.snapshot.status !== 'idle') return false
+      const canCloseUncertain =
+        !accepted && event.responseMode === 'message' && event.canDismiss === true
+      if (event.status === 'responding' && !canCloseUncertain) return false
       const validation = prepareQuestionAnswers(
         event.questions || [],
         questionDraftAnswers(event, entry.snapshot),

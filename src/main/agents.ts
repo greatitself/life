@@ -1297,6 +1297,7 @@ export class Agents {
     session: Session | undefined,
     source: AsyncQuestionOrigin,
     allowChild: boolean,
+    metadata = false,
   ) {
     if (
       !session ||
@@ -1313,7 +1314,7 @@ export class Agents {
         'Reconnect the exact original native conversation and workspace before answering this question.',
       )
     this.assertEnvironmentAdmission(session.machineIdentity)
-    this.assertRecovered(session.input.sessionId)
+    this.assertRecovered(session.input.sessionId, false, metadata)
     if (!allowChild && source.nativeThreadId !== session.remoteId)
       throw new AsyncQuestionError({
         message:
@@ -1497,7 +1498,7 @@ export class Agents {
       if (
         !question ||
         question.source.sessionId !== sessionId ||
-        question.state !== 'open' ||
+        !['open', 'responding'].includes(question.state) ||
         this.asyncQuestionAdmissionFailures.has(requestId)
       )
         return yield* new AsyncQuestionError({
@@ -1510,7 +1511,12 @@ export class Agents {
         })
       yield* Effect.try({
         try: () =>
-          this.assertAsyncQuestionDestination(this.sessions.get(sessionId), question.source, true),
+          this.assertAsyncQuestionDestination(
+            this.sessions.get(sessionId),
+            question.source,
+            true,
+            true,
+          ),
         catch: (cause) =>
           this.recoveryError(
             'question-dismiss',
@@ -1523,7 +1529,17 @@ export class Agents {
         type: 'request-resolved',
         requestId,
         status: 'dismissed',
-        details: { asyncQuestionSource: question.source },
+        details: {
+          asyncQuestionSource: question.source,
+          ...(question.reply
+            ? {
+                asyncQuestionClaim: {
+                  transportId: question.reply.transportId,
+                  sequence: question.reply.input.sequence,
+                },
+              }
+            : {}),
+        },
       }
       if (this.nativeRecovery) {
         const snapshot = yield* this.nativeRecovery.readTransport(question.source.transportId)

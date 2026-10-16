@@ -1237,7 +1237,17 @@ export function activityLabel(activity: ThreadActivity): string {
           ),
           'The completed display retains the full subagent result in saved history',
         )
-        await page.locator('.thread-work-summary').last().waitFor()
+        const delegatedTurn = page.getByRole('region', {
+          name: `Turn ${delegatedThread.turn}`,
+          exact: true,
+        })
+        await delegatedTurn.locator('.thread-turn-disclosure > summary').first().waitFor()
+        await delegatedTurn
+          .locator('.markdown')
+          .getByText('Native subagent work completed with its full output visible.', {
+            exact: true,
+          })
+          .waitFor()
         const original = await ordinaryThread(exactPrompt, provider)
         assert.ok(original.remoteId)
         await waitUntil(

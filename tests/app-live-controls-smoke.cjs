@@ -348,15 +348,72 @@ async function workspacePanelChecks(page, checks, settle) {
   )
 
   const conversation = workspace.locator('.conversation')
+  const settleConversationLayout = () =>
+    conversation.evaluate(
+      (element) =>
+        new Promise((resolve, reject) => {
+          let last = element.scrollHeight + ':' + element.clientHeight
+          let stable = 0
+          let frames = 0
+          const sample = () => {
+            const current = element.scrollHeight + ':' + element.clientHeight
+            stable = current === last ? stable + 1 : 0
+            last = current
+            if (stable >= 4) resolve()
+            else if (++frames >= 60)
+              reject(
+                new Error('Conversation geometry did not settle before the reading-position check'),
+              )
+            else requestAnimationFrame(sample)
+          }
+          requestAnimationFrame(sample)
+        }),
+    )
+  const readingPosition = () =>
+    conversation.evaluate((element) => {
+      const viewport = element.getBoundingClientRect()
+      const composer = element
+        .closest('.chat-area')
+        .querySelector('.life-reference-composer')
+        .getBoundingClientRect()
+      const bottom = Math.min(viewport.bottom, composer.top)
+      for (const turn of element.querySelectorAll('.thread-timeline-turn')) {
+        const turnBounds = turn.getBoundingClientRect()
+        if (turnBounds.height <= 0 || turnBounds.bottom <= viewport.top || turnBounds.top >= bottom)
+          continue
+        for (const message of turn.querySelectorAll('[data-message-id]')) {
+          const bounds = message.getBoundingClientRect()
+          if (bounds.height > 0 && bounds.bottom > viewport.top && bounds.top < bottom)
+            return {
+              top: element.scrollTop,
+              height: element.scrollHeight,
+              clientHeight: element.clientHeight,
+              gap: element.scrollHeight - element.clientHeight - element.scrollTop,
+              anchorId: message.getAttribute('data-message-id'),
+              anchorOffset: bounds.top - viewport.top,
+            }
+        }
+      }
+      throw new Error('The visible conversation must expose a reading anchor')
+    })
+  await settleConversationLayout()
   await conversation.hover({ position: { x: 100, y: 100 } })
   await page.mouse.wheel(0, -640)
   await page.waitForFunction(() => {
     const element = document.querySelector('.main-workspace[data-agent-workspace] .conversation')
     return element.scrollHeight - element.clientHeight - element.scrollTop > 100
   })
-  await settle()
-  const scrollTop = await conversation.evaluate((element) => element.scrollTop)
-  assert.ok(scrollTop > 100)
+  const scrollToEnd = page.getByRole('button', { name: 'Scroll to latest message', exact: true })
+  await scrollToEnd.waitFor({ state: 'visible' })
+  await settleConversationLayout()
+  const scrollBefore = await readingPosition()
+  assert.ok(
+    scrollBefore.top > 100 && scrollBefore.gap > 100,
+    'The reader must be stably away from the end before switching threads',
+  )
+  await page.evaluate((position) => {
+    window.controlsWorkspaceScrollBefore = position
+  }, scrollBefore)
   await selectThread('Thread Beta')
   await picker.waitFor()
   const betaDraft = 'Another exact draft remains owned by Thread Beta.'
@@ -369,14 +426,29 @@ async function workspacePanelChecks(page, checks, settle) {
   assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
   assert.deepEqual(await tablist.getByRole('tab').allTextContents(), ['Files', 'Agents', 'Diff'])
   assert.equal(await composer.inputValue(), draft)
-  await page.waitForFunction(
-    (expected) =>
-      Math.abs(
-        document.querySelector('.main-workspace[data-agent-workspace] .conversation').scrollTop -
-          expected,
-      ) <= 3,
-    scrollTop,
-  )
+  await page.waitForFunction((expected) => {
+    const viewport = document.querySelector('.main-workspace[data-agent-workspace] .conversation')
+    const anchor = viewport.querySelector(
+      '[data-message-id="' + CSS.escape(expected.anchorId) + '"]',
+    )
+    if (!anchor) return false
+    const bounds = anchor.getBoundingClientRect()
+    const viewportBounds = viewport.getBoundingClientRect()
+    return (
+      bounds.height > 0 &&
+      bounds.bottom > viewportBounds.top &&
+      bounds.top < viewportBounds.bottom &&
+      Math.abs(bounds.top - viewportBounds.top - expected.anchorOffset) <= 3
+    )
+  }, scrollBefore)
+  await scrollToEnd.waitFor({ state: 'visible' })
+  const scrollAfter = await readingPosition()
+  assert.equal(scrollAfter.anchorId, scrollBefore.anchorId)
+  assert.ok(Math.abs(scrollAfter.anchorOffset - scrollBefore.anchorOffset) <= 3)
+  assert.ok(scrollAfter.gap > 100, 'Restoring a reading anchor must not resume following the end')
+  await page.evaluate((position) => {
+    window.controlsWorkspaceScrollAfter = position
+  }, scrollAfter)
   await panel.getByText('Workspace Alpha child', { exact: true }).waitFor()
   assert.equal(await panel.getByText('Workspace Beta child', { exact: true }).count(), 0)
   await page.evaluate(() => window.__lifeFlushConversationHistory())
@@ -425,6 +497,9 @@ async function workspacePanelChecks(page, checks, settle) {
   assert.equal(await workspace.getAttribute('aria-hidden'), 'true')
   assert.equal(await page.getByRole('button', { name: 'Maximize panel', exact: true }).count(), 0)
   assert.equal(await resize.count(), 0)
+  await tab('Files').click()
+  await preview.waitFor()
+  await tab('Agents').click()
   for (let index = 0; index < 8; index++) {
     await page.keyboard.press('Tab')
     assert.equal(await panel.evaluate((element) => element.contains(document.activeElement)), true)
@@ -477,7 +552,11 @@ async function workspacePanelChecks(page, checks, settle) {
   )
   await writeFile(
     join(directory, 'proof.json'),
-    JSON.stringify({ geometry, leftWidth, initialPanelWidth, maximizedWidth, checks }, null, 2),
+    JSON.stringify(
+      { geometry, leftWidth, initialPanelWidth, maximizedWidth, scrollBefore, scrollAfter, checks },
+      null,
+      2,
+    ),
   )
 }
 
@@ -3077,6 +3156,13 @@ async function run() {
                           bottomInset: getComputedStyle(conversation).paddingBottom,
                         }
                       : undefined,
+                    savedReading: window.controlsWorkspaceScrollBefore,
+                    restoredReading: window.controlsWorkspaceScrollAfter,
+                    awayFromEnd: [...document.querySelectorAll('button')].some(
+                      (button) =>
+                        button.getAttribute('aria-label') === 'Scroll to latest message' &&
+                        button.getClientRects().length > 0,
+                    ),
                     composer: composer
                       ? {
                           position: getComputedStyle(composer).position,

@@ -314,6 +314,7 @@ export function collectAsyncQuestions(
         workspace: owner.workspace,
       }
       if (question.requestId !== asyncQuestionRequestId(source)) continue
+      if (questions.has(question.requestId)) continue
       questions.set(question.requestId, {
         event: stampRecoveryEvent(stored, snapshot.transport.id),
         source,

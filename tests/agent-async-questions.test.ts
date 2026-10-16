@@ -404,6 +404,61 @@ describe('canonical asynchronous native questions', () => {
     expect(record.state).toBe('responding')
   })
 
+  it.each(
+    (['responding', 'answered', 'dismissed'] as const).flatMap((state) =>
+      [false, true].map((reverse) => ({ state, reverse })),
+    ),
+  )(
+    'retains the first completed item source, payload and $state claim after a duplicate (reverse=$reverse)',
+    ({ state, reverse }) => {
+      const source = originalSource()
+      const original = questionEvent(source)
+      const duplicateSource = { ...source, eventId: 'source-transport:wire:9:0' }
+      expect(asyncQuestionRequestId(duplicateSource)).toBe(asyncQuestionRequestId(source))
+      const duplicate = questionEvent(duplicateSource)
+      const repeated = {
+        ...duplicate,
+        revision: state === 'responding' ? 3 : 4,
+        outputCursor: 9,
+        event: {
+          ...duplicate.event,
+          questions: [{ id: 'question-1', question: 'Changed duplicate payload', isOther: true }],
+        },
+      }
+      const events = [
+        original,
+        ...(state === 'responding'
+          ? []
+          : [
+              resolution(
+                source,
+                state,
+                state === 'dismissed'
+                  ? { transportId: 'destination-transport', sequence: 1 }
+                  : undefined,
+              ),
+            ]),
+        repeated,
+      ]
+      const input = replyInput(source, { written: state !== 'responding' })
+      const sourceLedger = {
+        ...snapshot(source, source.transportId, [owner(source)], events),
+        outputCursor: 9,
+      }
+      const snapshots = [sourceLedger, destinationSnapshot(source, [input])]
+      const records = collectAsyncQuestions(reverse ? snapshots.reverse() : snapshots)
+      const record = records.get(asyncQuestionRequestId(source))!
+      expect(records.size).toBe(1)
+      expect(record.state).toBe(state)
+      expect(record.source).toEqual(source)
+      expect(record.event.questions).toEqual(original.event.questions)
+      expect(record.event.nativeRecovery?.eventId).toBe(source.eventId)
+      expect(record.reply?.binding.source).toEqual(source)
+      expect(record.reply?.input).toEqual(input)
+      expect(record.reply?.transportId).toBe('destination-transport')
+    },
+  )
+
   it.each([false, true])(
     'restores an answered question independently of journal traversal order (reverse=%s)',
     (reverse) => {

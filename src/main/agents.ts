@@ -2815,6 +2815,34 @@ export class Agents {
                 ),
         }).pipe(
           Effect.catch((error) =>
+            Effect.gen(
+              function* (this: Agents) {
+                if (error.operation !== 'restore-snapshot' || error.reason !== 'uncertain')
+                  return yield* error
+                if (!current()) return yield* changed()
+                const refreshed = yield* this.nativeRecovery!.readTransport(snapshot.transport.id)
+                if (
+                  !isDeepStrictEqual(refreshed.transport, snapshot.transport) ||
+                  !isDeepStrictEqual(
+                    refreshed.records.slice(0, snapshot.records.length),
+                    snapshot.records,
+                  )
+                )
+                  return yield* error
+                if (!current()) return yield* changed()
+                // This exact rejection precedes controller registration and attachment.
+                // Re-read once; changed ownership or another stale cutoff remains blocked.
+                yield* Effect.tryPromise({
+                  try: () => this.restoreNativeTransport(refreshed),
+                  catch: (cause) =>
+                    cause instanceof NativeRecoveryError
+                      ? cause
+                      : this.recoveryError('restore', 'Native transport recovery failed.', cause),
+                })
+              }.bind(this),
+            ),
+          ),
+          Effect.catch((error) =>
             Effect.sync(() => {
               const failed = this.failedFreshProviders.get(snapshot.transport.id)
               if (failed)

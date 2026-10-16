@@ -539,7 +539,7 @@ export class DurableRemoteChannel extends Duplex {
           stored.records.length !== options.snapshot.records.length
         )
           return yield* this.recoveryError(
-            'restore',
+            'restore-snapshot',
             'uncertain',
             'Recorded native transport changed after its recovery snapshot was read.',
           )

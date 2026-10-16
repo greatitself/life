@@ -53,3 +53,4 @@ Recovered Studio planners restore their active planning stage after native owner
 Recovered idle Codex connections recognize deliberate retirement and confirmed native exit, preserving known session ownership during source reload. Unexpected disconnections and unconfirmed exits continue to block replacement.
 
 Changed Studio cache rows wait for their exact current native owner and projection proof before replacing acknowledged bytes. A crash after a source commit preserves the compiled revision while retaining the existing built-in-interface safety fallback.
+Recovery refreshes one stale pre-attachment journal cutoff while preserving the original transport, controller, and exact journal prefix. Repeated changes, ownership changes, and uncertain native attachment remain blocked.

@@ -31,6 +31,8 @@ import type {
   NativeRecoveryActionRequest,
 } from '../src/shared/types'
 
+const originalDurableOpen = DurableRemoteChannel.open
+
 const generateTitle = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../src/main/provider-titles', () => ({ generateProviderTitle: generateTitle }))
 vi.mock('../src/main/studio-context', async (original) => {
@@ -3455,6 +3457,83 @@ describe('Agents native recovery boundaries', () => {
           await second
           held.mockRestore()
         }
+      })
+    },
+  )
+
+  it.each(['codex', 'claude'] as const)(
+    'refreshes one stale %s attachment cutoff while preserving the original permission and transport',
+    async (provider) => {
+      await withFixture(provider, async (fixture) => {
+        await admitOriginalPrompt(fixture)
+        await appendMessages(fixture, [permission(provider)])
+        const before = await run(fixture.store.readTransport(fixture.transport.id))
+        fixture.open.mockImplementationOnce(async (...args) => {
+          await run(
+            fixture.store.appendOutputs(fixture.transport.id, [
+              { type: 'stderr', cursor: before.outputCursor + 1, data: encoded('checkpoint race') },
+            ]),
+          )
+          return originalDurableOpen(...args)
+        })
+        const recovered = await fixture.agents.recover({ consumers: [consumer()] })
+        expect(recovered.owners[0]).toMatchObject({
+          status: 'running',
+          remoteId: nativeThread,
+          pending: [{ requestId: localRequestId(provider) }],
+        })
+        expect(fixture.open).toHaveBeenCalledTimes(2)
+        expect(fixture.attachments).toHaveLength(1)
+        expect(fixture.attachments[0].nativeWrites).toEqual([])
+        expect(fixture.attachments[0].rawWrites).toEqual([])
+        const after = await run(fixture.store.readTransport(fixture.transport.id))
+        expect(after.transport).toEqual(before.transport)
+        expect(after.inputs).toEqual(before.inputs)
+        expect(after.records.slice(0, before.records.length)).toEqual(before.records)
+        expect(fixture.ssh.channel).not.toHaveBeenCalled()
+        expect(fixture.ssh.exec).not.toHaveBeenCalled()
+      })
+    },
+  )
+
+  it.each(['repeated-change', 'changed-controller', 'ownership-error'] as const)(
+    'keeps native recovery unknown after %s instead of admitting a replacement',
+    async (outcome) => {
+      await withFixture('claude', async (fixture) => {
+        await admitOriginalPrompt(fixture)
+        await appendMessages(fixture, [permission('claude')])
+        fixture.open.mockImplementation(async (...args) => {
+          if (outcome === 'ownership-error')
+            throw new NativeRecoveryError({
+              operation: 'restore',
+              path: fixture.transport.id,
+              reason: 'ownership',
+              message: 'The original transport ownership changed.',
+            })
+          const before = await run(fixture.store.readTransport(fixture.transport.id))
+          if (outcome === 'changed-controller')
+            await run(
+              fixture.store.updateTransport(fixture.transport.id, {
+                controller: {
+                  id: 'another-controller',
+                  epoch: before.transport.controller.epoch + 1,
+                },
+              }),
+            )
+          else
+            await run(
+              fixture.store.appendOutputs(fixture.transport.id, [
+                { type: 'stderr', cursor: before.outputCursor + 1, data: encoded('another race') },
+              ]),
+            )
+          return originalDurableOpen(...args)
+        })
+        const recovered = await fixture.agents.recover({ consumers: [consumer()] })
+        expect(recovered.owners[0]).toMatchObject({ status: 'unknown', pending: [] })
+        expect(fixture.open).toHaveBeenCalledTimes(outcome === 'repeated-change' ? 2 : 1)
+        expect(fixture.attachments).toEqual([])
+        expect(fixture.ssh.channel).not.toHaveBeenCalled()
+        expect(fixture.ssh.exec).not.toHaveBeenCalled()
       })
     },
   )

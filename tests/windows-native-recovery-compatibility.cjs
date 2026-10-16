@@ -1263,17 +1263,29 @@ async function blockedMainWorkflow(caseInfo, fixture) {
   const channelBaseline = { ...fixture.nativeChannels }
   const before = await preserved(caseInfo)
   const namespacesBefore = await protectedInventory(caseInfo.userData)
-  let current
+  let current, failure
+  const stage = async (operation) => {
+    phase = `protected case ${caseInfo.name}: ${operation}`
+    await json(join(output, `${caseInfo.name}-progress.json`), {
+      phase,
+      at: new Date().toISOString(),
+      mainLogs: current?.logs,
+      rendererErrors: current?.rendererErrors,
+    })
+  }
   try {
+    await stage('launch')
     current = await launch(caseInfo.userData, fixture, caseInfo.name)
-    await connect(current.page, fixture)
+    await stage('connect')
+    await within(() => connect(current.page, fixture), `${caseInfo.name}: connect`)
     const denials = {}
-    for (const operation of ['agent', 'history', 'source', 'native-action'])
-      denials[operation] = await expectRejected(
-        current.page,
-        operation,
+    for (const operation of ['agent', 'history', 'source', 'native-action']) {
+      await stage(operation)
+      denials[operation] = await within(
+        () => expectRejected(current.page, operation, `${caseInfo.name}: ${operation}`),
         `${caseInfo.name}: ${operation}`,
       )
+    }
     assert.equal(fixture.messages.length, baseline, `${caseInfo.name}: no native provider messages`)
     assert.deepEqual(
       fixture.nativeChannels,
@@ -1281,8 +1293,40 @@ async function blockedMainWorkflow(caseInfo, fixture) {
       `${caseInfo.name}: no native provider channel was launched`,
     )
     return { name: caseInfo.name, denials, preserved: before }
+  } catch (error) {
+    failure = error
+    await json(join(output, `${caseInfo.name}-failure.json`), {
+      phase,
+      error: String(error.stack || error),
+      mainLogs: current?.logs,
+      rendererErrors: current?.rendererErrors,
+    })
+    throw error
   } finally {
-    await current?.application.close()
+    await stage('native close')
+    if (current) {
+      try {
+        await within(() => current.application.close(), `${caseInfo.name}: native close`, 30000)
+      } catch (error) {
+        const child = current.application.process()
+        const forced = child.exitCode === null && child.signalCode === null
+        if (forced) child.kill('SIGKILL')
+        await json(join(output, `${caseInfo.name}-failed-cleanup.json`), {
+          error: String(error.stack || error),
+          originalError: failure && String(failure.stack || failure),
+          mainLogs: current.logs,
+          rendererErrors: current.rendererErrors,
+          pid: child.pid,
+          forcedOwnMain: forced,
+          nativeProtocolExitConfirmed: false,
+          reason: 'Failure-only cleanup of this private fixture; native close remains failed',
+        })
+        throw new AggregateError(
+          failure ? [failure, error] : [error],
+          `${caseInfo.name}: native close failed; forced cleanup cannot pass compatibility`,
+        )
+      }
+    }
     assert.deepEqual(
       await preserved(caseInfo),
       before,

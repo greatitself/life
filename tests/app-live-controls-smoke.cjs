@@ -248,6 +248,9 @@ async function asyncQuestionChecks(page, checks, settle) {
   const authored = busySteer.clientRecovery.userMessage
   assert.equal(authored.text, busyPrompt)
   assert.equal(authored.submission, 'steering')
+  await page
+    .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+    .waitFor({ state: 'visible' })
   await select('Thread Beta')
   const betaAfterSwitch = 'Second thread edits while the first answer is being acknowledged.'
   await composer.fill(betaAfterSwitch)
@@ -260,13 +263,15 @@ async function asyncQuestionChecks(page, checks, settle) {
     })
     window.controlsTest.emit('thread-a', 'complete', { status: 'completed' })
   })
-  await page.waitForFunction(() => {
-    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
-    return !thread.busy && thread.turnStatus === 'completed'
-  })
-  // Saved history intentionally omits live pending requests: only the native
-  // owner can restore those controls. Check the mounted App, not its cache.
+  // Saved history is a recoverable archival projection, not the live provider
+  // owner. Verify that the actual App accepts completion and retains the question.
   await select('Thread Alpha')
+  await page
+    .getByText('The original run completed before the answer acknowledgment.', { exact: true })
+    .waitFor()
+  await page
+    .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+    .waitFor({ state: 'hidden' })
   await panel.getByRole('heading', { name: busyQuestion, exact: true }).waitFor()
   assert.equal(await panel.getAttribute('aria-busy'), 'true')
   assert.equal(
@@ -2415,6 +2420,44 @@ async function run() {
           browserErrors: errors,
           checks,
           text: page ? (await page.locator('body').innerText()).slice(0, 10000) : '',
+          asyncQuestionState:
+            page && (asyncQuestions || fluidity)
+              ? await page.evaluate(() => ({
+                  activeThreadId: localStorage.getItem('life.active-thread.v1'),
+                  threads: window.controlsTest
+                    .stored()
+                    .filter((thread) => ['thread-a', 'thread-b'].includes(thread.id))
+                    .map((thread) => ({
+                      id: thread.id,
+                      busy: thread.busy,
+                      turn: thread.turn,
+                      turnStatus: thread.turnStatus,
+                      agentStatus: thread.agentStatus,
+                      pending: thread.pending,
+                      messageCount: thread.messages.length,
+                      lastMessages: thread.messages.slice(-8).map((message) => ({
+                        id: message.id,
+                        role: message.role,
+                        kind: message.kind,
+                        turn: message.turn,
+                        text: message.text?.slice(0, 300),
+                        status: message.status,
+                        finishStatus: message.finishStatus,
+                      })),
+                    })),
+                  alphaNeedsInput: document
+                    .querySelector('[data-thread-row="thread-a"]')
+                    ?.closest('.thread-card-shell')
+                    ?.getAttribute('data-needs-input'),
+                  question: document.querySelector('.pending-question-panel')?.textContent,
+                  visibleStopButtons: [...document.querySelectorAll('button')].filter(
+                    (button) =>
+                      button.getAttribute('aria-label') ===
+                        'Stop agent and pause queued messages' &&
+                      button.getClientRects().length > 0,
+                  ).length,
+                }))
+              : undefined,
         },
         null,
         2,

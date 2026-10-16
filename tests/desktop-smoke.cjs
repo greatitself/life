@@ -1150,16 +1150,45 @@ export function activityLabel(activity: ThreadActivity): string {
           .waitFor()
         await page.getByRole('button', { name: 'Allow once', exact: true }).click()
         await waitForSend()
+        const questionBaseline = (await fixture.log()).length
         await send('question')
-        await page
-          .locator('.approval-card')
-          .getByText('Your input is needed', { exact: true })
-          .waitFor()
-        await page
-          .locator('.approval-card')
-          .getByLabel('Which language?')
-          .selectOption('TypeScript')
-        await page.getByRole('button', { name: 'Send answers', exact: true }).click()
+        const questionPanel = page.getByRole('region', { name: 'Agent questions', exact: true })
+        await questionPanel.getByText('Your input is needed', { exact: true }).waitFor()
+        await questionPanel.getByRole('heading', { name: 'Which language?', exact: true }).waitFor()
+        await questionPanel.getByText('Typed JavaScript', { exact: true }).waitFor()
+        // The final single-choice card submits after 200 ms; a second button
+        // click would race the native response and the panel disappearing.
+        await questionPanel
+          .getByRole('radio', { name: 'TypeScript Typed JavaScript', exact: true })
+          .check()
+        let questionResponses
+        await waitUntil(async () => {
+          questionResponses = (await fixture.log())
+            .slice(questionBaseline)
+            .filter((entry) => entry.provider === provider)
+            .map((entry) =>
+              provider === 'codex' ? entry.message?.result : entry.message?.response?.response,
+            )
+            .filter((response) => response?.answers || response?.updatedInput?.answers)
+          return questionResponses.length > 0
+        }, `${provider} receives the automatically submitted native question answer`)
+        assert.deepEqual(questionResponses, [
+          provider === 'codex'
+            ? { answers: { language: { answers: ['TypeScript'] } } }
+            : {
+                behavior: 'allow',
+                updatedInput: {
+                  questions: [
+                    {
+                      question: 'Which language?',
+                      header: 'Language',
+                      options: [{ label: 'TypeScript', description: 'Typed JavaScript' }],
+                    },
+                  ],
+                  answers: { 'Which language?': 'TypeScript' },
+                },
+              },
+        ])
         await waitForSend()
         const markerConfig = await configuration()
         const markerSource = await sourceCode()

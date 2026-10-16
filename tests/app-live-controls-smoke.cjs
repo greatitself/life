@@ -262,17 +262,34 @@ async function asyncQuestionChecks(page, checks, settle) {
   })
   await page.waitForFunction(() => {
     const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
-    return (
-      !thread.busy &&
-      thread.pending.some(
-        (event) => event.requestId === 'codex-async:remote-thread-a:busy-question',
-      )
-    )
+    return !thread.busy && thread.turnStatus === 'completed'
   })
+  // Saved history intentionally omits live pending requests: only the native
+  // owner can restore those controls. Check the mounted App, not its cache.
+  await select('Thread Alpha')
+  await panel.getByRole('heading', { name: busyQuestion, exact: true }).waitFor()
+  assert.equal(await panel.getAttribute('aria-busy'), 'true')
+  assert.equal(
+    await panel.getByRole('textbox', { name: busyQuestion, exact: true }).inputValue(),
+    busyAnswer,
+  )
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+      .count(),
+    0,
+  )
+  await select('Thread Beta')
+  assert.equal(await composer.inputValue(), betaAfterSwitch)
   await page.evaluate(() => window.controlsTest.releaseSteering())
   await page.waitForFunction((id) => {
     const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
-    return !thread.pending.length && thread.messages.some((message) => message.id === id)
+    const row = document.querySelector('[data-thread-row="thread-a"]')
+    return (
+      Boolean(row) &&
+      row?.closest('.thread-card-shell')?.getAttribute('data-needs-input') !== 'true' &&
+      thread.messages.some((message) => message.id === id)
+    )
   }, authored.id)
   const recoveredAnswer = await page.evaluate((id) => {
     const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')

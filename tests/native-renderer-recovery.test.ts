@@ -689,7 +689,7 @@ describe('renderer admission of durable native events', () => {
       expect(copyConversationSourceJson(answered)).toMatchObject({
         snoozedAt: 200,
         snoozedUntil: 900,
-        messages: raw.messages,
+        messages: JSON.parse(JSON.stringify(raw.messages)),
       })
     },
   )

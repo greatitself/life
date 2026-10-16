@@ -21,12 +21,23 @@ async function asyncQuestionChecks(page, checks, settle) {
     await page.getByRole('button', { name: new RegExp('^' + title + ',') }).click()
     await settle()
   }
+  const flushHistory = async () => {
+    await settle()
+    await page.evaluate(async () => {
+      if (typeof window.__lifeFlushConversationHistory !== 'function')
+        throw new Error('The App must expose its durable history checkpoint boundary')
+      await window.__lifeFlushConversationHistory()
+    })
+  }
   const counters = () =>
     page.evaluate(() => ({
       starts: window.controlsTest.records.starts.length,
       steering: window.controlsTest.records.steering.length,
       responses: window.controlsTest.records.responses.length,
     }))
+  // Fluidity uses a native persistence bridge. Capture its acknowledged
+  // snapshots only after its performance measurements have finished.
+  await page.evaluate(() => window.controlsTest.beginNativeHistoryCapture())
   await page.evaluate(() => {
     window.controlsTest.emit('thread-a', 'complete', { status: 'completed' })
     window.controlsTest.emit('thread-b', 'complete', { status: 'completed' })
@@ -34,6 +45,13 @@ async function asyncQuestionChecks(page, checks, settle) {
   await select('Thread Alpha')
   const ordinaryDraft = '  Keep this unrelated draft.\nDo not send it as an answer.  '
   await composer.fill(ordinaryDraft)
+  await flushHistory()
+  if (fluidity)
+    assert.equal(
+      await page.evaluate(() => window.controlsTest.historyStorageState().source),
+      'native',
+      'Native-save fixtures must verify acknowledged native history rather than the fallback cache',
+    )
   const idleQuestion = 'Which exact directory should I use?'
   const idleAnswer = '  /srv/project/custom directory\nKeep both lines.  '
   const idleBefore = await counters()
@@ -63,6 +81,7 @@ async function asyncQuestionChecks(page, checks, settle) {
     idleBefore.starts,
   )
   await panel.waitFor({ state: 'hidden' })
+  await flushHistory()
   const idleStart = await page.evaluate(() => window.controlsTest.records.starts.at(-1))
   const idlePrompt = 'Question: ' + idleQuestion + '\nAnswer: ' + idleAnswer
   assert.equal(idleStart.sessionId, 'thread-a')
@@ -287,14 +306,17 @@ async function asyncQuestionChecks(page, checks, settle) {
   await select('Thread Beta')
   assert.equal(await composer.inputValue(), betaAfterSwitch)
   await page.evaluate(() => window.controlsTest.releaseSteering())
-  await page.waitForFunction((id) => {
-    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
+  await page.waitForFunction(() => {
     const row = document.querySelector('[data-thread-row="thread-a"]')
     return (
       Boolean(row) &&
-      row?.closest('.thread-card-shell')?.getAttribute('data-needs-input') !== 'true' &&
-      thread.messages.some((message) => message.id === id)
+      row?.closest('.thread-card-shell')?.getAttribute('data-needs-input') !== 'true'
     )
+  })
+  await flushHistory()
+  await page.waitForFunction((id) => {
+    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
+    return thread.messages.some((message) => message.id === id)
   }, authored.id)
   const recoveredAnswer = await page.evaluate((id) => {
     const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
@@ -328,6 +350,16 @@ async function asyncQuestionChecks(page, checks, settle) {
   assert.equal(recoveredAnswer.queue[0].paused, true)
   assert.deepEqual(await counters(), { ...busyBefore, steering: busyBefore.steering + 1 })
   assert.equal(await composer.inputValue(), betaAfterSwitch)
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const drafts = JSON.parse(localStorage.getItem('life.conversation-drafts.v1'))
+      return {
+        alpha: drafts['agents:thread-a'].draft,
+        beta: drafts['agents:thread-b'].draft,
+      }
+    }),
+    { alpha: ordinaryDraft, beta: betaAfterSwitch },
+  )
   await select('Thread Alpha')
   await panel.waitFor({ state: 'hidden' })
   assert.equal(await composer.inputValue(), ordinaryDraft)
@@ -1388,6 +1420,8 @@ async function run() {
         let holdState = false
         let holdWrites = false
         let holdSteering = false
+        let captureNativeHistory = false
+        let capturedNativeHistory
         const states = []
         const writes = []
         const configurations = []
@@ -1857,7 +1891,16 @@ async function run() {
           resolveConfiguration: (index, note) =>
             configurations[index].resolve({ applied: 'live', note }),
           rejectConfiguration: (index, message) => configurations[index].reject(new Error(message)),
-          stored: () => JSON.parse(localStorage.getItem('relay.threads.v1')),
+          beginNativeHistoryCapture: () => {
+            captureNativeHistory = true
+          },
+          historyStorageState: () => ({
+            source: capturedNativeHistory ? 'native' : 'cache',
+            nativeSavedAt: capturedNativeHistory?.savedAt,
+            nativeSaveCount: records.historySaves.length,
+          }),
+          stored: () =>
+            capturedNativeHistory?.threads || JSON.parse(localStorage.getItem('relay.threads.v1')),
           emitConnection: (machine = 'primary', connected = true, profileOverrides = {}) => {
             Object.assign(connection, {
               status: connected ? 'connected' : 'disconnected',
@@ -2016,8 +2059,11 @@ async function run() {
               savedAt: Date.now(),
               threads: structuredClone(savedThreads),
             }),
-            save: async (threads, savedAt) =>
-              records.historySaves.push({ threadCount: threads.length, savedAt }),
+            save: async (threads, savedAt) => {
+              records.historySaves.push({ threadCount: threads.length, savedAt })
+              if (captureNativeHistory)
+                capturedNativeHistory = { threads: structuredClone(threads), savedAt }
+            },
           }
       },
       { historyHydration, providerUtilities, fluidity, asyncQuestions },
@@ -2424,6 +2470,7 @@ async function run() {
             page && (asyncQuestions || fluidity)
               ? await page.evaluate(() => ({
                   activeThreadId: localStorage.getItem('life.active-thread.v1'),
+                  storage: window.controlsTest.historyStorageState(),
                   threads: window.controlsTest
                     .stored()
                     .filter((thread) => ['thread-a', 'thread-b'].includes(thread.id))

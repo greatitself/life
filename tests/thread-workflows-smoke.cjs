@@ -63,6 +63,7 @@ async function run() {
     return Array.prototype.push.apply(checks, items)
   }
   const errors = []
+  const pendingRequests = new Set()
   const cardGeometry = []
   let fontPreview
   let server
@@ -114,20 +115,37 @@ async function run() {
                   ? 'font/ttf'
                   : 'text/html',
       )
-      response.end(
-        file
-          ? await readFile(join(directory, file))
-          : '<!doctype html><link rel="stylesheet" href="/fixture.css"><div id="root"></div><script src="/fixture.js"></script>',
-      )
+      try {
+        response.end(
+          file
+            ? await readFile(join(directory, file))
+            : '<!doctype html><link rel="stylesheet" href="/fixture.css"><div id="root"></div><script src="/fixture.js"></script>',
+        )
+      } catch {
+        response.statusCode = 404
+        response.end('Fixture asset unavailable')
+      }
     })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     browser = await chromium.launch({ headless: true })
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
     page.on('pageerror', (error) => errors.push(error.message))
+    page.on('request', (request) => pendingRequests.add(request.url()))
+    page.on('requestfinished', (request) => pendingRequests.delete(request.url()))
+    page.on('requestfailed', (request) => pendingRequests.delete(request.url()))
+    const waitForApp = async () => {
+      await page.locator('.app-shell').waitFor({ state: 'visible' })
+      await page
+        .locator('textarea[aria-label="Message your coding agent"]')
+        .waitFor({ state: 'visible' })
+      await page.waitForFunction(
+        () => Boolean(window.controlsTest?.records) && document.fonts.status === 'loaded',
+      )
+    }
     const mock = await appMockSource()
     await page.addInitScript({ content: initialize.replace('MOCK_BRIDGE', '(' + mock + ')') })
     await page.goto(`http://127.0.0.1:${server.address().port}`)
-    await page.waitForLoadState('networkidle')
+    await waitForApp()
     const row = (id) => page.locator(`[data-thread-row="${id}"]`)
     const shell = (id) => row(id).locator('..')
     const stored = () => page.evaluate(() => window.controlsTest.stored())
@@ -320,7 +338,7 @@ async function run() {
     }
     const reload = async () => {
       await page.reload()
-      await page.waitForLoadState('networkidle')
+      await waitForApp()
       if (
         await page.evaluate(() => localStorage.getItem('life.workflow-fixture.offline') === 'true')
       )
@@ -1091,6 +1109,18 @@ async function run() {
       await writeFile(
         join(output, 'v0.12.0-thread-workflows-failure.html'),
         await page.content(),
+      ).catch(() => {})
+      await writeFile(
+        join(output, 'v0.12.0-thread-workflows-failure-network.json'),
+        JSON.stringify(
+          {
+            pendingRequests: [...pendingRequests],
+            errors,
+            fontStatus: await page.evaluate(() => document.fonts.status).catch(() => 'unavailable'),
+          },
+          null,
+          2,
+        ),
       ).catch(() => {})
     }
     throw error

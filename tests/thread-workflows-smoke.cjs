@@ -202,6 +202,8 @@ async function run() {
           titleClipped: Boolean(title && title.scrollWidth > title.clientWidth),
           compactStatusHidden:
             !card.querySelector('.thread-card-compact-status') ||
+            getComputedStyle(card.querySelector('.thread-card-compact-status')).display ===
+              'none' ||
             getComputedStyle(card.querySelector('.thread-card-compact-status')).visibility ===
               'hidden',
           nestedButtons: card.querySelectorAll('button button').length,

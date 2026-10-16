@@ -106,8 +106,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38257,
-      "sha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276"
+      "bytes": 38784,
+      "sha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -143,8 +143,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38257,
-      "sha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276"
+      "bytes": 38784,
+      "sha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -220,6 +220,11 @@
       "path": "tests/active-session-recovery-smoke.cjs",
       "previousSha256": "b4766f499f66224e835eb7aea941ab15fc63eeaf3ec440064603179f042bf88b",
       "reason": "After a SIGKILL following source commit, assert the existing unclean-start safety fallback: built-in interface active, exact compiled revision and private commit preserved, original apply receipt reconciled once, disabled-source reload explicitly unknown, no new compilation or native planner turn. Open and select the original real Studio request before waiting for receipt reconciliation; never auto-enable source to satisfy the fixture."
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "previousSha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276",
+      "reason": "Seed the exact opaque Studio archive once in the replacement document before application code, after the previous document unload flush, rather than overwriting live storage under an old empty history owner. A separate fixture marker forbids reseeding after later loss. Assert exact archive immediately after setup, before every actual Studio crash, and at the unchanged final retention check."
     }
   ]
 }

@@ -392,6 +392,7 @@ class RecoveryHarness {
 
   async setup(name, { studio = false } = {}) {
     this.name = name
+    this.hasStudioArchive = studio
     this.configurationRoot = await mkdtemp(join(tmpdir(), 'life-active-recovery-profile-'))
     this.fixture = await new this.SSHFixture(
       join(this.repository, 'tests/helpers/active-session-recovery-provider.cjs'),
@@ -419,12 +420,19 @@ class RecoveryHarness {
       'the renderer loads the archive seeded before the native process starts',
     )
     if (studio)
-      await this.page.evaluate((sessions) => {
+      await this.page.addInitScript((sessions) => {
+        if (window.top !== window) return
+        const marker = 'life.fixture.opaque-studio-seeded.v1'
+        if (localStorage.getItem(marker) === '1') return
+        // Seed only the replacement document, after the old document's real
+        // unload flush. The marker forbids reseeding after any later loss.
         localStorage.setItem('life.studio.sessions.v1', JSON.stringify(sessions))
         localStorage.removeItem('life.studio.active.v1')
+        localStorage.setItem(marker, '1')
       }, opaqueStudioArchive)
     await this.page.reload()
     await this.page.locator('.app-shell').waitFor()
+    if (studio) await this.assertStudioOpaque()
     await this.observeEvents()
     await this.connect()
     await this.openAgents()
@@ -743,6 +751,7 @@ class RecoveryHarness {
   }
 
   async shutdown(mode, expectedPids, { active = true } = {}) {
+    if (mode === 'crash' && this.hasStudioArchive) await this.assertStudioOpaque()
     const application = this.application
     const native = application.process()
     const started = performance.now()

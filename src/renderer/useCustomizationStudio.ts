@@ -578,16 +578,9 @@ export function useCustomizationStudio(options: StudioOptions) {
             if (!durable || !cursor.snapshotToken || cursor.ownerGeneration === undefined) continue
             if (unchanged) continue
             if (!owner) return waitForProof('missing native owner')
-            // Prior generations remain archived; only the current owner prepares this row.
+            // The current owner prepares the row; its delivered projection may
+            // end on an older registered generation of the same transport.
             if (owner.transportId !== transportId) continue
-            if (
-              owner.snapshotToken !== cursor.snapshotToken ||
-              owner.ownerGeneration !== cursor.ownerGeneration
-            )
-              return waitForProof('owner generation', {
-                generation: cursor.ownerGeneration,
-                revision: cursor.appliedRevision,
-              })
             const persisted = stored?.[transportId]
             const proof = admitted?.get(transportId)
             if (
@@ -613,7 +606,7 @@ export function useCustomizationStudio(options: StudioOptions) {
             if (
               run &&
               (run.partsCursor?.transportId !== transportId ||
-                run.ownerGeneration !== cursor.ownerGeneration)
+                run.ownerGeneration !== owner.ownerGeneration)
             )
               return waitForProof('planner generation', {
                 generation: cursor.ownerGeneration,

@@ -623,7 +623,7 @@ jobs:
         id: unit
         continue-on-error: false
         timeout-minutes: 10
-        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts tests/agents-native-stop-recovery.test.ts tests/agent-native-stop-recovery.test.ts tests/renderer-idle-retirement.test.ts tests/agents-native-recovery-boundaries.test.ts tests/native-recovery-store.test.ts
+        run: npm test -- --maxWorkers=1 tests/durable-channel-recovery.test.ts tests/local-switch-retirement.test.ts tests/durable-remote-channel.test.ts tests/release-baselines.test.ts tests/ordinary-renderer-admission.test.ts tests/agents-pre-admission-stop.test.ts tests/agents-native-stop-recovery.test.ts tests/agent-native-stop-recovery.test.ts tests/renderer-idle-retirement.test.ts tests/agents-native-recovery-boundaries.test.ts tests/native-recovery-store.test.ts tests/agent-native-recovery-studio-proof.test.ts
       - name: Studio focus regression
         id: focus
         continue-on-error: true
@@ -701,7 +701,7 @@ jobs:
         run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
       - name: Verify native recovery boundary regressions
         if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail' || matrix.suite == 'studio-source'
-        run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts tests/renderer-idle-retirement.test.ts
+        run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts tests/renderer-idle-retirement.test.ts tests/agent-native-recovery-studio-proof.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
       - run: npm run build

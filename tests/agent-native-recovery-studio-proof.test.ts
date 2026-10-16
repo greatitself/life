@@ -288,6 +288,36 @@ function receipt(value: CacheCandidate): NativeRecoveryHistoryReceipt {
 }
 
 describe('Studio native cache prewrite authority across cold reopen', () => {
+  it('prepares an exact delivered historical generation through its newer current native owner', async () => {
+    const f = await fixture()
+    const delivered = await emit(f)
+    const currentOwner = {
+      ...owner(),
+      generation: 5,
+      snapshotToken: 'new-current-native-studio-owner',
+      localTurn: 2,
+    }
+    await run(f.coordinator.updateOwnerEffect(transportId, currentOwner))
+    const prepared = candidate(f, 'historical-delivery-current-owner')
+    prepared.nativeOwner = {
+      ...currentOwner,
+      clientRecovery: prepared.nativeOwner.clientRecovery,
+    }
+    await prewrite(f, prepared, [delivered])
+    f.history.commitPrepared(prepared.prepared, f.storage)
+    const snapshot = await run(f.store.readTransport(transportId))
+    expect(snapshot.transport.owners[0].generation).toBe(5)
+    expect(snapshot.transport.owners[0].snapshotToken).toBe(currentOwner.snapshotToken)
+    expect(f.coordinator.acceptedCursor(snapshot, actualConsumer(f))).toEqual(prepared.cursor)
+    expect(prepared.cursor.ownerGeneration).toBe(4)
+    expect(snapshot.historyPrepares.at(-1)?.owners[0]).toMatchObject({
+      sessionId,
+      ownerGeneration: 4,
+      snapshotToken,
+      throughEventRevision: prepared.cursor.appliedRevision,
+    })
+  })
+
   it('admits actual exact P1 row bytes after a crash before the ordinary cache ACK', async () => {
     const f = await fixture()
     const delivered = await emit(f)

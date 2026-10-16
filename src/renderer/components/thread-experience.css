@@ -331,7 +331,10 @@
   }
 }
 
-.app-shell.life-refined-layout .sidebar .thread-card-project .thread-card-run-status {
+.app-shell.life-refined-layout
+  .sidebar
+  :is(.thread-card-project, .thread-card-status)
+  .thread-card-run-status {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
@@ -348,17 +351,21 @@
 :root[data-theme='light']
   .app-shell.life-refined-layout
   .sidebar
-  .thread-card-project
+  :is(.thread-card-project, .thread-card-status)
   .thread-card-run-status {
   color: #007b9a;
 }
 .app-shell.life-refined-layout
   .sidebar
-  .thread-card-project
+  :is(.thread-card-project, .thread-card-status)
   .thread-card-run-status[data-waiting='true'] {
   color: var(--muted);
 }
-.app-shell.life-refined-layout .sidebar .thread-card-project .thread-card-run-status > span {
+.app-shell.life-refined-layout
+  .sidebar
+  :is(.thread-card-project, .thread-card-status)
+  .thread-card-run-status
+  > span {
   flex: none;
   overflow: visible;
 }

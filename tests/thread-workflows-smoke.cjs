@@ -63,6 +63,7 @@ async function run() {
     return Array.prototype.push.apply(checks, items)
   }
   const errors = []
+  const cardGeometry = []
   let server
   let browser
   let page
@@ -135,6 +136,120 @@ async function run() {
     const action = async (id, name) => {
       await menu(id)
       await page.getByRole('menuitem', { name, exact: true }).click()
+    }
+    const assertCardGeometry = async (id, state, { compact = false, longText = false } = {}) => {
+      await page.waitForFunction(
+        ({ id, state, compact }) => {
+          const card = document
+            .querySelector(`[data-thread-row="${id}"]`)
+            ?.closest('.thread-card-shell')
+          const actions = card?.querySelector('.life-thread-actions')
+          const status = card?.querySelector('.thread-card-status')
+          if (!actions || (!compact && !status)) return false
+          const actionStyle = getComputedStyle(actions)
+          const visibleActions =
+            Number(actionStyle.opacity) >= 0.99 && actionStyle.pointerEvents !== 'none'
+          if (compact) return visibleActions
+          const statusOpacity = Number(getComputedStyle(status).opacity)
+          return state === 'idle'
+            ? Number(actionStyle.opacity) <= 0.01 &&
+                actionStyle.pointerEvents === 'none' &&
+                statusOpacity >= 0.99
+            : visibleActions &&
+                statusOpacity <= 0.01 &&
+                (state !== 'menu' || card.dataset.menuOpen === 'true')
+        },
+        { id, state, compact },
+      )
+      const layout = await shell(id).evaluate((card) => {
+        const bounds = (node) => {
+          if (!node) return undefined
+          const rect = node.getBoundingClientRect()
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+            centerY: rect.top + rect.height / 2,
+          }
+        }
+        const actions = card.querySelector('.life-thread-actions')
+        const project = card.querySelector('.thread-card-heading .thread-card-project')
+        const label = project?.querySelector('.thread-card-project-name')
+        const title = card.querySelector('.thread-card-title')
+        const titleRange = document.createRange()
+        titleRange.selectNodeContents(title)
+        const titleContentRight =
+          title.getBoundingClientRect().right - parseFloat(getComputedStyle(title).paddingRight)
+        const branch = card.querySelector('.thread-card-meta > span:first-of-type')
+        const buttons = [...actions.querySelectorAll('button')]
+        return {
+          row: bounds(card.querySelector('[data-thread-row]')),
+          heading: bounds(card.querySelector('.thread-card-heading')),
+          project: bounds(project),
+          projectLabel: bounds(label),
+          title: bounds(title),
+          titleContentRight: Math.min(titleRange.getBoundingClientRect().right, titleContentRight),
+          branch: bounds(branch),
+          actions: bounds(actions),
+          buttons: buttons.map((button) => ({
+            label: button.getAttribute('aria-label'),
+            ...bounds(button),
+          })),
+          projectClipped: Boolean(label && label.scrollWidth > label.clientWidth),
+          titleClipped: Boolean(title && title.scrollWidth > title.clientWidth),
+          compactStatusHidden:
+            !card.querySelector('.thread-card-compact-status') ||
+            getComputedStyle(card.querySelector('.thread-card-compact-status')).visibility ===
+              'hidden',
+          nestedButtons: card.querySelectorAll('button button').length,
+        }
+      })
+      cardGeometry.push({ id, state, compact, longText, ...layout })
+      const context = JSON.stringify({ id, state, compact, longText, ...layout })
+      assert.equal(layout.nestedButtons, 0, context)
+      assert.ok(layout.buttons[0].label.startsWith('Actions for '), context)
+      for (let index = 1; index < layout.buttons.length; index++)
+        assert.ok(layout.buttons[index - 1].right <= layout.buttons[index].left + 1, context)
+      if (compact) {
+        assert.ok(Math.abs(layout.actions.centerY - layout.row.centerY) <= 1, context)
+        assert.ok(Math.abs(layout.title.centerY - layout.actions.centerY) <= 1, context)
+        assert.ok(layout.titleContentRight <= layout.actions.left + 1, context)
+        assert.equal(layout.compactStatusHidden, true, context)
+        assert.ok(
+          ['Wake thread now', 'Un-settle thread'].includes(layout.buttons.at(-1).label),
+          context,
+        )
+        for (const button of layout.buttons)
+          assert.ok(Math.abs(button.centerY - layout.row.centerY) <= 1, context)
+      } else {
+        assert.ok(Math.abs(layout.heading.height - 20) <= 1, context)
+        assert.ok(Math.abs(layout.project.centerY - layout.heading.centerY) <= 1, context)
+        assert.ok(layout.heading.bottom <= layout.title.top + 1, context)
+        assert.ok(layout.title.bottom <= layout.branch.top + 1, context)
+        if (state !== 'idle') {
+          assert.deepEqual(
+            layout.buttons.slice(1).map((button) => button.label),
+            ['Snooze thread', 'Settle thread'],
+            context,
+          )
+          assert.ok(Math.abs(layout.actions.centerY - layout.heading.centerY) <= 1, context)
+          assert.ok(layout.project.right <= layout.actions.left + 1, context)
+          assert.ok(layout.actions.right <= layout.heading.right + 1, context)
+          for (const button of layout.buttons) {
+            assert.ok(Math.abs(button.height - 20) <= 1, context)
+            assert.ok(Math.abs(button.centerY - layout.project.centerY) <= 1, context)
+          }
+        }
+        if (longText) {
+          assert.equal(layout.projectClipped, true, context)
+          assert.equal(layout.titleClipped, true, context)
+          assert.ok(layout.title.right <= layout.row.right + 1, context)
+          assert.ok(layout.branch.right <= layout.row.right + 1, context)
+        }
+      }
     }
     const assertSnoozePresets = async () => {
       const items = page.locator('[role="menu"]:visible .life-thread-snooze-preset')
@@ -229,6 +344,48 @@ async function run() {
       )
       return
     }
+
+    await composer.focus()
+    await page.mouse.move(1000, 700)
+    await assertCardGeometry('thread-a', 'idle')
+    await shell('thread-a').hover()
+    await assertCardGeometry('thread-a', 'hover')
+    await shell('thread-a').getByRole('button', { name: 'Snooze thread', exact: true }).click()
+    await page.mouse.move(1000, 700)
+    await assertCardGeometry('thread-a', 'menu')
+    await page.keyboard.press('Escape')
+    await composer.focus()
+    await page.mouse.move(1000, 700)
+    await assertCardGeometry('thread-a', 'idle')
+    await shell('thread-a').hover()
+    const originalCardText = await shell('thread-a').evaluate((card) => {
+      const nodes = [
+        card.querySelector('.thread-card-heading .thread-card-project-name'),
+        card.querySelector('.thread-card-title'),
+        card.querySelector('.thread-card-meta > span:first-of-type'),
+      ]
+      const originals = nodes.map((node) => node.textContent)
+      for (const node of nodes)
+        node.textContent = 'Very long project title and branch café 漢字 🧪 '.repeat(20)
+      return originals
+    })
+    try {
+      await assertCardGeometry('thread-a', 'hover', { longText: true })
+    } finally {
+      await shell('thread-a').evaluate((card, originals) => {
+        const nodes = [
+          card.querySelector('.thread-card-heading .thread-card-project-name'),
+          card.querySelector('.thread-card-title'),
+          card.querySelector('.thread-card-meta > span:first-of-type'),
+        ]
+        nodes.forEach((node, index) => {
+          node.textContent = originals[index]
+        })
+      }, originalCardText)
+    }
+    checks.push(
+      'Top-row project, Snooze and rightmost Settle share a 20px center above title/branch; status swaps for actions on hover/open menus, and long labels never overlap controls',
+    )
 
     const arrangementSnapshot = async () => {
       await page.evaluate(() => window.__lifeFlushConversationHistory())
@@ -367,6 +524,8 @@ async function run() {
       await shell('thread-a').evaluate((node) => node.classList.contains('thread-card-compact')),
       true,
     )
+    await shell('thread-a').hover()
+    await assertCardGeometry('thread-a', 'hover', { compact: true })
     await page.getByRole('button', { name: 'New thread', exact: true }).click()
     await page.waitForFunction(
       () => document.querySelector('[data-thread-row="thread-a"]') === null,
@@ -405,6 +564,8 @@ async function run() {
       await shell('thread-a').evaluate((node) => node.classList.contains('thread-card-compact')),
       true,
     )
+    await shell('thread-a').hover()
+    await assertCardGeometry('thread-a', 'hover', { compact: true })
     await wake('thread-a')
     await page.getByRole('button', { name: 'Undo', exact: true }).click()
     await waitStored('thread-a', 'snoozedUntil', hourSaved.snoozedUntil)
@@ -803,6 +964,7 @@ async function run() {
       checks,
       count: checks.length,
       browserErrors: errors,
+      cardGeometry,
       records: await page.evaluate(() => window.controlsTest.records),
     }
     await writeFile(

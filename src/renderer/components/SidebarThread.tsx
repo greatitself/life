@@ -184,6 +184,105 @@ export const SidebarThread = memo(function SidebarThread({
       else onAction(thread, 'wake')
     } else onArrange?.(thread, patch)
   }
+  const project = (
+    <span className="thread-card-project" aria-hidden="true">
+      <ThreadBadge thread={thread} />
+      {!compact ? <span className="thread-card-project-name">{projectName}</span> : null}
+      {hasDraft && !active ? (
+        <SquarePen size={13} className="life-thread-draft" aria-label="Unsent draft" />
+      ) : null}
+      {thread.pinnedAt ? <Pin size={12} className="life-thread-pin" aria-label="Pinned" /> : null}
+    </span>
+  )
+  const actions =
+    onArrange || onAction ? (
+      <div className="life-thread-actions" role="group" aria-label={`Arrange ${thread.title}`}>
+        {onAction ? (
+          <ThreadActionsMenu
+            thread={thread}
+            onAction={onAction}
+            open={menuOpen}
+            onOpenChange={(open) => {
+              setMenuOpen(open)
+              if (open) setHovered(false)
+            }}
+            onCloseAutoFocus={(event) => {
+              if (!returnToRow.current) return
+              returnToRow.current = false
+              event.preventDefault()
+              window.requestAnimationFrame(() => row.current?.focus({ preventScroll: true }))
+            }}
+          />
+        ) : null}
+        {snoozed ? (
+          <button
+            type="button"
+            className="life-thread-settle life-thread-wake"
+            aria-label="Wake thread now"
+            title="Wake now"
+            onClick={() => arrange({ snoozedUntil: undefined })}
+          >
+            <AlarmClockOff size={14} aria-hidden="true" />
+            <span>Wake</span>
+          </button>
+        ) : !settled && !thread.archivedAt ? (
+          <DropdownMenu.Root
+            open={snoozeOpen}
+            onOpenChange={(open) => {
+              setSnoozeOpen(open)
+              if (open) setHovered(false)
+            }}
+          >
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                className="life-thread-action-icon life-thread-snooze"
+                aria-label="Snooze thread"
+                title={
+                  canSnooze
+                    ? 'Snooze thread'
+                    : 'Resolve pending responses or queued work before snoozing'
+                }
+                disabled={!canSnooze}
+              >
+                <Clock size={12} />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className="life-thread-menu life-thread-snooze-menu"
+                sideOffset={6}
+                align="end"
+                collisionPadding={12}
+              >
+                <ThreadSnoozeMenuItems
+                  onSnooze={(until) => arrange({ snoozedUntil: until, settled: false })}
+                />
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        ) : null}
+        {!thread.archivedAt && !snoozed ? (
+          <button
+            type="button"
+            className="life-thread-settle"
+            aria-label={settled ? 'Un-settle thread' : 'Settle thread'}
+            title={
+              settled
+                ? 'Move back to active threads'
+                : canSettle
+                  ? 'Move finished work to Settled'
+                  : 'Finish running work and resolve pending responses before settling'
+            }
+            disabled={!settled && !canSettle}
+            onClick={() => arrange({ settled: !settled, snoozedUntil: undefined })}
+          >
+            {settled ? <Undo2 size={14} /> : <Check size={14} />}
+            <span>{settled ? 'Un-settle' : 'Settle'}</span>
+          </button>
+        ) : null}
+      </div>
+    ) : null
   return (
     <div
       className={`thread-card-shell ${active ? 'active' : ''} ${compact ? 'thread-card-compact' : ''}`}
@@ -231,17 +330,7 @@ export const SidebarThread = memo(function SidebarThread({
             onFocus={() => setHovered(true)}
             onBlur={() => setHovered(false)}
           >
-            <span className="thread-card-project" aria-hidden="true">
-              <ThreadBadge thread={thread} />
-              {!compact ? <span>{projectName}</span> : null}
-              {hasDraft && !active ? (
-                <SquarePen size={13} className="life-thread-draft" aria-label="Unsent draft" />
-              ) : null}
-              {thread.pinnedAt ? (
-                <Pin size={12} className="life-thread-pin" aria-label="Pinned" />
-              ) : null}
-              {!compact ? statusElement : null}
-            </span>
+            {compact ? project : <span className="thread-card-heading-space" aria-hidden="true" />}
             <span className="thread-card-title">{thread.title}</span>
             {compact ? (
               <span className="thread-card-compact-status" aria-hidden="true">
@@ -311,94 +400,19 @@ export const SidebarThread = memo(function SidebarThread({
           </HoverCard.Content>
         </HoverCard.Portal>
       </HoverCard.Root>
-      {onArrange || onAction ? (
-        <div className="life-thread-actions" role="group" aria-label={`Arrange ${thread.title}`}>
-          {snoozed ? (
-            <button
-              type="button"
-              className="life-thread-settle life-thread-wake"
-              aria-label="Wake thread now"
-              title="Wake now"
-              onClick={() => arrange({ snoozedUntil: undefined })}
-            >
-              <AlarmClockOff size={14} aria-hidden="true" />
-              <span>Wake</span>
-            </button>
-          ) : !settled && !thread.archivedAt ? (
-            <DropdownMenu.Root
-              open={snoozeOpen}
-              onOpenChange={(open) => {
-                setSnoozeOpen(open)
-                if (open) setHovered(false)
-              }}
-            >
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  className="life-thread-action-icon"
-                  aria-label="Snooze thread"
-                  title={
-                    canSnooze
-                      ? 'Snooze thread'
-                      : 'Resolve pending responses or queued work before snoozing'
-                  }
-                  disabled={!canSnooze}
-                >
-                  <Clock size={14} />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  className="life-thread-menu life-thread-snooze-menu"
-                  sideOffset={6}
-                  align="end"
-                  collisionPadding={12}
-                >
-                  <ThreadSnoozeMenuItems
-                    onSnooze={(until) => arrange({ snoozedUntil: until, settled: false })}
-                  />
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          ) : null}
-          {!thread.archivedAt && !snoozed ? (
-            <button
-              type="button"
-              className="life-thread-settle"
-              aria-label={settled ? 'Un-settle thread' : 'Settle thread'}
-              title={
-                settled
-                  ? 'Move back to active threads'
-                  : canSettle
-                    ? 'Move finished work to Settled'
-                    : 'Finish running work and resolve pending responses before settling'
-              }
-              disabled={!settled && !canSettle}
-              onClick={() => arrange({ settled: !settled, snoozedUntil: undefined })}
-            >
-              {settled ? <Undo2 size={14} /> : <Check size={14} />}
-              <span>{settled ? 'Un-settle' : 'Settle'}</span>
-            </button>
-          ) : null}
-          {onAction ? (
-            <ThreadActionsMenu
-              thread={thread}
-              onAction={onAction}
-              open={menuOpen}
-              onOpenChange={(open) => {
-                setMenuOpen(open)
-                if (open) setHovered(false)
-              }}
-              onCloseAutoFocus={(event) => {
-                if (!returnToRow.current) return
-                returnToRow.current = false
-                event.preventDefault()
-                window.requestAnimationFrame(() => row.current?.focus({ preventScroll: true }))
-              }}
-            />
-          ) : null}
+      {!compact ? (
+        <div className="thread-card-heading">
+          {project}
+          <div className="thread-card-status-slot">
+            <span className="thread-card-status" aria-hidden="true">
+              {statusElement}
+            </span>
+            {actions}
+          </div>
         </div>
-      ) : null}
+      ) : (
+        actions
+      )}
     </div>
   )
 })

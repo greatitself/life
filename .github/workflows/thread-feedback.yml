@@ -154,39 +154,56 @@ jobs:
       - run: npx playwright install chromium --with-deps
       - uses: actions/checkout@v4
         with:
-          ref: v0.13.1
+          ref: 05c07f0f426ec14fdb9923c5edf949aa33aa7e44
           path: .performance-baseline
-      - name: Require identical fixtures and dependencies before sharing the install
+      - name: Record the selector overlay and require identical fixtures and dependencies
         run: |
           cmp package-lock.json .performance-baseline/package-lock.json
-          cmp tests/sidebar-history-performance.cjs .performance-baseline/tests/sidebar-history-performance.cjs
           cmp tests/helpers/browser-build.cjs .performance-baseline/tests/helpers/browser-build.cjs
+          git -C .performance-baseline diff --exit-code HEAD -- src
+          test -z "$(git -C .performance-baseline status --porcelain --untracked-files=all -- src)"
           ln -s "$GITHUB_WORKSPACE/node_modules" .performance-baseline/node_modules
           mkdir -p output/thread-feedback
           node <<'NODE'
+          const assert = require('node:assert/strict')
           const fs = require('node:fs')
           const crypto = require('node:crypto')
           const { execFileSync } = require('node:child_process')
           const commit = cwd => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
           const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+          const expectedBaseline = '05c07f0f426ec14fdb9923c5edf949aa33aa7e44'
+          assert.equal(commit('.performance-baseline'), expectedBaseline)
+          const fixture = 'tests/sidebar-history-performance.cjs'
+          const baselineFixture = '.performance-baseline/' + fixture
+          const originalBaselineFixtureSha256 = hash(baselineFixture)
+          fs.copyFileSync(fixture, baselineFixture)
+          assert.equal(hash(baselineFixture), hash(fixture))
           const proof = {
-            candidate: commit('.'), baseline: commit('.performance-baseline'), baselineTag: 'v0.13.1',
-            fixtureSha256: hash('tests/sidebar-history-performance.cjs'),
+            candidate: commit('.'), baseline: commit('.performance-baseline'), baselineRef: expectedBaseline,
+            baselineSourceTree: execFileSync('git', ['rev-parse', 'HEAD:src'], { cwd: '.performance-baseline', encoding: 'utf8' }).trim(),
+            fixtureSha256: hash(fixture),
+            fixtureOverlay: {
+              path: fixture, originalBaselineSha256: originalBaselineFixtureSha256,
+              appliedBaselineSha256: hash(baselineFixture), candidateSha256: hash(fixture),
+              reason: 'Identical card-shell status selectors for the old and new DOM; the workload, assertions and production source are unchanged',
+            },
             helperSha256: hash('tests/helpers/browser-build.cjs'), lockfileSha256: hash('package-lock.json'),
-            order: ['v0131-a', 'candidate-a', 'candidate-b', 'v0131-b'],
+            order: ['before-a', 'candidate-a', 'candidate-b', 'before-b'],
             scope: 'Production sidebar fixture with deterministic histories; no authenticated upstream provider use',
           }
           fs.writeFileSync('output/thread-feedback/sidebar-provenance.json', JSON.stringify(proof, null, 2) + '\n')
           NODE
+          cmp tests/sidebar-history-performance.cjs .performance-baseline/tests/sidebar-history-performance.cjs
+          git -C .performance-baseline diff --exit-code HEAD -- src
       - name: Measure complete source trees in baseline-candidate-candidate-baseline order
         run: |
           # Labels containing "baseline" select an unrelated historical overlay
           # inside this fixture. These labels retain the current assertions and
-          # measure the entire checked-out v0.13.1 or candidate source tree.
-          (cd .performance-baseline && node tests/sidebar-history-performance.cjs v0131-a) 2>&1 | tee output/thread-feedback/sidebar-v0131-a.log
+          # measure the complete pinned pre-alignment or candidate source tree.
+          (cd .performance-baseline && node tests/sidebar-history-performance.cjs before-a) 2>&1 | tee output/thread-feedback/sidebar-before-a.log
           node tests/sidebar-history-performance.cjs candidate-a 2>&1 | tee output/thread-feedback/sidebar-candidate-a.log
           node tests/sidebar-history-performance.cjs candidate-b 2>&1 | tee output/thread-feedback/sidebar-candidate-b.log
-          (cd .performance-baseline && node tests/sidebar-history-performance.cjs v0131-b) 2>&1 | tee output/thread-feedback/sidebar-v0131-b.log
+          (cd .performance-baseline && node tests/sidebar-history-performance.cjs before-b) 2>&1 | tee output/thread-feedback/sidebar-before-b.log
       - name: Report both runs without imposing a timing threshold
         run: |
           node <<'NODE'
@@ -194,13 +211,14 @@ jobs:
           const path = require('node:path')
           const provenance = JSON.parse(fs.readFileSync('output/thread-feedback/sidebar-provenance.json'))
           const rows = provenance.order.map(label => {
-            const root = label.startsWith('v0131-') ? '.performance-baseline' : '.'
+            const root = label.startsWith('before-') ? '.performance-baseline' : '.'
             const proof = JSON.parse(fs.readFileSync(path.join(root, 'output/playwright/sidebar-history-performance', label + '.json')))
             return { label, sort: proof.sort, search: proof.search, clock: proof.clock, fixture: proof.fixture }
           })
           fs.writeFileSync('output/thread-feedback/sidebar-comparison.json', JSON.stringify({ provenance, rows }, null, 2) + '\n')
           const lines = [
-            'Same sidebar fixture: v0.13.1 versus candidate, measured sequentially in ABBA order.',
+            'Same sidebar fixture: pinned pre-alignment 05c07f0 versus candidate, measured sequentially in ABBA order.',
+            'Only the disclosed card-shell status selector overlay is applied to the older fixture; both trees run identical fixture bytes with every assertion and workload preserved.',
             '',
             '| Run | Sort median / p95 (ms) | Search median / p95 (ms) |',
             '| --- | --- | --- |',
@@ -211,12 +229,20 @@ jobs:
           ]
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n')
           NODE
+      - name: Require the older production source to remain unchanged
+        if: always()
+        run: |
+          git -C .performance-baseline diff --exit-code HEAD -- src
+          test -z "$(git -C .performance-baseline status --porcelain --untracked-files=all -- src)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: thread-feedback-sidebar-comparison
           include-hidden-files: true
           path: |
+            tests/sidebar-history-performance.cjs
+            tests/helpers/browser-build.cjs
+            .performance-baseline/tests/sidebar-history-performance.cjs
             output/thread-feedback/
             output/playwright/sidebar-history-performance/
             .performance-baseline/output/playwright/sidebar-history-performance/

@@ -24,7 +24,8 @@
     padding-inline: var(--agent-content-inset);
     overscroll-behavior-y: contain;
     overflow-x: hidden;
-    overflow-anchor: none;
+    /* Life keeps native anchoring while skipped turns materialize. */
+    overflow-anchor: auto;
     scrollbar-gutter: stable both-edges;
     scrollbar-width: thin;
     scrollbar-color: rgb(255 255 255 / 8%) transparent;

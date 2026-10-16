@@ -2824,13 +2824,12 @@ export function App() {
             thread.workspace === connection.workspace &&
             thread.gitBranch,
         )
+  const workspacePanelVisible =
+    builtin.enabled('workspace-surfaces') && view === 'workspace' && workspaceOpen
   const workspacePanelMaximized =
-    view === 'workspace' &&
-    workspaceOpen &&
-    panels.rightInline &&
-    workspaceMaximizedKey === workspaceScopeKey
+    workspacePanelVisible && panels.rightInline && workspaceMaximizedKey === workspaceScopeKey
   const workspacePanelCovered =
-    workspacePanelMaximized || (view === 'workspace' && workspaceOpen && !panels.rightInline)
+    workspacePanelVisible && (workspacePanelMaximized || !panels.rightInline)
   const setWorkspacePanelMaximized = useCallback(
     (value: boolean) => setWorkspaceMaximizedKey(value ? workspaceScopeKey : undefined),
     [workspaceScopeKey],
@@ -2844,7 +2843,7 @@ export function App() {
       projectKeys={projectColorKeys}
     >
       <div
-        className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout ${builtin.enabled('collapsed-branding') ? 'life-bottom-brand-layout' : ''} life-header-actions-layout ${view === 'workspace' ? 'life-t3-agents-layout' : ''} ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+        className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout ${builtin.enabled('collapsed-branding') ? 'life-bottom-brand-layout' : ''} life-header-actions-layout ${view === 'workspace' ? 'life-t3-agents-layout' : ''} ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspacePanelVisible || replacement ? 'workspace-hidden' : ''}`}
         data-view={view}
         data-right-panel-maximized={workspacePanelMaximized || undefined}
         data-right-panel-inline={panels.rightInline}
@@ -4016,7 +4015,7 @@ export function App() {
             builtin.enabled('workspace-surfaces') ? (
               <WorkspaceSurfaces
                 key={`${connection.profile?.id || ''}:${connection.workspace || ''}`}
-                open={workspaceOpen && view === 'workspace'}
+                open={workspacePanelVisible}
                 inline={panels.rightInline}
                 maximized={workspacePanelMaximized}
                 onMaximizedChange={setWorkspacePanelMaximized}

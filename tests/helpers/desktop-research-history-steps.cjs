@@ -945,8 +945,9 @@ async function runBuiltinChecks(context) {
     'Re-enabling remounts resize controls',
   )
   if (initialSurfaces) {
-    await page.getByRole('complementary', { name: 'Workspace surfaces', exact: true }).waitFor()
+    await context.workspace()
     await context.surface('Files')
+    await page.locator('#life-workspace-surfaces[aria-label="Workspace surfaces"]').waitFor()
     await context.waitUntil(
       async () => (await page.locator('.surface-tabs').count()) === initialSurfaces,
       'Re-enabling remounts workspace surfaces',

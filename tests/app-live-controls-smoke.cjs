@@ -371,34 +371,43 @@ async function workspacePanelChecks(page, checks, settle) {
     )
   const readingPosition = () =>
     conversation.evaluate((element) => {
+      const geometry = () => ({
+        top: element.scrollTop,
+        height: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        gap: element.scrollHeight - element.clientHeight - element.scrollTop,
+      })
+      const geometryBeforeCapture = geometry()
       const viewport = element.getBoundingClientRect()
       const composer = element
         .closest('.chat-area')
         .querySelector('.life-reference-composer')
         .getBoundingClientRect()
       const bottom = Math.min(viewport.bottom, composer.top)
-      for (const turn of element.querySelectorAll('.thread-timeline-turn')) {
-        const turnBounds = turn.getBoundingClientRect()
-        if (turnBounds.height <= 0 || turnBounds.bottom <= viewport.top || turnBounds.top >= bottom)
-          continue
-        for (const message of turn.querySelectorAll('[data-message-id]')) {
+      // Hit-test only painted content. Reading skipped turn descendants' rects
+      // materializes their placeholders and changes the scroll range.
+      for (let y = viewport.top + 24; y < bottom - 12; y += 24)
+        for (const fraction of [0.5, 0.35, 0.65]) {
+          const hit = element.ownerDocument.elementFromPoint(
+            viewport.left + viewport.width * fraction,
+            y,
+          )
+          const message = hit?.closest('[data-message-id]')
+          if (!message || !element.contains(message)) continue
           const bounds = message.getBoundingClientRect()
           if (bounds.height > 0 && bounds.bottom > viewport.top && bounds.top < bottom)
             return {
-              top: element.scrollTop,
-              height: element.scrollHeight,
-              clientHeight: element.clientHeight,
-              gap: element.scrollHeight - element.clientHeight - element.scrollTop,
+              ...geometry(),
+              geometryBeforeCapture,
               anchorId: message.getAttribute('data-message-id'),
               anchorOffset: bounds.top - viewport.top,
             }
         }
-      }
       throw new Error('The visible conversation must expose a reading anchor')
     })
   await settleConversationLayout()
   await conversation.hover({ position: { x: 100, y: 100 } })
-  await page.mouse.wheel(0, -640)
+  await page.mouse.wheel(0, -1800)
   await page.waitForFunction(() => {
     const element = document.querySelector('.main-workspace[data-agent-workspace] .conversation')
     return element.scrollHeight - element.clientHeight - element.scrollTop > 100
@@ -407,13 +416,18 @@ async function workspacePanelChecks(page, checks, settle) {
   await scrollToEnd.waitFor({ state: 'visible' })
   await settleConversationLayout()
   const scrollBefore = await readingPosition()
+  await page.evaluate((position) => {
+    window.controlsWorkspaceScrollBefore = position
+  }, scrollBefore)
+  for (const key of ['top', 'height', 'clientHeight'])
+    assert.ok(
+      Math.abs(scrollBefore[key] - scrollBefore.geometryBeforeCapture[key]) <= 1,
+      'Capturing the visible reading anchor must preserve conversation ' + key,
+    )
   assert.ok(
     scrollBefore.top > 100 && scrollBefore.gap > 100,
     'The reader must be stably away from the end before switching threads',
   )
-  await page.evaluate((position) => {
-    window.controlsWorkspaceScrollBefore = position
-  }, scrollBefore)
   await selectThread('Thread Beta')
   await picker.waitFor()
   const betaDraft = 'Another exact draft remains owned by Thread Beta.'
@@ -443,6 +457,11 @@ async function workspacePanelChecks(page, checks, settle) {
   }, scrollBefore)
   await scrollToEnd.waitFor({ state: 'visible' })
   const scrollAfter = await readingPosition()
+  for (const key of ['top', 'height', 'clientHeight'])
+    assert.ok(
+      Math.abs(scrollAfter[key] - scrollAfter.geometryBeforeCapture[key]) <= 1,
+      'Reading the restored visible anchor must preserve conversation ' + key,
+    )
   assert.equal(scrollAfter.anchorId, scrollBefore.anchorId)
   assert.ok(Math.abs(scrollAfter.anchorOffset - scrollBefore.anchorOffset) <= 3)
   assert.ok(scrollAfter.gap > 100, 'Restoring a reading anchor must not resume following the end')

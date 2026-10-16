@@ -278,16 +278,44 @@ const MarkdownBody = memo(function MarkdownBody({
   return settled ? settledMarkdown.render(text, render) : render()
 })
 
+const messageClock = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
+const messageDate = new Intl.DateTimeFormat(undefined, { month: 'numeric', day: 'numeric' })
+const messageDateWithYear = new Intl.DateTimeFormat(undefined, {
+  month: 'numeric',
+  day: 'numeric',
+  year: 'numeric',
+})
+
+function messageTimestamp(at: number | undefined) {
+  if (at === undefined || !Number.isFinite(at)) return undefined
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return undefined
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const daysAgo = Math.round((today - day) / 86_400_000)
+  const clock = messageClock.format(date)
+  const label =
+    daysAgo <= 0
+      ? clock
+      : daysAgo === 1
+        ? `yesterday at ${clock}`
+        : `${(date.getFullYear() === now.getFullYear() ? messageDate : messageDateWithYear).format(date)} ${clock}`
+  return { label, dateTime: date.toISOString(), title: date.toLocaleString() }
+}
+
 export const MessageView = memo(function MessageView({
   message,
   provider,
   minimal = false,
   settled = false,
+  agentWorkspace = false,
 }: {
   message: Message
   provider: Provider
   minimal?: boolean
   settled?: boolean
+  agentWorkspace?: boolean
 }) {
   const [rawOpen, setRawOpen] = useState(false)
   const { copied, copy } = useCopy(message.text)
@@ -340,48 +368,23 @@ export const MessageView = memo(function MessageView({
         <span>{message.text}</span>
       </div>
     )
-  return (
-    <article
-      className={`message ${message.role}${message.role === 'user' ? ' life-compact-user-message' : ''}${phase ? ' thread-phased-message' : ''}`}
-      data-message-id={message.id}
-      id={activityAnchor(message.id)}
-      data-phase={message.kind || message.phase}
-      data-subagent={
-        message.role === 'assistant' && (message.agentId || message.parentItemId)
-          ? 'true'
-          : undefined
-      }
-      tabIndex={-1}
-      aria-label={message.role === 'user' ? 'Your message' : phase || 'Agent message'}
-    >
-      {!minimal ? (
-        <div className="message-label">
-          {message.role !== 'user' ? (
-            <>
-              <span className={`agent-avatar ${provider}`}>
-                <ProviderIcon provider={provider} brand size={16} />
-              </span>
-              <strong>
-                {message.agentName || (provider === 'codex' ? 'Codex' : 'Claude Code')}
-              </strong>
-            </>
-          ) : null}
-          {phase ? <span className="thread-message-phase">{phase}</span> : null}
-          {message.role === 'assistant' && (message.agentId || message.parentItemId) ? (
-            <span className="thread-message-agent">
-              {message.agentName || `Subagent ${message.agentId || ''}`}
-            </span>
-          ) : null}
-          <button
-            type="button"
-            className="icon-button copy-message"
-            aria-label="Copy message"
-            onClick={() => void copy()}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-          </button>
-        </div>
-      ) : null}
+  const showAgentMeta =
+    agentWorkspace &&
+    !minimal &&
+    (message.role === 'user' || settled || message.phase === 'final_answer')
+  const timestamp =
+    showAgentMeta && (message.role === 'user' || settled || message.finishedAt !== undefined)
+      ? messageTimestamp(
+          message.role === 'user' ? message.createdAt : (message.finishedAt ?? message.createdAt),
+        )
+      : undefined
+  const time = timestamp ? (
+    <time dateTime={timestamp.dateTime} title={timestamp.title}>
+      {timestamp.label}
+    </time>
+  ) : null
+  const body = (
+    <>
       <div className="markdown">
         {plan.length ? (
           <ol className="thread-plan-steps" aria-label="Agent plan">
@@ -422,6 +425,71 @@ export const MessageView = memo(function MessageView({
         ) : null}
       </div>
       <AttachmentList attachments={message.attachments || []} />
+    </>
+  )
+  return (
+    <article
+      className={`message ${message.role}${message.role === 'user' ? ' life-compact-user-message' : ''}${phase ? ' thread-phased-message' : ''}${agentWorkspace ? ' agent-message' : ''}`}
+      data-message-id={message.id}
+      id={activityAnchor(message.id)}
+      data-phase={message.kind || message.phase}
+      data-subagent={
+        message.role === 'assistant' && (message.agentId || message.parentItemId)
+          ? 'true'
+          : undefined
+      }
+      tabIndex={-1}
+      aria-label={message.role === 'user' ? 'Your message' : phase || 'Agent message'}
+    >
+      {!minimal && !agentWorkspace ? (
+        <div className="message-label">
+          {message.role !== 'user' ? (
+            <>
+              <span className={`agent-avatar ${provider}`}>
+                <ProviderIcon provider={provider} brand size={16} />
+              </span>
+              <strong>
+                {message.agentName || (provider === 'codex' ? 'Codex' : 'Claude Code')}
+              </strong>
+            </>
+          ) : null}
+          {phase ? <span className="thread-message-phase">{phase}</span> : null}
+          {message.role === 'assistant' && (message.agentId || message.parentItemId) ? (
+            <span className="thread-message-agent">
+              {message.agentName || `Subagent ${message.agentId || ''}`}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="icon-button copy-message"
+            aria-label="Copy message"
+            onClick={() => void copy()}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+          </button>
+        </div>
+      ) : null}
+      {agentWorkspace && message.role === 'user' ? (
+        <div className="agent-user-bubble">{body}</div>
+      ) : (
+        body
+      )}
+      {showAgentMeta ? (
+        <div className="agent-message-meta" aria-label="Message actions">
+          {message.role === 'user' ? time : null}
+          <button
+            type="button"
+            className="icon-button copy-message"
+            aria-label="Copy message"
+            title="Copy to clipboard"
+            disabled={copied}
+            onClick={() => void copy()}
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+          </button>
+          {message.role === 'assistant' ? time : null}
+        </div>
+      ) : null}
       {!streamlinedWorkspace && (message.text || providerDetails) ? (
         <details
           className="thread-original-message"

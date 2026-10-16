@@ -1,0 +1,160 @@
+.agents-panel {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+.agents-panel-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.agents-panel-section-label {
+  padding: 4px 6px 0;
+  color: var(--dim);
+  font-size: 10.4px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.agents-panel-row {
+  display: grid;
+  height: 62px;
+  box-sizing: border-box;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+  grid-template-rows: 20px 18px 16px;
+  align-items: center;
+  column-gap: 8px;
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.agents-panel-dot {
+  grid-column: 1;
+  grid-row: 1;
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+.agents-panel-row[data-status='working'] .agents-panel-dot {
+  background: #0ea5e9;
+}
+.agents-panel-row[data-status='completed'] .agents-panel-dot {
+  background: #22c55e;
+}
+.agents-panel-row[data-status='failed'] .agents-panel-dot {
+  background: #ef4444;
+}
+.agents-panel-identity {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.agents-panel-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agents-panel-role {
+  max-width: 112px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0 4px;
+  color: var(--muted);
+  font: 10.4px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agents-panel-timing {
+  display: flex;
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 56px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted);
+  font: 11.2px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.agents-panel-timing > svg {
+  color: #22c55e;
+}
+.agents-panel-activity,
+.agents-panel-metadata {
+  display: block;
+  grid-column: 2 / 4;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agents-panel-activity {
+  grid-row: 2;
+  color: var(--muted);
+  font-size: 12px;
+}
+.agents-panel-row[data-status='failed'] .agents-panel-activity {
+  color: #ef4444;
+}
+.agents-panel-metadata {
+  grid-row: 3;
+  color: var(--dim);
+  font: 11.2px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.agents-panel-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 6px 12px;
+  color: var(--muted);
+  font: 11.2px var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.agents-panel-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.agents-panel-working {
+  color: #0ea5e9;
+}
+.agents-panel-empty {
+  display: flex;
+  height: 100%;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+}
+.agents-panel-empty > svg {
+  color: var(--dim);
+}
+.agents-panel-empty > p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+.agents-panel-empty > span {
+  max-width: 224px;
+  color: var(--muted);
+  font-size: 12px;
+}

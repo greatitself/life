@@ -13,6 +13,399 @@ const providerUtilities = process.argv.includes('--provider-utilities')
 const fluidity = process.argv.includes('--fluidity') || process.argv.includes('--fluidity-baseline')
 const fluidityBaseline = process.argv.includes('--fluidity-baseline')
 const asyncQuestions = process.argv.includes('--async-questions')
+const workspacePanels = process.argv.includes('--workspace-panels')
+
+async function workspacePanelChecks(page, checks, settle) {
+  const directory = resolve(__dirname, '../output/playwright/workspace-panels')
+  await mkdir(directory, { recursive: true })
+  await page.setViewportSize({ width: 1800, height: 1000 })
+  const workspace = page.locator('.main-workspace[data-agent-workspace="true"]')
+  const panel = page.locator('#life-workspace-surfaces')
+  const picker = panel.locator('.surface-picker[aria-label="Open a surface"]')
+  const tablist = page.getByRole('tablist', { name: 'Open workspace surfaces', exact: true })
+  const tab = (name) => tablist.getByRole('tab', { name, exact: true })
+  const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
+  const exactText = (name) => page.locator('span').filter({ hasText: new RegExp('^' + name + '$') })
+  const openSurface = async (name) => {
+    if (await picker.isVisible())
+      await picker
+        .locator('.surface-launcher-actions button')
+        .filter({ has: exactText(name) })
+        .click()
+    else {
+      await page.getByRole('button', { name: 'Add panel surface', exact: true }).click()
+      await page
+        .getByRole('menuitem')
+        .filter({ has: exactText(name) })
+        .click()
+    }
+    await tab(name).waitFor()
+    await page.waitForFunction(
+      (name) => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === name,
+      name,
+    )
+  }
+  const selectThread = async (name) => {
+    await page.getByRole('button', { name: new RegExp('^' + name + ',') }).click()
+    await settle()
+  }
+  await workspace.waitFor()
+  await picker.waitFor()
+  assert.equal(await panel.getAttribute('data-panel-mode'), 'inline')
+  assert.deepEqual(
+    await picker.locator('.surface-launcher-actions button > span').allTextContents(),
+    [
+      'Browser',
+      'Terminal',
+      'Files',
+      'Diff',
+      'Pull request',
+      'Linked pull requests',
+      'Agents',
+      'Device',
+    ],
+  )
+  const leftWidth = await page
+    .locator('.sidebar')
+    .evaluate((element) => element.getBoundingClientRect().width)
+  const draft = '  Keep this ordinary draft while using workspace panels.\nExact spacing stays.  '
+  await composer.fill(draft)
+  await openSurface('Files')
+  await panel
+    .locator('.file-row')
+    .filter({ has: exactText('src') })
+    .click()
+  await panel
+    .locator('.file-row')
+    .filter({ has: exactText('agent.ts') })
+    .click()
+  const preview = panel.locator('pre[aria-label="File contents: /srv/project/src/agent.ts"]')
+  await preview.waitFor()
+  assert.match(await preview.textContent(), /native protocols preserved/)
+  await page.evaluate(() => {
+    window.controlsPanelCode = document.querySelector('.surface-code .workspace-panel')
+    window.controlsPanelConversation = document.querySelector(
+      '.main-workspace[data-agent-workspace] .conversation',
+    )
+  })
+  await openSurface('Diff')
+  await panel.locator('[aria-label="Git diff"] .workspace-diff-file').waitFor()
+  assert.match(
+    await panel.locator('[aria-label="Git diff"]').textContent(),
+    /export const enabled = true/,
+  )
+  await openSurface('Agents')
+  const alpha = panel.locator('.agents-panel-row[data-agent-id="workspace-child-0"]')
+  await alpha.getByText('Workspace Alpha child', { exact: true }).waitFor()
+  assert.equal(await panel.locator('.agents-panel-row').count(), 1)
+  assert.equal(await panel.getByText('Workspace Beta child', { exact: true }).count(), 0)
+  assert.equal(await alpha.getAttribute('data-status'), 'unknown')
+  assert.equal(await alpha.evaluate((element) => element.getBoundingClientRect().height), 62)
+  assert.equal(
+    await alpha
+      .locator('.agents-panel-dot')
+      .evaluate((element) => getComputedStyle(element).animationName),
+    'none',
+  )
+  await page.evaluate(() =>
+    window.controlsTest.emit('thread-a', 'subagent', {
+      itemId: 'workspace-child-0-live-complete',
+      agentId: 'workspace-child-0',
+      agentName: 'Workspace Alpha child',
+      text: 'Native Alpha child completed with preserved output.',
+      status: 'completed',
+      details: { lifecycle: 'turn', model: 'child-model-fixture' },
+    }),
+  )
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector('.agents-panel-row[data-agent-id="workspace-child-0"]')
+        ?.getAttribute('data-status') === 'completed',
+  )
+  await alpha
+    .getByText('Native Alpha child completed with preserved output.', { exact: true })
+    .waitFor()
+  assert.match(await alpha.textContent(), /child-model-fixture/)
+
+  const geometry = await workspace.evaluate((element) => {
+    const bounds = (selector) => {
+      const node = element.querySelector(selector)
+      const rect = node.getBoundingClientRect()
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, bottom: rect.bottom }
+    }
+    const conversation = element.querySelector('.conversation')
+    return {
+      chat: bounds('.chat-area'),
+      messages: bounds('.messages'),
+      composer: bounds('.life-reference-composer .composer'),
+      container: bounds('.life-reference-composer'),
+      position: getComputedStyle(element.querySelector('.life-reference-composer')).position,
+      bottomInset: parseFloat(getComputedStyle(conversation).paddingBottom),
+      measuredComposer: parseFloat(
+        element.querySelector('.chat-area').style.getPropertyValue('--life-composer-height'),
+      ),
+    }
+  })
+  assert.ok(Math.abs(geometry.messages.width - 768) <= 1)
+  assert.ok(Math.abs(geometry.composer.width - geometry.messages.width) <= 2)
+  assert.ok(
+    Math.abs(
+      geometry.messages.x + geometry.messages.width / 2 - geometry.chat.x - geometry.chat.width / 2,
+    ) <= 2,
+  )
+  assert.ok(Math.abs(geometry.composer.x - geometry.messages.x) <= 2)
+  assert.equal(geometry.position, 'absolute')
+  assert.ok(geometry.measuredComposer >= geometry.container.height - 1)
+  assert.ok(geometry.bottomInset >= geometry.container.height - 1)
+  const topTabs = await tablist.boundingBox()
+  const panelBounds = await panel.boundingBox()
+  assert.ok(topTabs.y < panelBounds.y && topTabs.y < 53, 'Workspace tabs belong in the top header')
+  checks.push(
+    'The center uses a 768px transcript and aligned overlay composer; native child rows stay scoped, static, and authoritative',
+  )
+  await page.screenshot({ path: join(directory, 'desktop-agents.png') })
+
+  await tab('Files').focus()
+  await page.keyboard.press('End')
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  await page.keyboard.press('Home')
+  assert.equal(await tab('Files').getAttribute('aria-selected'), 'true')
+  await page.keyboard.press('ArrowRight')
+  assert.equal(await tab('Diff').getAttribute('aria-selected'), 'true')
+  await page.keyboard.press('Delete')
+  await tab('Diff').waitFor({ state: 'detached' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  await openSurface('Diff')
+  await tab('Agents').click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Close to the right', exact: true }).click()
+  await tab('Diff').waitFor({ state: 'detached' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  await openSurface('Diff')
+  await tab('Agents').click()
+  checks.push(
+    'Top tabs support roving keyboard selection, close to the immediate neighbor, and close-to-the-right actions',
+  )
+
+  const initialPanelWidth = await panel.evaluate((element) => element.getBoundingClientRect().width)
+  await page.getByRole('button', { name: 'Maximize panel', exact: true }).click()
+  await page.waitForFunction(
+    () =>
+      document.querySelector('.app-shell')?.getAttribute('data-right-panel-maximized') === 'true',
+  )
+  assert.equal(await panel.getAttribute('data-maximized'), 'true')
+  assert.equal(await workspace.getAttribute('inert'), '')
+  assert.equal(
+    await page.locator('textarea[aria-label="Message your coding agent"]').inputValue(),
+    draft,
+  )
+  const maximizedWidth = await panel.evaluate((element) => element.getBoundingClientRect().width)
+  assert.ok(maximizedWidth > initialPanelWidth + 100)
+  assert.equal(
+    await page.locator('.sidebar').evaluate((element) => element.getBoundingClientRect().width),
+    leftWidth,
+  )
+  await page.getByRole('button', { name: 'Restore panel size', exact: true }).click()
+  await page.waitForFunction(
+    () => !document.querySelector('.app-shell')?.hasAttribute('data-right-panel-maximized'),
+  )
+  assert.ok(
+    Math.abs(
+      (await panel.evaluate((element) => element.getBoundingClientRect().width)) -
+        initialPanelWidth,
+    ) <= 1,
+  )
+  await page.getByRole('button', { name: 'Collapse workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'hidden' })
+  await page.getByRole('button', { name: 'Expand workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'visible' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  assert.equal(
+    await page.evaluate(
+      () => window.controlsPanelCode === document.querySelector('.surface-code .workspace-panel'),
+    ),
+    true,
+  )
+  assert.equal(
+    await page.evaluate(
+      () =>
+        window.controlsPanelConversation ===
+        document.querySelector('.main-workspace[data-agent-workspace] .conversation'),
+    ),
+    true,
+  )
+  const readsBeforeReopen = await page.evaluate(
+    () =>
+      window.controlsTest.records.workspaceReads.filter((read) => read.method === 'read').length,
+  )
+  await tab('Files').click()
+  await preview.waitFor()
+  assert.match(await preview.textContent(), /native protocols preserved/)
+  assert.equal(
+    await page.evaluate(
+      () =>
+        window.controlsTest.records.workspaceReads.filter((read) => read.method === 'read').length,
+    ),
+    readsBeforeReopen,
+  )
+  await tab('Agents').click()
+  const resize = page.getByRole('separator', { name: 'Resize workspace sidebar', exact: true })
+  const originalWidth = Number(await resize.getAttribute('aria-valuenow'))
+  await resize.focus()
+  await page.keyboard.press('ArrowLeft')
+  assert.equal(Number(await resize.getAttribute('aria-valuenow')), originalWidth + 10)
+  assert.equal(
+    await page.evaluate(
+      () => JSON.parse(localStorage.getItem('life.workspace.sidebar-widths.v1')).right,
+    ),
+    originalWidth + 10,
+  )
+  await resize.dblclick()
+  assert.equal(Number(await resize.getAttribute('aria-valuenow')), 540)
+  assert.equal(
+    await page.evaluate(
+      () => JSON.parse(localStorage.getItem('life.workspace.sidebar-widths.v1')).right,
+    ),
+    540,
+  )
+  assert.equal(
+    await page.locator('.sidebar').evaluate((element) => element.getBoundingClientRect().width),
+    leftWidth,
+  )
+  assert.equal(await composer.inputValue(), draft)
+  checks.push(
+    'Collapse and maximize retain pane resources and the exact draft; keyboard resize and double-click reset persist without changing the left sidebar',
+  )
+
+  const conversation = workspace.locator('.conversation')
+  await conversation.hover({ position: { x: 100, y: 100 } })
+  await page.mouse.wheel(0, -640)
+  await page.waitForFunction(() => {
+    const element = document.querySelector('.main-workspace[data-agent-workspace] .conversation')
+    return element.scrollHeight - element.clientHeight - element.scrollTop > 100
+  })
+  await settle()
+  const scrollTop = await conversation.evaluate((element) => element.scrollTop)
+  assert.ok(scrollTop > 100)
+  await selectThread('Thread Beta')
+  await picker.waitFor()
+  const betaDraft = 'Another exact draft remains owned by Thread Beta.'
+  await composer.fill(betaDraft)
+  await openSurface('Agents')
+  await panel.getByText('Workspace Beta child', { exact: true }).waitFor()
+  assert.equal(await panel.getByText('Workspace Alpha child', { exact: true }).count(), 0)
+  assert.equal(await tab('Files').count(), 0)
+  await selectThread('Thread Alpha')
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  assert.deepEqual(await tablist.getByRole('tab').allTextContents(), ['Files', 'Agents', 'Diff'])
+  assert.equal(await composer.inputValue(), draft)
+  await page.waitForFunction(
+    (expected) =>
+      Math.abs(
+        document.querySelector('.main-workspace[data-agent-workspace] .conversation').scrollTop -
+          expected,
+      ) <= 3,
+    scrollTop,
+  )
+  await panel.getByText('Workspace Alpha child', { exact: true }).waitFor()
+  assert.equal(await panel.getByText('Workspace Beta child', { exact: true }).count(), 0)
+  await page.evaluate(() => window.__lifeFlushConversationHistory())
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const drafts = JSON.parse(localStorage.getItem('life.conversation-drafts.v1'))
+      return { alpha: drafts['agents:thread-a'].draft, beta: drafts['agents:thread-b'].draft }
+    }),
+    { alpha: draft, beta: betaDraft },
+  )
+  const savedTabs = await page.evaluate(() =>
+    Object.entries(JSON.parse(localStorage.getItem('life.workspace.surface-tabs.v2'))),
+  )
+  assert.deepEqual(savedTabs.find(([key]) => key.includes('thread-a'))[1], {
+    tabs: ['files', 'agents', 'diff'],
+    selected: 'agents',
+  })
+  assert.deepEqual(savedTabs.find(([key]) => key.includes('thread-b'))[1], {
+    tabs: ['agents'],
+    selected: 'agents',
+  })
+  checks.push(
+    'Thread switching restores each thread’s own tabs, native agents, exact draft, and prior center scroll position',
+  )
+  await page.getByRole('button', { name: 'Collapse workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'hidden' })
+  await selectThread('Thread Beta')
+  await panel.waitFor({ state: 'visible' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  assert.equal(await composer.inputValue(), betaDraft)
+  await selectThread('Thread Alpha')
+  await panel.waitFor({ state: 'hidden' })
+  assert.equal(await composer.inputValue(), draft)
+  await page.getByRole('button', { name: 'Expand workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'visible' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  checks.push(
+    'Each thread restores its own open or collapsed sidebar without changing another thread’s saved tabs or draft',
+  )
+
+  await page.setViewportSize({ width: 980, height: 900 })
+  await page.getByRole('dialog', { name: 'Workspace surfaces', exact: true }).waitFor()
+  assert.equal(await panel.getAttribute('data-panel-mode'), 'sheet')
+  assert.equal(await panel.getAttribute('aria-modal'), 'true')
+  assert.equal(await page.getByRole('button', { name: 'Maximize panel', exact: true }).count(), 0)
+  assert.equal(await resize.count(), 0)
+  for (let index = 0; index < 8; index++) {
+    await page.keyboard.press('Tab')
+    assert.equal(await panel.evaluate((element) => element.contains(document.activeElement)), true)
+  }
+  await page.screenshot({ path: join(directory, 'narrow-sheet.png') })
+  await page.keyboard.press('Escape')
+  await panel.waitFor({ state: 'hidden' })
+  await page.getByRole('button', { name: 'Expand workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'visible' })
+  assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
+  await page.locator('.surface-sheet-backdrop').click({ position: { x: 8, y: 500 } })
+  await panel.waitFor({ state: 'hidden' })
+  assert.equal(await composer.inputValue(), draft)
+  await page.setViewportSize({ width: 981, height: 900 })
+  await page.getByRole('button', { name: 'Expand workspace sidebar', exact: true }).click()
+  await panel.waitFor({ state: 'visible' })
+  assert.equal(await panel.getAttribute('data-panel-mode'), 'sheet')
+  await page.setViewportSize({ width: Math.ceil(leftWidth) + 720, height: 900 })
+  await page.waitForFunction(
+    () =>
+      document.querySelector('#life-workspace-surfaces')?.getAttribute('data-panel-mode') ===
+      'inline',
+  )
+  assert.equal(await panel.getAttribute('data-panel-mode'), 'inline')
+  await page
+    .getByRole('button', { name: 'Maximize panel', exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(await page.locator('.surface-sheet-backdrop').count(), 0)
+  const narrowBounds = await panel.boundingBox()
+  const narrowCenter = await workspace.boundingBox()
+  assert.ok(narrowCenter.x + narrowCenter.width <= narrowBounds.x + 1)
+  assert.equal(
+    await page.locator('.sidebar').evaluate((element) => element.getBoundingClientRect().width),
+    leftWidth,
+  )
+  assert.equal(await composer.inputValue(), draft)
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      starts: window.controlsTest.records.starts,
+      steering: window.controlsTest.records.steering,
+      stops: window.controlsTest.records.stops,
+      responses: window.controlsTest.records.responses,
+    })),
+    { starts: [], steering: [], stops: [], responses: [] },
+  )
+  checks.push(
+    'The 980px sheet contains keyboard focus and dismisses with Escape or its backdrop; inline layout returns when both center and panel fit, without starting any provider',
+  )
+  await writeFile(
+    join(directory, 'proof.json'),
+    JSON.stringify({ geometry, leftWidth, initialPanelWidth, maximizedWidth, checks }, null, 2),
+  )
+}
 
 async function asyncQuestionChecks(page, checks, settle) {
   const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
@@ -1305,7 +1698,7 @@ async function run() {
           import {App} from './src/renderer/App'
           import {defaultLifeConfig} from './src/shared/customization'
           import './src/renderer/styles.css'
-          window.testConfig = {...defaultLifeConfig, workspacePanel:false}
+          window.testConfig = {...defaultLifeConfig, workspacePanel:${workspacePanels}}
           createRoot(document.getElementById('root')).render(<React.StrictMode>${fluidity ? '<Profiler id="Life App" onRender={(id, phase, actualDuration, baseDuration) => window.controlsTest.metrics.commits.push({phase,actualDuration,baseDuration})}><App/></Profiler>' : '<App/>'}</React.StrictMode>)
         `,
       },
@@ -1377,6 +1770,7 @@ async function run() {
     page.on('pageerror', (error) => errors.push(error.message))
     await page.addInitScript(
       ({ historyHydration, providerUtilities, fluidity, asyncQuestions }) => {
+        const workspacePanels = new URLSearchParams(window.location.search).has('workspace-panels')
         const profile = {
           id: 'machine-test',
           name: 'Test machine',
@@ -1413,6 +1807,7 @@ async function run() {
           providerUpdateReads: [],
           providerUpdateChecks: [],
           usageReads: [],
+          workspaceReads: [],
         }
         const pendingProviderReads = []
         const pendingProviderChecks = []
@@ -1496,6 +1891,52 @@ async function run() {
           ),
           { ...thread('verified-studio', 'Saved Studio conversation'), purpose: 'customization' },
         ]
+        if (workspacePanels) {
+          for (const [index, current] of savedThreads.slice(0, 2).entries()) {
+            for (let turn = 2; turn <= 25; turn++) {
+              current.messages.push(
+                {
+                  id: current.id + '-workspace-user-' + turn,
+                  role: 'user',
+                  text: 'Workspace history request ' + turn + ': preserve this exact conversation.',
+                  turn,
+                  createdAt: turn * 1000,
+                  finishedAt: turn * 1000 + 500,
+                  finishStatus: 'completed',
+                },
+                {
+                  id: current.id + '-workspace-answer-' + turn,
+                  role: 'assistant',
+                  text:
+                    'Workspace history answer ' +
+                    turn +
+                    '.\n\n' +
+                    'Retained transcript content remains in the center conversation. '.repeat(5),
+                  phase: 'final_answer',
+                  turn,
+                  createdAt: turn * 1000 + 100,
+                  finishedAt: turn * 1000 + 500,
+                  finishStatus: 'completed',
+                },
+              )
+            }
+            current.turn = 25
+            current.turnStatus = 'completed'
+            current.messages.push({
+              id: current.id + '-native-child',
+              role: 'tool',
+              kind: 'subagent',
+              agentId: 'workspace-child-' + index,
+              agentName: index ? 'Workspace Beta child' : 'Workspace Alpha child',
+              title: 'spawn_agent',
+              text: index ? 'Native Beta child output.' : 'Native Alpha child output.',
+              status: 'completed',
+              turn: 25,
+              createdAt: 25100,
+              finishedAt: 25500,
+            })
+          }
+        }
         if (fluidity) {
           for (let index = 0; index < 400; index++) {
             const id = 'fluidity-thread-' + index
@@ -1734,6 +2175,47 @@ async function run() {
             },
           },
           sshConfig: { list: async () => ({ path: '/home/tester/.ssh/config', hosts: [] }) },
+          ...(workspacePanels
+            ? {
+                files: {
+                  list: async (path) => {
+                    records.workspaceReads.push({ method: 'list', path })
+                    return path === '/srv/project/src'
+                      ? [
+                          {
+                            name: 'agent.ts',
+                            path: '/srv/project/src/agent.ts',
+                            directory: false,
+                            size: 91,
+                          },
+                        ]
+                      : [
+                          { name: 'src', path: '/srv/project/src', directory: true, size: 0 },
+                          {
+                            name: 'README.md',
+                            path: '/srv/project/README.md',
+                            directory: false,
+                            size: 60,
+                          },
+                        ]
+                  },
+                  read: async (path) => {
+                    records.workspaceReads.push({ method: 'read', path })
+                    return path === '/srv/project/src/agent.ts'
+                      ? 'export const workspaceFixture = "native protocols preserved";\n'
+                      : '# Life workspace fixture\nRetain this file when the sidebar collapses.\n'
+                  },
+                  git: async () => {
+                    records.workspaceReads.push({ method: 'git' })
+                    return {
+                      branch: 'workspace-fixture',
+                      status: ' M src/agent.ts\n',
+                      diff: 'diff --git a/src/agent.ts b/src/agent.ts\n--- a/src/agent.ts\n+++ b/src/agent.ts\n@@ -1 +1 @@\n-export const enabled = false;\n+export const enabled = true;\n',
+                    }
+                  },
+                },
+              }
+            : {}),
           connection: {
             state: async () => {
               records.stateReads++
@@ -2068,7 +2550,9 @@ async function run() {
       },
       { historyHydration, providerUtilities, fluidity, asyncQuestions },
     )
-    await page.goto(`http://127.0.0.1:${server.address().port}`)
+    await page.goto(
+      `http://127.0.0.1:${server.address().port}/${workspacePanels ? '?workspace-panels' : ''}`,
+    )
     const settle = async () =>
       page.evaluate(
         () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
@@ -2226,6 +2710,14 @@ async function run() {
     await page.getByRole('textbox', { name: 'Message your coding agent' }).waitFor()
     await page.waitForFunction(() => window.controlsTest.records.stateReads >= 2)
     await settle()
+    if (workspacePanels) {
+      await workspacePanelChecks(page, checks, settle)
+      assert.deepEqual(errors, [])
+      console.log(
+        JSON.stringify({ ok: true, workspacePanels: true, checks, browserErrors: errors }, null, 2),
+      )
+      return
+    }
     if (presentation) {
       await presentationChecks(page, checks)
       assert.deepEqual(errors, [])
@@ -2466,6 +2958,61 @@ async function run() {
           browserErrors: errors,
           checks,
           text: page ? (await page.locator('body').innerText()).slice(0, 10000) : '',
+          workspacePanelState:
+            page && workspacePanels
+              ? await page.evaluate(() => {
+                  const bounds = (selector) =>
+                    document.querySelector(selector)?.getBoundingClientRect().toJSON()
+                  const panel = document.querySelector('#life-workspace-surfaces')
+                  const conversation = document.querySelector(
+                    '.main-workspace[data-agent-workspace] .conversation',
+                  )
+                  const composer = document.querySelector('.life-reference-composer')
+                  return {
+                    viewport: { width: innerWidth, height: innerHeight },
+                    panelMode: panel?.getAttribute('data-panel-mode'),
+                    selected: panel?.getAttribute('data-active-surface'),
+                    maximized: panel?.getAttribute('data-maximized'),
+                    hidden: panel?.hidden,
+                    tabs: [...document.querySelectorAll('.surface-tabs [role="tab"]')].map(
+                      (tab) => ({
+                        text: tab.textContent,
+                        selected: tab.getAttribute('aria-selected'),
+                      }),
+                    ),
+                    bounds: {
+                      sidebar: bounds('.sidebar'),
+                      center: bounds('.main-workspace[data-agent-workspace]'),
+                      panel: bounds('#life-workspace-surfaces'),
+                      tabs: bounds('.surface-tabs'),
+                      messages: bounds('.main-workspace[data-agent-workspace] .messages'),
+                      composer: bounds('.life-reference-composer'),
+                    },
+                    scroll: conversation
+                      ? {
+                          top: conversation.scrollTop,
+                          height: conversation.scrollHeight,
+                          clientHeight: conversation.clientHeight,
+                          bottomInset: getComputedStyle(conversation).paddingBottom,
+                        }
+                      : undefined,
+                    composer: composer
+                      ? {
+                          position: getComputedStyle(composer).position,
+                          measuredHeight: composer
+                            .closest('.chat-area')
+                            ?.style.getPropertyValue('--life-composer-height'),
+                        }
+                      : undefined,
+                    children: [...document.querySelectorAll('.agents-panel-row')].map((row) => ({
+                      id: row.getAttribute('data-agent-id'),
+                      status: row.getAttribute('data-status'),
+                      text: row.textContent,
+                    })),
+                    workspaceReads: window.controlsTest.records.workspaceReads,
+                  }
+                })
+              : undefined,
           asyncQuestionState:
             page && (asyncQuestions || fluidity)
               ? await page.evaluate(() => ({

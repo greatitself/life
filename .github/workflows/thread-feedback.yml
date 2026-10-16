@@ -28,7 +28,7 @@ jobs:
       - name: Verify organization, deadlines, history and recovery
         run: |
           mkdir -p output/thread-feedback
-          npm test -- --maxWorkers=1 tests/thread-management.test.ts tests/thread-snooze-presets.test.ts tests/thread-snooze-clock.test.ts tests/native-renderer-recovery.test.ts tests/sidebar-clock.test.ts tests/sidebar-history.test.ts tests/thread-presentation.test.ts 2>&1 | tee output/thread-feedback/unit.log
+          npm test -- --maxWorkers=1 tests/thread-management.test.ts tests/thread-snooze-presets.test.ts tests/thread-snooze-clock.test.ts tests/native-renderer-recovery.test.ts tests/sidebar-clock.test.ts tests/sidebar-history.test.ts tests/thread-presentation.test.ts tests/right-panel-state.test.ts 2>&1 | tee output/thread-feedback/unit.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -142,6 +142,8 @@ jobs:
             provider-request-ui,
             pending-question-ui,
             app-live-controls,
+            run-selectors,
+            conversation-scroll,
           ]
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +163,8 @@ jobs:
           node "tests/$SUITE-smoke.cjs" "${args[@]}" 2>&1 | tee "output/thread-feedback/$SUITE.log"
           if [ "$SUITE" = app-live-controls ]; then
             node tests/app-live-controls-smoke.cjs --async-questions 2>&1 | tee output/thread-feedback/app-live-controls-async-questions.log
+            node tests/app-live-controls-smoke.cjs --presentation 2>&1 | tee output/thread-feedback/app-live-controls-presentation.log
+            node tests/app-live-controls-smoke.cjs --workspace-panels 2>&1 | tee output/thread-feedback/app-live-controls-workspace-panels.log
           fi
       - uses: actions/upload-artifact@v4
         if: always()
@@ -169,6 +173,76 @@ jobs:
           path: |
             output/thread-feedback/
             output/playwright/
+          if-no-files-found: warn
+
+  center-right-performance:
+    name: Same-fixture center and workspace comparison
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium --with-deps
+      - uses: actions/checkout@v4
+        with:
+          ref: 2c16b519670eb8e40c05b87b6cab2de61ff8eb49
+          path: .center-right-baseline
+      - name: Record identical fixture-only overlays and shared dependencies
+        run: |
+          cmp package-lock.json .center-right-baseline/package-lock.json
+          cmp tests/helpers/browser-build.cjs .center-right-baseline/tests/helpers/browser-build.cjs
+          cmp tests/helpers/app-workflow-fixture.cjs .center-right-baseline/tests/helpers/app-workflow-fixture.cjs
+          cmp src/main/inline-worker-plugin.ts .center-right-baseline/src/main/inline-worker-plugin.ts
+          ln -s "$GITHUB_WORKSPACE/node_modules" .center-right-baseline/node_modules
+          node tests/helpers/center-right-comparison.cjs prepare
+      - name: Measure transcript, workspace and App interactions sequentially in ABBA order
+        run: |
+          # Neutral labels retain every assertion and avoid historical source
+          # overlays embedded in the existing transcript/workspace fixtures.
+          for run in t3-ref-a t3-current-a t3-current-b t3-ref-b; do
+            case "$run" in
+              t3-ref-*) fixture_root=.center-right-baseline ;;
+              *) fixture_root=. ;;
+            esac
+            (cd "$fixture_root" && node tests/transcript-performance.cjs "$run") 2>&1 | tee "output/thread-feedback/center-right/transcript-$run.log"
+            (cd "$fixture_root" && node tests/workspace-surfaces-performance.cjs "$run" --reference-ref=2c16b519670eb8e40c05b87b6cab2de61ff8eb49) 2>&1 | tee "output/thread-feedback/center-right/workspace-$run.log"
+            rm -f "$fixture_root/output/playwright/app-fluidity/after.json"
+            (cd "$fixture_root" && node tests/app-live-controls-smoke.cjs --fluidity) 2>&1 | tee "output/thread-feedback/center-right/app-fluidity-$run.log"
+            cp "$fixture_root/output/playwright/app-fluidity/after.json" "output/thread-feedback/center-right/app-fluidity-$run.json"
+          done
+      - name: Compare measured interactions and verify executed fixture identity
+        run: node tests/helpers/center-right-comparison.cjs report
+      - name: Require the baseline production source to remain unchanged
+        if: always()
+        run: |
+          git -C .center-right-baseline diff --exit-code HEAD -- src
+          test -z "$(git -C .center-right-baseline status --porcelain --untracked-files=all -- src)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: thread-feedback-center-right-comparison
+          include-hidden-files: true
+          path: |
+            tests/transcript-performance.cjs
+            tests/workspace-surfaces-performance.cjs
+            tests/app-live-controls-smoke.cjs
+            tests/helpers/center-right-comparison.cjs
+            tests/helpers/browser-build.cjs
+            tests/helpers/app-workflow-fixture.cjs
+            .center-right-baseline/tests/transcript-performance.cjs
+            .center-right-baseline/tests/workspace-surfaces-performance.cjs
+            .center-right-baseline/tests/app-live-controls-smoke.cjs
+            output/thread-feedback/center-right/
+            output/playwright/transcript-performance-v011/t3-*
+            output/playwright/workspace-surfaces-performance/t3-*
+            output/playwright/app-fluidity/
+            .center-right-baseline/output/playwright/transcript-performance-v011/t3-*
+            .center-right-baseline/output/playwright/workspace-surfaces-performance/t3-*
+            .center-right-baseline/output/playwright/app-fluidity/
           if-no-files-found: warn
 
   desktop:
@@ -194,8 +268,8 @@ jobs:
       - run: npx playwright install-deps chromium
       - name: Verify native integration with disposable provider stand-ins
         env:
-          LIFE_TEST_SOURCE: "1"
-          LIFE_TEST_PACKAGED: "0"
+          LIFE_TEST_SOURCE: '1'
+          LIFE_TEST_PACKAGED: '0'
           LIFE_TEST_ARTIFACTS_DIR: output/thread-feedback/desktop
           LIFE_TEST_SCREENSHOTS_DIR: output/thread-feedback/desktop/screenshots
         run: |

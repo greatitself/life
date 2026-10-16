@@ -30,10 +30,12 @@ const CompletedWork = memo(function CompletedWork({
   messages,
   provider,
   label,
+  agentWorkspace,
 }: {
   messages: Message[]
   provider: Thread['provider']
   label: string
+  agentWorkspace: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const messageIds = useMemo(
@@ -53,14 +55,29 @@ const CompletedWork = memo(function CompletedWork({
       </summary>
       {expanded ? (
         <div className="thread-completed-activity">
-          <ThreadActivityRows messages={messages} provider={provider} />
+          <ThreadActivityRows
+            messages={messages}
+            provider={provider}
+            compact={agentWorkspace}
+            agentWorkspace={agentWorkspace}
+          />
         </div>
       ) : null}
     </details>
   )
 })
 
-function WorkTiming({ started, ended, busy }: { started?: number; ended?: number; busy: boolean }) {
+function WorkTiming({
+  started,
+  ended,
+  busy,
+  stopped = false,
+}: {
+  started?: number
+  ended?: number
+  busy: boolean
+  stopped?: boolean
+}) {
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
     if (!busy || !started) return
@@ -78,9 +95,13 @@ function WorkTiming({ started, ended, busy }: { started?: number; ended?: number
         ? elapsed
           ? `Working for ${elapsed}`
           : 'Working'
-        : elapsed
-          ? `Worked for ${elapsed}`
-          : 'Activity'}
+        : stopped
+          ? elapsed
+            ? `You stopped after ${elapsed}`
+            : 'You stopped this response'
+          : elapsed
+            ? `Worked for ${elapsed}`
+            : 'Activity'}
     </span>
   )
 }
@@ -90,11 +111,13 @@ function WorkActivity({
   busy,
   provider,
   turnStatus,
+  agentWorkspace,
 }: {
   group: TurnGroup
   busy: boolean
   provider: Thread['provider']
   turnStatus?: string
+  agentWorkspace: boolean
 }) {
   const started = group.user?.createdAt
   const ended = group.user?.finishedAt
@@ -104,7 +127,10 @@ function WorkActivity({
     () => reportedFileChanges(group.messages, group.user?.fileChanges),
     [group.messages, group.user?.fileChanges],
   )
-  const response = streamlinedWorkspace ? completedTurnResponse(group, busy, turnStatus) : undefined
+  const response =
+    streamlinedWorkspace || agentWorkspace
+      ? completedTurnResponse(group, busy, turnStatus)
+      : undefined
   const completedRows = useMemo(
     () => (response ? completedTurnRows(group, response) : []),
     [group, response],
@@ -116,7 +142,13 @@ function WorkActivity({
         {completedRows.map((row) => {
           if (row.kind === 'message')
             return (
-              <MessageView key={row.message.id} message={row.message} provider={provider} settled />
+              <MessageView
+                key={row.message.id}
+                message={row.message}
+                provider={provider}
+                settled
+                agentWorkspace={agentWorkspace}
+              />
             )
           const first = activityIndex++ === 0
           return (
@@ -125,10 +157,11 @@ function WorkActivity({
               messages={row.messages}
               provider={provider}
               label={first ? (elapsed ? `Worked for ${elapsed}` : 'Worked') : 'More activity'}
+              agentWorkspace={agentWorkspace}
             />
           )
         })}
-        {!activityIndex ? (
+        {!activityIndex && !agentWorkspace ? (
           <p className="thread-work-summary">{elapsed ? `Worked for ${elapsed}` : 'Worked'}</p>
         ) : null}
         {files.length ? (
@@ -148,7 +181,12 @@ function WorkActivity({
             >
               <ProviderIcon provider={provider} brand size={16} />
             </span>
-            <WorkTiming started={started} ended={ended} busy={busy} />
+            <WorkTiming
+              started={started}
+              ended={ended}
+              busy={busy}
+              stopped={agentWorkspace && group.user?.finishStatus === 'interrupted'}
+            />
             {group.user?.finishStatus === 'failed' || group.user?.finishStatus === 'interrupted' ? (
               <small>{group.user.finishStatus === 'failed' ? 'Failed' : 'Interrupted'}</small>
             ) : null}
@@ -158,7 +196,8 @@ function WorkActivity({
               <ThreadActivityRows
                 messages={activity}
                 provider={provider}
-                compact={streamlinedWorkspace}
+                compact={streamlinedWorkspace || agentWorkspace}
+                agentWorkspace={agentWorkspace}
               />
             ) : (
               <p>
@@ -268,25 +307,42 @@ const TimelineTurn = memo(function TimelineTurn({
   busy,
   provider,
   turnStatus,
+  agentWorkspace,
 }: {
   group: TurnGroup
   busy: boolean
   provider: Thread['provider']
   turnStatus?: string
+  agentWorkspace: boolean
 }) {
   return (
     <section
       className="thread-timeline-turn"
       aria-label={`Turn ${group.turn || 1}`}
       data-settled={!busy && group.user?.finishStatus === 'completed' ? true : undefined}
+      data-working={agentWorkspace && busy ? true : undefined}
     >
-      {group.user ? <MessageView message={group.user} provider={provider} /> : null}
-      <WorkActivity group={group} busy={busy} provider={provider} turnStatus={turnStatus} />
+      {group.user ? (
+        <MessageView message={group.user} provider={provider} agentWorkspace={agentWorkspace} />
+      ) : null}
+      <WorkActivity
+        group={group}
+        busy={busy}
+        provider={provider}
+        turnStatus={turnStatus}
+        agentWorkspace={agentWorkspace}
+      />
     </section>
   )
 })
 
-export const ThreadTimeline = memo(function ThreadTimeline({ thread }: { thread: Thread }) {
+export const ThreadTimeline = memo(function ThreadTimeline({
+  thread,
+  agentWorkspace = false,
+}: {
+  thread: Thread
+  agentWorkspace?: boolean
+}) {
   const projectTurns = useMemo(createTurnGroupProjector, [])
   const groups = useMemo(() => projectTurns(thread.messages), [projectTurns, thread.messages])
   return (
@@ -298,6 +354,7 @@ export const ThreadTimeline = memo(function ThreadTimeline({ thread }: { thread:
           busy={thread.busy && group.turn === thread.turn}
           provider={thread.provider}
           turnStatus={group.turn === thread.turn ? thread.turnStatus : undefined}
+          agentWorkspace={agentWorkspace}
         />
       ))}
     </div>

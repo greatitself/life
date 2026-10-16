@@ -22,14 +22,7 @@ function defaults(left: number, right: number): Sizes {
   const w = window.innerWidth
   return {
     left: left === 260 ? (w > 1280 ? 306 : w > 1080 ? 280 : 260) : left,
-    right:
-      right === 320
-        ? w > 1280
-          ? Math.min(680, w * 0.375)
-          : w > 1080
-            ? clamp(w * 0.3, 310, 380)
-            : Math.min(520, w - 48)
-        : right,
+    right: right === 320 ? 540 : right,
   }
 }
 function readSizes(fallback: Sizes): Sizes {
@@ -37,7 +30,7 @@ function readSizes(fallback: Sizes): Sizes {
     const saved = JSON.parse(localStorage.getItem(storageKey) || 'null')
     return {
       left: Number.isFinite(saved?.left) ? clamp(saved.left, 220, 420) : fallback.left,
-      right: Number.isFinite(saved?.right) ? clamp(saved.right, 260, 900) : fallback.right,
+      right: Number.isFinite(saved?.right) ? Math.max(360, saved.right) : fallback.right,
     }
   } catch {
     return fallback
@@ -88,11 +81,14 @@ export function usePanelSizes(
   }
   const leftMax = Math.max(220, Math.min(420, viewport - 48))
   const left = Math.min(sizes.left, leftMax)
-  const rightMax =
-    viewport > 1080
-      ? Math.max(260, Math.min(900, viewport - (sidebarOpen ? left : collapsedWidth) - 360))
-      : Math.max(260, Math.min(900, viewport - 48))
-  const right = Math.min(sizes.right, rightMax)
+  const availableRow = viewport - (sidebarOpen ? left : collapsedWidth)
+  const rightInline = viewport > 980 && availableRow >= 720
+  const sheetWidth =
+    viewport <= 760 ? Math.min(viewport * 0.88, 384) : Math.max(320, Math.min(viewport * 0.42, 448))
+  const rightMax = rightInline
+    ? Math.max(360, Math.min(viewport * 0.7, availableRow - 360))
+    : sheetWidth
+  const right = rightInline ? Math.min(Math.max(360, sizes.right), rightMax) : sheetWidth
   const fallback = defaults(configuredLeft, configuredRight)
   const props = (side: Side, value: number, min: number, max: number): ResizeProps => ({
     side,
@@ -110,7 +106,8 @@ export function usePanelSizes(
       '--life-panel-width': `${right}px`,
     } as CSSProperties,
     left: props('left', left, 220, leftMax),
-    right: props('right', right, 260, rightMax),
+    right: props('right', right, Math.min(360, rightMax), rightMax),
+    rightInline,
   }
 }
 export function ResizeHandle({

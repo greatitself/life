@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -219,6 +220,10 @@ import {
 import './components/research-machine.css'
 import './components/research-interface.css'
 import './components/thread-management-ui.css'
+import { useWorkspacePanelVisibility } from './useWorkspacePanelVisibility'
+import './components/t3-chat.css'
+import './components/t3-composer.css'
+import './components/t3-workspace-layout.css'
 
 const providerName = (p: Provider) => (p === 'codex' ? 'Codex' : 'Claude Code')
 const shortcutModifier = /Mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
@@ -492,9 +497,23 @@ export function App() {
   const [query, setQuery] = useState('')
   const [sidebarFiltersOpen, setSidebarFiltersOpen] = useState(false)
   const [hostKey, setHostKey] = useState<HostKeyRequest>()
-  const [workspaceOpen, setWorkspaceOpen] = useState(
-    () => config.workspacePanel && window.innerWidth > 1080,
+  const workspaceScopeKey = JSON.stringify([
+    connection.profile?.id,
+    connection.workspace,
+    workspaceActiveId || 'draft',
+  ])
+  const [workspaceOpen, setWorkspaceOpen] = useWorkspacePanelVisibility(
+    workspaceScopeKey,
+    config.workspacePanel && window.innerWidth > 980,
+    config.workspacePanel,
   )
+  const previousWorkspacePanelPreference = useRef(config.workspacePanel)
+  const [workspaceSurfacesMounted, setWorkspaceSurfacesMounted] = useState(workspaceOpen)
+  const [workspaceMaximizedKey, setWorkspaceMaximizedKey] = useState<string>()
+  const [composerElement, setComposerElement] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (workspaceOpen) setWorkspaceSurfacesMounted(true)
+  }, [workspaceOpen])
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 600)
   const [researchAgentOpen, setResearchAgentOpen] = useState(() => {
     try {
@@ -511,7 +530,23 @@ export function App() {
     }
   }, [researchAgentOpen])
   const [researchAgentWidth, setResearchAgentWidth] = useState(440)
-  const [terminalOpen, setTerminalOpen] = useState(false)
+  const terminalScopeKey = JSON.stringify([connection.profile?.id, connection.workspace])
+  const terminalScopeCurrent = useRef(terminalScopeKey)
+  terminalScopeCurrent.current = terminalScopeKey
+  const [terminalState, setTerminalState] = useState({ scope: terminalScopeKey, open: false })
+  const terminalOpen = terminalState.scope === terminalScopeKey && terminalState.open
+  const setTerminalOpen: Dispatch<SetStateAction<boolean>> = useCallback((value) => {
+    const scope = terminalScopeCurrent.current
+    setTerminalState((previous) => ({
+      scope,
+      open: typeof value === 'function' ? value(previous.scope === scope && previous.open) : value,
+    }))
+  }, [])
+  useEffect(() => {
+    setTerminalState((previous) =>
+      previous.scope === terminalScopeKey ? previous : { scope: terminalScopeKey, open: false },
+    )
+  }, [terminalScopeKey])
   const panels = usePanelSizes(config.sidebarWidth, config.workspacePanelWidth, sidebarOpen, 0)
   useEffect(() => {
     if (terminalOpen) {
@@ -1113,7 +1148,9 @@ export function App() {
     setMode(config.defaultMode)
   }, [config.defaultProvider, config.defaultModel, config.defaultMode])
   useEffect(() => {
-    setWorkspaceOpen(config.workspacePanel && window.innerWidth > 1080)
+    if (previousWorkspacePanelPreference.current === config.workspacePanel) return
+    previousWorkspacePanelPreference.current = config.workspacePanel
+    setWorkspaceOpen(config.workspacePanel)
   }, [config.workspacePanel])
   useEffect(() => {
     if (!api) return
@@ -1369,7 +1406,6 @@ export function App() {
     } else if (!connected) {
       setProjectOpen(false)
     }
-    setTerminalOpen(false)
   }, [connected, connection.profile?.id, connection.workspace, startupReady, view])
   useEffect(() => {
     if (!toast) return
@@ -1379,9 +1415,35 @@ export function App() {
   useEffect(() => {
     if (textarea.current) {
       textarea.current.style.height = 'auto'
-      textarea.current.style.height = Math.min(textarea.current.scrollHeight, 180) + 'px'
+      textarea.current.style.height =
+        Math.min(textarea.current.scrollHeight, view === 'workspace' ? 200 : 180) + 'px'
     }
   }, [draft, view, activeId])
+  useLayoutEffect(() => {
+    if (view !== 'workspace' || !composerElement) return
+    const area = composerElement.closest<HTMLElement>('.chat-area')
+    if (!area) return
+    let measured = -1
+    const update = (height: number) => {
+      const next = Math.ceil(height)
+      if (next === measured) return
+      measured = next
+      area.style.setProperty('--life-composer-height', `${next}px`)
+    }
+    update(composerElement.getBoundingClientRect().height)
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (entry)
+        update(
+          entry.borderBoxSize?.[0]?.blockSize ?? composerElement.getBoundingClientRect().height,
+        )
+    })
+    observer.observe(composerElement, { box: 'border-box' })
+    return () => {
+      observer.disconnect()
+      area.style.removeProperty('--life-composer-height')
+    }
+  }, [composerElement, view])
 
   const newThread = useCallback(() => {
     if (!canMutateHistory()) return
@@ -2762,6 +2824,15 @@ export function App() {
             thread.workspace === connection.workspace &&
             thread.gitBranch,
         )
+  const workspacePanelMaximized =
+    view === 'workspace' &&
+    workspaceOpen &&
+    panels.rightInline &&
+    workspaceMaximizedKey === workspaceScopeKey
+  const setWorkspacePanelMaximized = useCallback(
+    (value: boolean) => setWorkspaceMaximizedKey(value ? workspaceScopeKey : undefined),
+    [workspaceScopeKey],
+  )
 
   return (
     <ProjectColorsProvider
@@ -2771,8 +2842,10 @@ export function App() {
       projectKeys={projectColorKeys}
     >
       <div
-        className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout ${builtin.enabled('collapsed-branding') ? 'life-bottom-brand-layout' : ''} life-header-actions-layout ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
+        className={`app-shell life-desktop-layout life-unified-layout life-refined-layout life-polished-layout ${builtin.enabled('collapsed-branding') ? 'life-bottom-brand-layout' : ''} life-header-actions-layout ${view === 'workspace' ? 'life-t3-agents-layout' : ''} ${replacement ? 'life-replacement-active' : ''} ${!sidebarOpen ? 'sidebar-hidden' : ''} ${!workspaceOpen || view !== 'workspace' || replacement ? 'workspace-hidden' : ''}`}
         data-view={view}
+        data-right-panel-maximized={workspacePanelMaximized || undefined}
+        data-right-panel-inline={panels.rightInline}
         data-research-agent-open={view === 'investigation' && researchAgentOpen && !replacement}
         data-platform={platform}
         data-panel-size={config.workspacePanelWidth === 320 ? 'adaptive' : 'custom'}
@@ -2780,6 +2853,13 @@ export function App() {
         style={
           {
             ...panels.style,
+            ...(workspacePanelMaximized
+              ? {
+                  '--life-panel-width': sidebarOpen
+                    ? 'calc(100vw - var(--life-navigation-width))'
+                    : 'calc(100vw - var(--life-collapsed-width))',
+                }
+              : {}),
             '--life-research-panel-width': `${researchAgentWidth}px`,
           } as CSSProperties
         }
@@ -3275,7 +3355,13 @@ export function App() {
                 </div>
               </main>
             ) : (
-              <main className="main-workspace" id="main-content">
+              <main
+                className="main-workspace"
+                id="main-content"
+                data-agent-workspace={view === 'workspace' ? 'true' : undefined}
+                inert={workspacePanelMaximized || undefined}
+                aria-hidden={workspacePanelMaximized || undefined}
+              >
                 <TitleBarContent target={titleBarContent}>
                   <header className="workspace-header">
                     <div className="breadcrumbs">
@@ -3494,7 +3580,7 @@ export function App() {
                               </button>
                             </div>
                           ) : null}
-                          <ThreadTimeline thread={active} />
+                          <ThreadTimeline thread={active} agentWorkspace={view === 'workspace'} />
                           {active.pending
                             .filter(
                               (event) => event.type !== 'question' || !event.questions?.length,
@@ -3544,9 +3630,11 @@ export function App() {
                       <button
                         className="scroll-bottom icon-button"
                         aria-label="Scroll to latest message"
+                        onPointerDown={(event) => event.preventDefault()}
                         onClick={() => setStickToBottom(true)}
                       >
-                        <ArrowDown size={17} />
+                        <ChevronDown size={14} />
+                        <span>Scroll to end</span>
                       </button>
                     ) : null}
                     <CustomPanels config={config} view="workspace" />
@@ -3558,7 +3646,10 @@ export function App() {
                         {extensionPanels.map(extensionHost)}
                       </section>
                     ) : null}
-                    <div className="composer-container life-reference-composer">
+                    <div
+                      className="composer-container life-reference-composer"
+                      ref={setComposerElement}
+                    >
                       {pendingQuestion ? (
                         <>
                           <PendingQuestionPanel
@@ -3570,7 +3661,10 @@ export function App() {
                               nativeRecoveryBlocksMutation(active)
                             }
                             pendingCount={pendingQuestions.length}
-                            active={view !== 'investigation' || researchAgentOpen}
+                            active={
+                              (view !== 'investigation' || researchAgentOpen) &&
+                              !workspacePanelMaximized
+                            }
                           />
                           {busy || (active && threadHasRunningChildren(active)) ? (
                             <button
@@ -3916,9 +4010,15 @@ export function App() {
                 </ResearchLayout>
               </main>
             )}
-            {workspaceOpen && view === 'workspace' && builtin.enabled('workspace-surfaces') ? (
+            {(workspaceOpen || workspaceSurfacesMounted) &&
+            builtin.enabled('workspace-surfaces') ? (
               <WorkspaceSurfaces
                 key={`${connection.profile?.id || ''}:${connection.workspace || ''}`}
+                open={workspaceOpen && view === 'workspace'}
+                inline={panels.rightInline}
+                maximized={workspacePanelMaximized}
+                onMaximizedChange={setWorkspacePanelMaximized}
+                threadScopeKey={workspaceScopeKey}
                 headerTarget={surfaceHeader}
                 theme={config.theme}
                 terminalOpen={terminalOpen}

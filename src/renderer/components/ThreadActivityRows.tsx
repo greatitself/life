@@ -178,12 +178,14 @@ const ToolBatch = memo(function ToolBatch({
   provider,
   compact,
   agentsRunning,
+  agentWorkspace,
 }: {
   messages: Message[]
   agents: boolean
   provider: Thread['provider']
   compact: boolean
   agentsRunning: boolean
+  agentWorkspace: boolean
 }) {
   const running = agents
     ? agentsRunning
@@ -224,7 +226,12 @@ const ToolBatch = memo(function ToolBatch({
           agents ? (
             <SubagentCard key={message.id} message={message} />
           ) : (
-            <MessageView key={message.id} message={message} provider={provider} />
+            <MessageView
+              key={message.id}
+              message={message}
+              provider={provider}
+              agentWorkspace={agentWorkspace}
+            />
           ),
         )}
       </ActivityDisclosure>
@@ -256,7 +263,12 @@ const ToolBatch = memo(function ToolBatch({
           agents ? (
             <SubagentCard key={message.id} message={message} />
           ) : (
-            <MessageView key={message.id} message={message} provider={provider} />
+            <MessageView
+              key={message.id}
+              message={message}
+              provider={provider}
+              agentWorkspace={agentWorkspace}
+            />
           ),
         )}
       </div>
@@ -267,10 +279,12 @@ export function ThreadActivityRows({
   messages,
   provider,
   compact = false,
+  agentWorkspace = false,
 }: {
   messages: Message[]
   provider: Thread['provider']
   compact?: boolean
+  agentWorkspace?: boolean
 }) {
   const projectRows = useMemo(createActivityRowsProjector, [])
   const rows = useMemo(() => projectRows(messages), [projectRows, messages])
@@ -286,6 +300,7 @@ export function ThreadActivityRows({
               agents={row.kind === 'agents'}
               provider={provider}
               compact={compact}
+              agentWorkspace={agentWorkspace}
               agentsRunning={
                 row.kind === 'agents' &&
                 row.messages.some(
@@ -311,7 +326,12 @@ export function ThreadActivityRows({
               messageIds={encodeURIComponent(row.message.id)}
               summary={<span>{activitySummary(row.message)}</span>}
             >
-              <MessageView message={row.message} provider={provider} minimal />
+              <MessageView
+                message={row.message}
+                provider={provider}
+                minimal
+                agentWorkspace={agentWorkspace}
+              />
             </ActivityDisclosure>
           )
         if (row.kind === 'context')
@@ -327,12 +347,20 @@ export function ThreadActivityRows({
                       : 'Context compaction'}
                 </span>
               </div>
-              <MessageView message={row.message} provider={provider} />
+              <MessageView
+                message={row.message}
+                provider={provider}
+                agentWorkspace={agentWorkspace}
+              />
             </section>
           )
         return (
           <div className="thread-commentary" key={row.message.id}>
-            <MessageView message={row.message} provider={provider} />
+            <MessageView
+              message={row.message}
+              provider={provider}
+              agentWorkspace={agentWorkspace}
+            />
           </div>
         )
       })}

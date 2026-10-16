@@ -2,6 +2,7 @@ import { memo, useRef, useState, type KeyboardEvent } from 'react'
 import * as HoverCard from '@radix-ui/react-hover-card'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import {
+  AlarmClockOff,
   Check,
   CircleAlert,
   Clock,
@@ -21,8 +22,15 @@ import { ThreadBadge } from './ThreadBadge'
 import { ThreadRunStatus } from './ThreadRunStatus'
 import { useSidebarMinute } from '../sidebar-clock'
 import { conversationTurnCount } from '../sidebar-history'
-import { isThreadSnoozed, threadHasUnreadCompletion } from '../thread-management'
+import {
+  isThreadSnoozed,
+  threadCanSettle,
+  threadCanSnooze,
+  threadHasUnreadCompletion,
+  threadSection,
+} from '../thread-management'
 import { ThreadActionsMenu, type ThreadActionHandler } from './ThreadActionsMenu'
+import { ThreadSnoozeMenuItems } from './ThreadSnoozeMenu'
 import './thread-controls.css'
 
 function threadAge(updatedAt: number): string {
@@ -36,12 +44,6 @@ function threadAge(updatedAt: number): string {
 function ThreadAge({ updatedAt }: { updatedAt: number }) {
   useSidebarMinute()
   return threadAge(updatedAt)
-}
-function tomorrow() {
-  const date = new Date()
-  date.setDate(date.getDate() + 1)
-  date.setHours(9, 0, 0, 0)
-  return date.getTime()
 }
 function navigateRows(event: KeyboardEvent<HTMLButtonElement>) {
   if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
@@ -110,6 +112,10 @@ export const SidebarThread = memo(function SidebarThread({
     ? `Last checked ${new Date(thread.gitObservedAt).toLocaleString()}`
     : 'Select this project to load its Git branch.'
   const snoozed = isThreadSnoozed(thread)
+  const section = threadSection(thread)
+  const settled = section === 'settled'
+  const canSettle = threadCanSettle(thread)
+  const canSnooze = threadCanSnooze(thread)
   const approval = thread.pending.some((request) => request.type === 'approval')
   const input = !approval && thread.pending.length > 0
   const unread = !active && threadHasUnreadCompletion(thread)
@@ -121,7 +127,7 @@ export const SidebarThread = memo(function SidebarThread({
         ? 'Working'
         : snoozed
           ? `Snoozed until ${new Date(thread.snoozedUntil!).toLocaleString()}`
-          : thread.settled
+          : settled
             ? 'Settled'
             : thread.turnStatus === 'failed'
               ? 'Failed'
@@ -184,6 +190,7 @@ export const SidebarThread = memo(function SidebarThread({
       data-unread={unread || undefined}
       data-needs-input={Boolean(thread.pending.length) || undefined}
       data-menu-open={menuOpen || snoozeOpen || undefined}
+      data-thread-section={section}
     >
       <HoverCard.Root
         open={hovered && !menuOpen && !snoozeOpen}
@@ -306,84 +313,71 @@ export const SidebarThread = memo(function SidebarThread({
       </HoverCard.Root>
       {onArrange || onAction ? (
         <div className="life-thread-actions" role="group" aria-label={`Arrange ${thread.title}`}>
-          <DropdownMenu.Root
-            open={snoozeOpen}
-            onOpenChange={(open) => {
-              setSnoozeOpen(open)
-              if (open) setHovered(false)
-            }}
-          >
-            <DropdownMenu.Trigger asChild>
-              <button
-                type="button"
-                className="life-thread-action-icon"
-                aria-label={snoozed ? 'Change snooze time or wake thread' : 'Snooze thread'}
-                title={snoozed ? 'Change snooze or wake' : 'Snooze thread'}
-                disabled={thread.pending.length > 0 || Boolean(thread.archivedAt)}
-              >
-                <Clock size={14} />
-              </button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content
-                className="life-thread-menu"
-                sideOffset={6}
-                align="end"
-                collisionPadding={12}
-              >
-                <DropdownMenu.Label className="life-choice-heading">
-                  Snooze thread
-                </DropdownMenu.Label>
-                {snoozed ? (
-                  <DropdownMenu.Item
-                    className="life-thread-menu-item"
-                    onSelect={() => arrange({ snoozedUntil: undefined })}
-                  >
-                    Wake now
-                  </DropdownMenu.Item>
-                ) : null}
-                {[
-                  ['30 minutes', 1800000],
-                  ['1 hour', 3600000],
-                  ['4 hours', 14400000],
-                ].map(([label, milliseconds]) => (
-                  <DropdownMenu.Item
-                    key={label}
-                    className="life-thread-menu-item"
-                    onSelect={() =>
-                      arrange({
-                        snoozedUntil: Date.now() + Number(milliseconds),
-                        settled: false,
-                      })
-                    }
-                  >
-                    {label}
-                  </DropdownMenu.Item>
-                ))}
-                <DropdownMenu.Item
-                  className="life-thread-menu-item"
-                  onSelect={() => arrange({ snoozedUntil: tomorrow(), settled: false })}
+          {snoozed ? (
+            <button
+              type="button"
+              className="life-thread-settle life-thread-wake"
+              aria-label="Wake thread now"
+              title="Wake now"
+              onClick={() => arrange({ snoozedUntil: undefined })}
+            >
+              <AlarmClockOff size={14} aria-hidden="true" />
+              <span>Wake</span>
+            </button>
+          ) : !settled && !thread.archivedAt ? (
+            <DropdownMenu.Root
+              open={snoozeOpen}
+              onOpenChange={(open) => {
+                setSnoozeOpen(open)
+                if (open) setHovered(false)
+              }}
+            >
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  className="life-thread-action-icon"
+                  aria-label="Snooze thread"
+                  title={
+                    canSnooze
+                      ? 'Snooze thread'
+                      : 'Resolve pending responses or queued work before snoozing'
+                  }
+                  disabled={!canSnooze}
                 >
-                  Tomorrow at 9:00
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-          {!thread.archivedAt ? (
+                  <Clock size={14} />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="life-thread-menu life-thread-snooze-menu"
+                  sideOffset={6}
+                  align="end"
+                  collisionPadding={12}
+                >
+                  <ThreadSnoozeMenuItems
+                    onSnooze={(until) => arrange({ snoozedUntil: until, settled: false })}
+                  />
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          ) : null}
+          {!thread.archivedAt && !snoozed ? (
             <button
               type="button"
               className="life-thread-settle"
-              aria-label={thread.settled ? 'Restore' : 'Settle'}
+              aria-label={settled ? 'Un-settle thread' : 'Settle thread'}
               title={
-                thread.settled
+                settled
                   ? 'Move back to active threads'
-                  : 'Move to Settled; keep the conversation and current run'
+                  : canSettle
+                    ? 'Move finished work to Settled'
+                    : 'Finish running work and resolve pending responses before settling'
               }
-              disabled={thread.pending.length > 0}
-              onClick={() => arrange({ settled: !thread.settled, snoozedUntil: undefined })}
+              disabled={!settled && !canSettle}
+              onClick={() => arrange({ settled: !settled, snoozedUntil: undefined })}
             >
-              {thread.settled ? <Undo2 size={14} /> : <Check size={14} />}
-              <span>{thread.settled ? 'Restore' : 'Settle'}</span>
+              {settled ? <Undo2 size={14} /> : <Check size={14} />}
+              <span>{settled ? 'Un-settle' : 'Settle'}</span>
             </button>
           ) : null}
           {onAction ? (

@@ -8,6 +8,8 @@ import {
   isThreadSnoozed,
   threadCanArchive,
   threadCanMove,
+  threadCanSettle,
+  threadCanSnooze,
   threadHasUnreadCompletion,
   threadSection,
   undoThreadArrangement,
@@ -212,8 +214,86 @@ describe('durable thread lifecycle and attention', () => {
     const acknowledged = applyThreadAction([failed], 'thread', 'snooze', 500, 900)[0]
     expect(isThreadSnoozed(acknowledged, 550)).toBe(true)
     expect(isThreadSnoozed(acknowledged, 900)).toBe(false)
-    const settled = applyThreadAction([running], 'thread', 'settle', 200)[0]
-    expect(applyEvent(settled, event('complete', { status: 'completed' })).settled).toBe(false)
+    const settled = applyThreadAction([failed], 'thread', 'settle', 500)[0]
+    expect(settled.settled).toBe(true)
+    expect(applyEvent(settled, event('question', { requestId: 'new-question' })).settled).toBe(
+      false,
+    )
+  })
+
+  it('settles only finished work while snoozing keeps an existing native run and its input intact', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(400)
+    for (const running of [
+      thread('thread', { busy: true, turnStatus: 'running' }),
+      thread('thread', { busy: false, turnStatus: 'running' }),
+      thread('thread', { turnStatus: 'reconnecting' }),
+      thread('thread', { nativeRecoveryStatus: 'running', turnStatus: 'running' }),
+      thread('thread', { nativeRecoveryStatus: 'recovering' }),
+      thread('thread', { agentStatus: 'starting', turnStatus: 'unknown' }),
+      thread('thread', { agentStatus: 'initializing', turnStatus: 'unknown' }),
+      thread('thread', {
+        messages: [
+          {
+            id: 'child',
+            role: 'tool',
+            kind: 'subagent',
+            agentId: 'child',
+            text: 'Working',
+            status: 'running',
+            turn: 1,
+          },
+        ],
+      }),
+    ]) {
+      const current = [running]
+      expect(threadCanSettle(running)).toBe(false)
+      expect(applyThreadAction(current, 'thread', 'settle', 200)).toBe(current)
+      expect(threadCanSnooze(running)).toBe(true)
+      const snoozed = applyThreadAction(current, 'thread', 'snooze', 200, 900)[0]
+      expect(snoozed.messages).toBe(running.messages)
+      expect(snoozed.remoteId).toBe(running.remoteId)
+      expect(snoozed.busy).toBe(running.busy)
+      expect(snoozed.turnStatus).toBe(running.turnStatus)
+      expect(snoozed.nativeRecoveryStatus).toBe(running.nativeRecoveryStatus)
+      expect(snoozed.snoozedUntil).toBe(900)
+    }
+    const completed = applyEvent(
+      thread('thread', { busy: true, turnStatus: 'running', nativeRecoveryStatus: 'running' }),
+      event('complete', { status: 'completed' }),
+    )
+    expect(completed.nativeRecoveryStatus).toBe('running')
+    expect(threadCanSettle(completed)).toBe(true)
+    expect(threadCanSettle({ ...completed, agentStatus: 'running' })).toBe(true)
+    expect(applyThreadAction([completed], 'thread', 'settle', 500)[0].settled).toBe(true)
+  })
+
+  it('does not hide a queued start, and preserves explicitly paused or failed queued drafts', () => {
+    const queued = {
+      id: 'next',
+      text: '  Exact next prompt\r\n🧪',
+      attachments: [],
+      createdAt: 100,
+    }
+    const starting = thread('thread', { queue: [queued] })
+    const current = [starting]
+    expect(threadCanSettle(starting)).toBe(false)
+    expect(threadCanSnooze(starting)).toBe(false)
+    expect(applyThreadAction(current, 'thread', 'settle', 200)).toBe(current)
+    expect(applyThreadAction(current, 'thread', 'snooze', 200, 900)).toBe(current)
+    for (const draft of [
+      { ...queued, paused: true },
+      { ...queued, error: 'Needs retry' },
+    ]) {
+      const stopped = thread('thread', { queue: [draft] })
+      expect(threadCanSettle(stopped)).toBe(true)
+      expect(threadCanSnooze(stopped)).toBe(true)
+      for (const action of ['settle', 'snooze'] as const) {
+        const parked = applyThreadAction([stopped], 'thread', action, 200, 900)[0]
+        expect(parked.queue).toBe(stopped.queue)
+        expect(parked.messages).toBe(stopped.messages)
+      }
+    }
   })
 
   it('recoverable errors and child failures do not finish the parent or create a parent completion', () => {
@@ -313,6 +393,25 @@ describe('durable thread lifecycle and attention', () => {
 })
 
 describe('thread arrangement undo remains attached to the original work', () => {
+  it('cannot settle again while the same turn starts running, or snooze over a newly queued start', () => {
+    const settled = [thread('thread', { settled: true, settledAt: 100 })]
+    const restored = applyThreadAction(settled, 'thread', 'restore', 200)
+    const restoreChanges = captureThreadArrangementChanges(settled, restored)
+    const running = [{ ...restored[0], busy: true, turnStatus: 'running' as const }]
+    expect(undoThreadArrangement(running, restoreChanges)).toBe(running)
+
+    const snoozed = [thread('thread', { snoozedAt: 100, snoozedUntil: 900 })]
+    const awakened = applyThreadAction(snoozed, 'thread', 'wake', 200)
+    const wakeChanges = captureThreadArrangementChanges(snoozed, awakened)
+    const queued = [
+      {
+        ...awakened[0],
+        queue: [{ id: 'next', text: 'Exact queued prompt', attachments: [], createdAt: 250 }],
+      },
+    ]
+    expect(undoThreadArrangement(queued, wakeChanges)).toBe(queued)
+  })
+
   it('does not archive or settle a thread again after a new send has started', () => {
     for (const parked of [
       thread('thread', { archivedAt: 100 }),

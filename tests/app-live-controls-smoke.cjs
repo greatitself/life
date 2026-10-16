@@ -714,7 +714,7 @@ async function fluidityChecks(page, checks, settle) {
   await page.getByRole('button', { name: /^Thread Alpha,/ }).click()
   assert.equal(await composer.inputValue(), 'Fluid input')
   await arranged.getByRole('button', { name: /^Saved thread 42,/ }).hover()
-  await arranged.getByRole('button', { name: 'Settle', exact: true }).click()
+  await arranged.getByRole('button', { name: 'Settle thread', exact: true }).click()
   await page.getByText('Settled (1)', { exact: true }).click()
   await arranged.getByRole('button', { name: /^Saved thread 42,/ }).click()
   await settle()
@@ -740,14 +740,14 @@ async function fluidityChecks(page, checks, settle) {
   })
   await hover.getByText('updated-test-model', { exact: true }).waitFor()
   assert.match(await hover.textContent(), /Reasoning: high/)
-  await arranged.getByRole('button', { name: 'Restore', exact: true }).click()
+  await arranged.getByRole('button', { name: 'Un-settle thread', exact: true }).click()
   await page.waitForFunction(
     () => document.querySelectorAll('.project-list .thread-row').length === 408,
   )
   await page.getByRole('button', { name: /^Thread Alpha,/ }).click()
   assert.equal(await composer.inputValue(), 'Fluid input')
   checks.push(
-    'Memoized sidebar selection, hover details and Settle/Restore use current model and reasoning settings after live configuration, and preserve a different thread’s draft',
+    'Memoized sidebar selection, hover details and Settle/Un-settle use current model and reasoning settings after live configuration, and preserve a different thread’s draft',
   )
 
   await page.keyboard.press('Control+k')

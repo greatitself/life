@@ -140,11 +140,10 @@
   .thread-card-compact-status {
   visibility: hidden;
 }
-.app-shell.life-refined-layout .sidebar .thread-card-compact .life-thread-settle > span {
-  display: none;
-}
 .app-shell.life-refined-layout .sidebar .thread-card-compact .life-thread-settle {
-  width: 24px;
+  min-width: 24px;
+  padding-inline: 5px;
+  font-size: 11px;
 }
 .sidebar-pinned-threads {
   margin-bottom: 16px;

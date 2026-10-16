@@ -1,5 +1,5 @@
 import type { Thread } from './state'
-import { threadHasRunningChildren } from './thread-presentation'
+import { threadHasRunningChildren, toolLifecycle } from './thread-presentation'
 
 export type ThreadAction =
   | 'pin'
@@ -89,7 +89,8 @@ export function undoThreadArrangement(threads: Thread[], changes: ThreadUndoChan
     }
     if (result === thread) return thread
     if (result.archivedAt && !threadCanArchive(thread)) return thread
-    if ((result.settled || result.snoozedUntil) && !threadCanPark(thread)) return thread
+    if (result.settled && !threadCanSettle(thread)) return thread
+    if (result.snoozedUntil && !threadCanSnooze(thread)) return thread
     changed = true
     return result
   })
@@ -135,7 +136,33 @@ export function threadSection(thread: Thread, now = Date.now()): ThreadSection {
 }
 
 export function threadCanPark(thread: Thread): boolean {
-  return thread.pending.length === 0
+  return threadCanSnooze(thread)
+}
+
+function threadHasQueuedStarts(thread: Thread): boolean {
+  return (thread.queue || []).some((message) => !message.paused && !message.error)
+}
+
+/** Snoozing changes visibility while an existing run continues. */
+export function threadCanSnooze(thread: Thread): boolean {
+  return thread.pending.length === 0 && !threadHasQueuedStarts(thread)
+}
+
+/** Settled work must have no running or starting native owner. */
+export function threadCanSettle(thread: Thread): boolean {
+  return (
+    threadCanSnooze(thread) &&
+    !thread.busy &&
+    thread.turnStatus !== 'running' &&
+    thread.turnStatus !== 'reconnecting' &&
+    thread.nativeRecoveryStatus !== 'recovering' &&
+    (thread.turnStatus === 'completed' ||
+      thread.turnStatus === 'interrupted' ||
+      thread.turnStatus === 'failed' ||
+      (thread.agentStatus?.toLowerCase() !== 'starting' &&
+        toolLifecycle(thread.agentStatus) !== 'active')) &&
+    !threadHasRunningChildren(thread)
+  )
 }
 
 export function threadCanArchive(thread: Thread): boolean {
@@ -143,7 +170,7 @@ export function threadCanArchive(thread: Thread): boolean {
     !thread.busy &&
     thread.pending.length === 0 &&
     !threadHasRunningChildren(thread) &&
-    !(thread.queue || []).some((message) => !message.paused && !message.error)
+    !threadHasQueuedStarts(thread)
   )
 }
 
@@ -235,7 +262,7 @@ export function applyThreadAction(
       patch = { pinnedAt: undefined, pinOrder: undefined }
       break
     case 'settle':
-      if (!threadCanPark(thread)) return threads
+      if (!threadCanSettle(thread)) return threads
       patch = {
         settled: true,
         settledAt: now,
@@ -259,7 +286,7 @@ export function applyThreadAction(
       break
     case 'snooze':
       if (
-        !threadCanPark(thread) ||
+        !threadCanSnooze(thread) ||
         typeof value !== 'number' ||
         !Number.isFinite(value) ||
         value <= now

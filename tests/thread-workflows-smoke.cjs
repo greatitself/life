@@ -136,6 +136,62 @@ async function run() {
       await menu(id)
       await page.getByRole('menuitem', { name, exact: true }).click()
     }
+    const assertSnoozePresets = async () => {
+      const items = page.locator('[role="menu"]:visible .life-thread-snooze-preset')
+      await items.first().waitFor()
+      const expected = await page.evaluate(() => {
+        const now = new Date()
+        const evening = new Date(now)
+        evening.setHours(18, 0, 0, 0)
+        return [
+          'In 1 hour',
+          'In 3 hours',
+          ...(evening.getTime() - now.getTime() > 3600000 ? ['This evening'] : []),
+          'Tomorrow',
+          ...(now.getDay() === 0 ? [] : ['Next week']),
+        ]
+      })
+      const rendered = await items.evaluateAll((nodes) =>
+        nodes.map((node) => {
+          const [label, clock] = node.querySelectorAll('span')
+          const labelBounds = label.getBoundingClientRect()
+          const clockBounds = clock.getBoundingClientRect()
+          return {
+            label: label.textContent,
+            clock: clock.textContent,
+            separateClock: clock.classList.contains('life-thread-snooze-time'),
+            clockFollowsLabel: clockBounds.left >= labelBounds.right - 1,
+          }
+        }),
+      )
+      assert.deepEqual(
+        rendered.map((choice) => choice.label),
+        expected,
+      )
+      for (const choice of rendered) {
+        assert.match(choice.clock, /\d/)
+        assert.equal(choice.separateClock, true)
+        assert.equal(choice.clockFollowsLabel, true)
+      }
+      return expected
+    }
+    const selectSnoozePreset = (label) =>
+      page.getByRole('menuitem', { name: new RegExp('^' + label) }).click()
+    const snooze = async (id, label = 'In 1 hour') => {
+      await menu(id)
+      await page.getByRole('menuitem', { name: 'Snooze thread', exact: true }).hover()
+      await selectSnoozePreset(label)
+      await page.waitForFunction(
+        (id) =>
+          Boolean(window.controlsTest.stored().find((thread) => thread.id === id)?.snoozedUntil),
+        id,
+      )
+    }
+    const wake = async (id) => {
+      await shell(id).hover()
+      await shell(id).getByRole('button', { name: 'Wake thread now', exact: true }).click()
+      await waitStored(id, 'snoozedUntil', undefined)
+    }
     const reload = async () => {
       await page.reload()
       await page.waitForLoadState('networkidle')
@@ -316,19 +372,87 @@ async function run() {
       () => document.querySelector('[data-thread-row="thread-a"]') === null,
     )
     await page.getByRole('button', { name: 'Settled (2)', exact: true }).click()
+    assert.deepEqual(
+      await page
+        .getByRole('button', { name: 'Settled (2)', exact: true })
+        .locator('..')
+        .locator('[data-thread-row]')
+        .evaluateAll((nodes) => nodes.map((node) => node.dataset.threadRow)),
+      ['thread-a', 'settled-thread'],
+    )
     await row('thread-a').click()
-    await action('thread-a', 'Restore thread')
+    await action('thread-a', 'Un-settle thread')
     await waitStored('thread-a', 'settled', false)
     checks.push(
       'Settled work has a compact selected row even on a closed shelf, and can be reopened and restored',
     )
 
+    const beforeSnooze = (await stored()).find((thread) => thread.id === 'thread-a')
+    await shell('thread-a').hover()
+    await shell('thread-a').getByRole('button', { name: 'Snooze thread', exact: true }).click()
+    const hoverPresets = await assertSnoozePresets()
+    const hourStarted = await page.evaluate(() => Date.now())
+    await selectSnoozePreset('In 1 hour')
+    await page.waitForFunction(() =>
+      Boolean(window.controlsTest.stored().find((thread) => thread.id === 'thread-a').snoozedUntil),
+    )
+    const hourSaved = (await stored()).find((thread) => thread.id === 'thread-a')
+    assert.ok(hourSaved.snoozedUntil >= hourStarted + 3600000)
+    assert.ok(hourSaved.snoozedUntil <= (await page.evaluate(() => Date.now())) + 3600000)
+    await reload()
+    await waitStored('thread-a', 'snoozedUntil', hourSaved.snoozedUntil)
+    assert.equal(
+      await shell('thread-a').evaluate((node) => node.classList.contains('thread-card-compact')),
+      true,
+    )
+    await wake('thread-a')
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await waitStored('thread-a', 'snoozedUntil', hourSaved.snoozedUntil)
+    await wake('thread-a')
+    await page.getByRole('button', { name: 'Thread actions', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Snooze thread', exact: true }).hover()
+    assert.deepEqual(await assertSnoozePresets(), hoverPresets)
+    const threeHoursStarted = await page.evaluate(() => Date.now())
+    await selectSnoozePreset('In 3 hours')
+    await page.waitForFunction(() =>
+      Boolean(window.controlsTest.stored().find((thread) => thread.id === 'thread-a').snoozedUntil),
+    )
+    const threeHoursSaved = (await stored()).find((thread) => thread.id === 'thread-a')
+    assert.ok(threeHoursSaved.snoozedUntil >= threeHoursStarted + 10800000)
+    assert.ok(threeHoursSaved.snoozedUntil <= (await page.evaluate(() => Date.now())) + 10800000)
+    await wake('thread-a')
+    const afterSnooze = (await stored()).find((thread) => thread.id === 'thread-a')
+    for (const field of ['messages', 'turn', 'remoteId', 'model', 'workspace', 'busy'])
+      assert.deepEqual(afterSnooze[field], beforeSnooze[field])
+    checks.push(
+      'Hover and header Snooze share the exact calendar-aware presets and separate wake clocks; deadlines persist through reload, and compact Wake/Undo preserves the original conversation',
+    )
+
     await page.evaluate(() => window.controlsTest.emit('thread-b'))
     await waitStored('thread-b', 'busy', true)
+    await shell('thread-b').hover()
+    assert.equal(
+      await shell('thread-b')
+        .getByRole('button', { name: 'Settle thread', exact: true })
+        .isEnabled(),
+      false,
+    )
+    assert.equal(
+      await shell('thread-b')
+        .getByRole('button', { name: 'Snooze thread', exact: true })
+        .isEnabled(),
+      true,
+    )
     await menu('thread-b')
     assert.equal(
       await page
         .getByRole('menuitem', { name: 'Archive thread', exact: true })
+        .getAttribute('aria-disabled'),
+      'true',
+    )
+    assert.equal(
+      await page
+        .getByRole('menuitem', { name: 'Settle thread', exact: true })
         .getAttribute('aria-disabled'),
       'true',
     )
@@ -338,7 +462,12 @@ async function run() {
         .getAttribute('aria-disabled'),
       'true',
     )
-    await page.keyboard.press('Escape')
+    await page.getByRole('menuitem', { name: 'Snooze thread', exact: true }).hover()
+    await selectSnoozePreset('In 1 hour')
+    await page.waitForFunction(() =>
+      Boolean(window.controlsTest.stored().find((thread) => thread.id === 'thread-b').snoozedUntil),
+    )
+    assert.equal((await stored()).find((thread) => thread.id === 'thread-b').busy, true)
     await page.evaluate(() =>
       window.controlsTest.emit('thread-b', 'approval', {
         requestId: 'approve-files',
@@ -351,6 +480,7 @@ async function run() {
         document.querySelector('[data-thread-row="thread-b"]').closest('.thread-card-shell').dataset
           .needsInput === 'true',
     )
+    await waitStored('thread-b', 'snoozedUntil', undefined)
     await menu('thread-b')
     for (const name of ['Settle thread', 'Snooze thread', 'Archive thread'])
       assert.equal(
@@ -366,8 +496,12 @@ async function run() {
       window.controlsTest.emit('thread-b', 'complete', { status: 'completed' })
     })
     await waitStored('thread-b', 'busy', false)
+    assert.equal(
+      (await stored()).find((thread) => thread.id === 'thread-b').snoozedUntil,
+      undefined,
+    )
     checks.push(
-      'Live runs cannot be archived; pending provider requests disable settling, snoozing and archiving',
+      'Busy runs disable Settle and Archive while Snooze continues the same run; a provider permission permanently wakes it and disables parking until answered',
     )
 
     assert.equal(await shell('thread-b').getAttribute('data-unread'), 'true')
@@ -387,12 +521,7 @@ async function run() {
     await row('thread-a').click()
     await page.evaluate(() => window.controlsTest.emit('thread-c'))
     await waitStored('thread-c', 'busy', true)
-    await menu('thread-c')
-    await page.getByRole('menuitem', { name: 'Snooze thread', exact: true }).hover()
-    await page.getByRole('menuitem', { name: '30 minutes', exact: true }).click()
-    await page.waitForFunction(() =>
-      Boolean(window.controlsTest.stored().find((thread) => thread.id === 'thread-c').snoozedUntil),
-    )
+    await snooze('thread-c')
     assert.equal((await stored()).find((thread) => thread.id === 'thread-c').busy, true)
     await page.evaluate(() =>
       window.controlsTest.emit('thread-c', 'complete', { status: 'completed' }),
@@ -404,6 +533,24 @@ async function run() {
     assert.equal(await shell('thread-c').getAttribute('data-unread'), 'true')
     checks.push(
       'Only inactive completed turns become unread; selecting clears them, duplicate completion stays read, and fresh completion wakes snoozed work',
+    )
+
+    await snooze('thread-a', 'In 3 hours')
+    await snooze('thread-b', 'In 1 hour')
+    await snooze('thread-c', 'Tomorrow')
+    const snoozedShelf = page.getByRole('button', { name: 'Snoozed (3)', exact: true })
+    if ((await snoozedShelf.getAttribute('aria-expanded')) !== 'true') await snoozedShelf.click()
+    const snoozedIds = () =>
+      snoozedShelf
+        .locator('..')
+        .locator('[data-thread-row]')
+        .evaluateAll((nodes) => nodes.map((node) => node.dataset.threadRow))
+    assert.deepEqual(await snoozedIds(), ['thread-b', 'thread-a', 'thread-c'])
+    await reload()
+    assert.deepEqual(await snoozedIds(), ['thread-b', 'thread-a', 'thread-c'])
+    for (const id of ['thread-b', 'thread-a', 'thread-c']) await wake(id)
+    checks.push(
+      'Snoozed threads sort by earliest wake time across reload, while Settled work shows its newest settlement first',
     )
 
     const original = (await stored()).find((thread) => thread.id === 'thread-a')
@@ -569,7 +716,7 @@ async function run() {
 
     await action('thread-a', 'Settle thread')
     await waitStored('thread-a', 'settled', true)
-    await action('thread-a', 'Restore thread')
+    await action('thread-a', 'Un-settle thread')
     await waitStored('thread-a', 'settled', false)
     await page.getByRole('button', { name: 'Remove rejected.txt', exact: true }).click()
     await page.getByRole('button', { name: 'Remove typed-later.txt', exact: true }).click()

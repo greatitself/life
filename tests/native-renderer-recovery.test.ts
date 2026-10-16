@@ -16,6 +16,7 @@ import {
   StudioHistoryStore,
 } from '../src/renderer/studio-history'
 import { reconcileStudioSessionLifecycle } from '../src/renderer/studio-source'
+import { threadSection } from '../src/renderer/thread-management'
 import {
   copyConversationSourceJson,
   projectConversationSource,
@@ -435,6 +436,69 @@ describe('renderer admission of durable native events', () => {
     expect(old.nativeRecoveryOwner?.ownerGeneration).toBe(2)
   })
 
+  it.each(['complete', 'error', 'approval'] as const)(
+    'retains the current parked arrangement when admitting an older native %s',
+    (type) => {
+      for (const arrangement of [
+        { settled: true, settledAt: 500 },
+        { snoozedAt: 500, snoozedUntil: 900 },
+        { archivedAt: 500 },
+      ]) {
+        const current = applyNativeRecoveryOwner(
+          thread({
+            ...arrangement,
+            busy: false,
+            turnStatus: 'failed',
+            attentionAt: 400,
+            completedAt: 400,
+            lastReadAt: 500,
+            nativeRecovery: { transport: { appliedRevision: 1, ownerGeneration: 1 } },
+          }),
+          {
+            sessionId: 'thread',
+            transportId: 'transport',
+            status: 'idle',
+            ownerGeneration: 2,
+            acceptedAppliedRevision: 1,
+            snapshotToken: 'current-token',
+            remoteId: 'native-session',
+            pending: [],
+          },
+        )
+        const historical = applyEvent(
+          current,
+          event(2, {
+            type,
+            ...(type === 'complete' ? { status: 'completed' } : {}),
+            ...(type === 'approval' ? { requestId: 'old-native-approval' } : {}),
+            text: 'Exact older native record\r\n🧪',
+            nativeRecovery: { ...event(2).nativeRecovery!, localTurn: 30 },
+          }),
+        )
+        expect(historical).not.toBe(current)
+        expect(historical).toMatchObject({
+          ...arrangement,
+          busy: current.busy,
+          turn: current.turn,
+          turnStatus: current.turnStatus,
+          remoteId: current.remoteId,
+          attentionAt: 400,
+          completedAt: 400,
+          lastReadAt: 500,
+        })
+        expect(historical.nativeRecoveryOwner).toEqual(current.nativeRecoveryOwner)
+        expect(historical.pending).toBe(current.pending)
+        expect(historical.messages.slice(0, current.messages.length)).toEqual(current.messages)
+        expect(historical.nativeRecovery?.transport.appliedRevision).toBe(2)
+        if (type !== 'complete')
+          expect(historical.messages.at(-1)).toMatchObject({
+            text: 'Exact older native record\r\n🧪',
+            turn: 30,
+          })
+      }
+    },
+  )
+
   it('restores current native approval controls separately from already applied historical events', () => {
     const approval = event(1, { type: 'approval', requestId: 'pending-native-request' })
     const saved = readThreads([applyEvent(thread(), approval)])[0]
@@ -450,6 +514,223 @@ describe('renderer admission of durable native events', () => {
     expect(restored.pending).toEqual([approval])
     expect(restored.nativeRecovery?.transport.appliedRevision).toBe(1)
   })
+
+  it('permanently wakes parked history for its exact current native permission, including after answering', () => {
+    const approval = event(1, { type: 'approval', requestId: 'pending-native-request' })
+    for (const arrangement of [
+      { settled: true, settledAt: 200 },
+      { snoozedAt: 200, snoozedUntil: 900 },
+      { archivedAt: 200 },
+    ]) {
+      const raw = {
+        ...applyEvent(thread(), approval),
+        ...arrangement,
+        futureThreadField: { exact: '  Archived café 漢字 🧪\r\n' },
+      }
+      const saved = readThreads([raw])[0]
+      const recovered = applyNativeRecoveryOwner(saved, {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: 'running',
+        ownerGeneration: 1,
+        snapshotToken: 'issued-native-token',
+        acceptedAppliedRevision: 1,
+        pending: [approval],
+      })
+      expect(recovered.pending).toEqual([approval])
+      expect(threadSection(recovered, 300)).toBe('active')
+      expect(recovered.settled).toBe(false)
+      expect(recovered.snoozedUntil).toBeUndefined()
+      expect(recovered.archivedAt).toBeUndefined()
+      const answered = applyEvent(
+        recovered,
+        event(2, {
+          type: 'request-resolved',
+          requestId: approval.requestId,
+          status: 'approved',
+        }),
+      )
+      expect(answered.pending).toEqual([])
+      expect(threadSection(answered, 400)).toBe('active')
+      expect(answered.nativeRecoveryOwner).toEqual(recovered.nativeRecoveryOwner)
+      expect(answered.messages[0]).toEqual(saved.messages[0])
+      const persisted = copyConversationSourceJson(answered)
+      expect(persisted.futureThreadField).toEqual(raw.futureThreadField)
+      expect(persisted.settled).toBe(false)
+      expect(persisted.snoozedUntil).toBeUndefined()
+      expect(persisted.archivedAt).toBeUndefined()
+      expect(persisted.messages[0]).toEqual(raw.messages[0])
+    }
+  })
+
+  it('permanently wakes parked history when a newer native owner restores its current permission', () => {
+    for (const arrangement of [
+      { settled: true, settledAt: 200 },
+      { snoozedAt: 200, snoozedUntil: 900 },
+      { archivedAt: 200 },
+    ]) {
+      const raw = {
+        ...applyEvent(thread(), event(1)),
+        ...arrangement,
+        futureThreadField: { exact: '  New owner café 漢字 🧪\r\n' },
+      }
+      const current = applyNativeRecoveryOwner(readThreads([raw])[0], {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: 'idle',
+        ownerGeneration: 1,
+        snapshotToken: 'issued-native-token',
+        acceptedAppliedRevision: 1,
+        pending: [],
+      })
+      const approval = event(2, {
+        type: 'approval',
+        requestId: 'new-owner-permission',
+        nativeRecovery: {
+          ...event(2).nativeRecovery!,
+          ownerGeneration: 2,
+          snapshotToken: 'new-issued-token',
+        },
+      })
+      const recovered = applyNativeRecoveryOwner(current, {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: 'idle',
+        ownerGeneration: 2,
+        snapshotToken: 'new-issued-token',
+        acceptedAppliedRevision: 1,
+        pending: [approval],
+      })
+      expect(recovered.pending).toEqual([approval])
+      expect(recovered.messages).toBe(current.messages)
+      expect(recovered.nativeRecoveryOwner).toEqual({
+        transportId: 'transport',
+        ownerGeneration: 2,
+        snapshotToken: 'new-issued-token',
+      })
+      expect(recovered.settled).toBe(false)
+      expect(recovered.snoozedUntil).toBeUndefined()
+      expect(recovered.archivedAt).toBeUndefined()
+      const answered = applyEvent(
+        recovered,
+        event(3, {
+          type: 'request-resolved',
+          requestId: approval.requestId,
+          status: 'approved',
+          nativeRecovery: {
+            ...event(3).nativeRecovery!,
+            ownerGeneration: 2,
+            snapshotToken: 'new-issued-token',
+          },
+        }),
+      )
+      expect(answered.pending).toEqual([])
+      expect(threadSection(answered, 400)).toBe('active')
+      const persisted = copyConversationSourceJson(answered)
+      expect(persisted.futureThreadField).toEqual(raw.futureThreadField)
+      expect(persisted.messages).toEqual(raw.messages)
+      expect(persisted.settled).toBe(false)
+      expect(persisted.snoozedUntil).toBeUndefined()
+      expect(persisted.archivedAt).toBeUndefined()
+    }
+  })
+
+  it.each([1, 2])(
+    'keeps parked history when a mismatched generation-%i owner restores a permission',
+    (ownerGeneration) => {
+      const raw = {
+        ...applyEvent(thread(), event(1)),
+        snoozedAt: 200,
+        snoozedUntil: 900,
+      }
+      const current = applyNativeRecoveryOwner(readThreads([raw])[0], {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: 'idle',
+        ownerGeneration: 2,
+        snapshotToken: 'current-token',
+        acceptedAppliedRevision: 1,
+        pending: [],
+      })
+      const approval = event(2, {
+        type: 'approval',
+        requestId: 'mismatched-owner-permission',
+        nativeRecovery: {
+          ...event(2).nativeRecovery!,
+          ownerGeneration,
+          snapshotToken: 'mismatched-token',
+        },
+      })
+      const recovered = applyNativeRecoveryOwner(current, {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: 'idle',
+        ownerGeneration,
+        snapshotToken: 'mismatched-token',
+        acceptedAppliedRevision: 1,
+        pending: [approval],
+      })
+      expect(recovered).toMatchObject({ snoozedAt: 200, snoozedUntil: 900 })
+      const answered = applyEvent(
+        recovered,
+        event(3, {
+          type: 'request-resolved',
+          requestId: approval.requestId,
+          status: 'approved',
+          nativeRecovery: {
+            ...event(3).nativeRecovery!,
+            ownerGeneration,
+            snapshotToken: 'mismatched-token',
+          },
+        }),
+      )
+      expect(answered.pending).toEqual([])
+      expect(threadSection(answered, 400)).toBe('snoozed')
+      expect(copyConversationSourceJson(answered)).toMatchObject({
+        snoozedAt: 200,
+        snoozedUntil: 900,
+        messages: raw.messages,
+      })
+    },
+  )
+
+  it.each(['transport', 'generation', 'token', 'session', 'unknown-owner'] as const)(
+    'does not author a permanent wake from a %s mismatch in recovered native permissions',
+    (mismatch) => {
+      const approval = event(1, {
+        type: 'approval',
+        requestId: 'pending-native-request',
+      })
+      const saved = readThreads([
+        { ...applyEvent(thread(), approval), snoozedAt: 200, snoozedUntil: 900 },
+      ])[0]
+      const pending = {
+        ...approval,
+        ...(mismatch === 'session' ? { sessionId: 'other-thread' } : {}),
+        nativeRecovery: {
+          ...approval.nativeRecovery!,
+          ...(mismatch === 'transport' ? { transportId: 'another-transport' } : {}),
+          ...(mismatch === 'generation' ? { ownerGeneration: 0 } : {}),
+          ...(mismatch === 'token' ? { snapshotToken: 'another-token' } : {}),
+        },
+      }
+      const recovered = applyNativeRecoveryOwner(saved, {
+        sessionId: 'thread',
+        transportId: 'transport',
+        status: mismatch === 'unknown-owner' ? 'unknown' : 'running',
+        ownerGeneration: 1,
+        snapshotToken: 'issued-native-token',
+        acceptedAppliedRevision: 1,
+        pending: [pending],
+      })
+      expect(recovered).toMatchObject({ snoozedAt: 200, snoozedUntil: 900 })
+      expect(recovered.messages).toEqual(saved.messages)
+      expect(copyConversationSourceJson(recovered)).toMatchObject({
+        snoozedAt: 200,
+        snoozedUntil: 900,
+      })
+    },
+  )
 
   it('restores an uncached surviving child on its original UI turn without advancing history', () => {
     const original = thread({ turn: 31, busy: true, turnStatus: 'running' })

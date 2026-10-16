@@ -24,23 +24,19 @@ import type { Thread } from '../state'
 import {
   isThreadSnoozed,
   threadCanArchive,
-  threadCanPark,
+  threadCanSettle,
+  threadCanSnooze,
+  threadSection,
   type ThreadAction,
 } from '../thread-management'
 import './thread-controls.css'
+import { ThreadSnoozeMenuItems } from './ThreadSnoozeMenu'
 
 export type ThreadActionHandler = (
   thread: Thread,
   action: ThreadAction,
   value?: number | string,
 ) => void
-
-function tomorrowMorning(): number {
-  const date = new Date()
-  date.setDate(date.getDate() + 1)
-  date.setHours(9, 0, 0, 0)
-  return date.getTime()
-}
 
 // A context-menu gesture opens before the right button is released. Radix's
 // dropdown item release handling must not treat that release as a selection.
@@ -68,7 +64,9 @@ export function ThreadActionsMenu({
 }) {
   const archived = Boolean(thread.archivedAt)
   const snoozed = isThreadSnoozed(thread)
-  const needsInput = !threadCanPark(thread)
+  const settled = threadSection(thread) === 'settled'
+  const canSettle = threadCanSettle(thread)
+  const canSnooze = threadCanSnooze(thread)
   const act = (action: ThreadAction, value?: number | string) => onAction(thread, action, value)
   return (
     <DropdownMenu.Root open={open} onOpenChange={onOpenChange}>
@@ -106,11 +104,11 @@ export function ThreadActionsMenu({
               </DropdownMenu.Item>
               <DropdownMenu.Item
                 className="life-thread-menu-item"
-                disabled={needsInput}
-                onSelect={() => act(thread.settled ? 'restore' : 'settle')}
+                disabled={!settled && !canSettle}
+                onSelect={() => act(settled ? 'restore' : 'settle')}
               >
-                {thread.settled ? <Undo2 size={14} /> : <Check size={14} />}
-                {thread.settled ? 'Restore thread' : 'Settle thread'}
+                {settled ? <Undo2 size={14} /> : <Check size={14} />}
+                {settled ? 'Un-settle thread' : 'Settle thread'}
               </DropdownMenu.Item>
               {snoozed ? (
                 <DropdownMenu.Item className="life-thread-menu-item" onSelect={() => act('wake')}>
@@ -119,36 +117,18 @@ export function ThreadActionsMenu({
                 </DropdownMenu.Item>
               ) : (
                 <DropdownMenu.Sub>
-                  <DropdownMenu.SubTrigger className="life-thread-menu-item" disabled={needsInput}>
+                  <DropdownMenu.SubTrigger className="life-thread-menu-item" disabled={!canSnooze}>
                     <Clock size={14} />
                     Snooze thread
                     <ChevronRight size={13} />
                   </DropdownMenu.SubTrigger>
                   <DropdownMenu.Portal>
                     <DropdownMenu.SubContent
-                      className="life-thread-menu"
+                      className="life-thread-menu life-thread-snooze-menu"
                       sideOffset={5}
                       onPointerUpCapture={ignoreContextRelease}
                     >
-                      {[
-                        ['30 minutes', 1800000],
-                        ['1 hour', 3600000],
-                        ['4 hours', 14400000],
-                      ].map(([label, milliseconds]) => (
-                        <DropdownMenu.Item
-                          key={label}
-                          className="life-thread-menu-item"
-                          onSelect={() => act('snooze', Date.now() + Number(milliseconds))}
-                        >
-                          {label}
-                        </DropdownMenu.Item>
-                      ))}
-                      <DropdownMenu.Item
-                        className="life-thread-menu-item"
-                        onSelect={() => act('snooze', tomorrowMorning())}
-                      >
-                        Tomorrow at 9:00
-                      </DropdownMenu.Item>
+                      <ThreadSnoozeMenuItems onSnooze={(until) => act('snooze', until)} />
                     </DropdownMenu.SubContent>
                   </DropdownMenu.Portal>
                 </DropdownMenu.Sub>

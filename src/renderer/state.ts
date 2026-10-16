@@ -243,6 +243,15 @@ export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOw
         'Saved transcript progress could not be verified. Native recovery must reconcile this history before replay can continue.',
     }
   const projectionBefore = thread
+  const currentOwner = thread.nativeRecoveryOwner
+  const acceptsOwnerRequests =
+    !currentOwner ||
+    (currentOwner.transportId === owner.transportId &&
+      ((currentOwner.ownerGeneration === owner.ownerGeneration &&
+        currentOwner.snapshotToken === owner.snapshotToken) ||
+        (recoveryNumber(currentOwner.ownerGeneration) &&
+          recoveryNumber(owner.ownerGeneration) &&
+          owner.ownerGeneration > currentOwner.ownerGeneration)))
   if (owner.status === 'running' || owner.status === 'idle') {
     for (const child of owner.currentChildren || []) {
       if (
@@ -259,18 +268,43 @@ export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOw
         thread = { ...hydrated, turn: currentTurn }
       }
     }
-    if (owner.pending)
-      thread = {
-        ...thread,
-        pending: owner.pending
-          .filter(
+    if (owner.pending) {
+      const pending = owner.pending
+        .filter(
+          (request) =>
+            request.sessionId === thread.id &&
+            Boolean(request.requestId) &&
+            (request.type === 'approval' || request.type === 'question'),
+        )
+        .map(persistentAgentEvent)
+      const currentRequests = acceptsOwnerRequests
+        ? pending.filter(
             (request) =>
-              request.sessionId === thread.id &&
-              Boolean(request.requestId) &&
-              (request.type === 'approval' || request.type === 'question'),
+              validRecoveryEvent(request) &&
+              request.nativeRecovery?.transportId === owner.transportId &&
+              owner.ownerGeneration !== undefined &&
+              request.nativeRecovery.ownerGeneration === owner.ownerGeneration &&
+              Boolean(owner.snapshotToken) &&
+              request.nativeRecovery.snapshotToken === owner.snapshotToken,
           )
-          .map(persistentAgentEvent),
+        : []
+      const needsWake =
+        currentRequests.length > 0 &&
+        (thread.settled || thread.snoozedUntil !== undefined || thread.archivedAt !== undefined)
+      thread = {
+        ...(needsWake
+          ? raiseThreadAttention(
+              thread,
+              Math.max(
+                ...currentRequests.map(
+                  (request) => request.nativeRecovery!.emittedAt ?? Date.now(),
+                ),
+              ),
+            )
+          : thread),
+        pending,
       }
+    }
   }
   const previous = thread.nativeRecovery?.[owner.transportId]
   const recovered = {
@@ -904,6 +938,11 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
                 completedAt: thread.completedAt,
                 attentionAt: thread.attentionAt,
                 lastReadAt: thread.lastReadAt,
+                archivedAt: thread.archivedAt,
+                settled: thread.settled,
+                settledAt: thread.settledAt,
+                snoozedAt: thread.snoozedAt,
+                snoozedUntil: thread.snoozedUntil,
                 pending: thread.pending,
                 queue: thread.queue,
                 ...(historicalGeneration

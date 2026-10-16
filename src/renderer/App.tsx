@@ -123,6 +123,11 @@ import {
   type ThreadAction,
   type ThreadUndoChange,
 } from './thread-management'
+import {
+  nextThreadSnoozeDeadline,
+  startThreadSnoozeClock,
+  wakeExpiredThreadSnoozes,
+} from './thread-snooze-clock'
 import './workspace-integration.css'
 import { LifeMap as ResearchView } from './components/LifeMap'
 import { CustomPanels } from './components/CustomPanels'
@@ -415,6 +420,8 @@ export function App() {
     historyReady &&
     nativeHistoryReady &&
     Boolean(nativeRecoverySupport && nativeRecoverySupport.mode !== 'blocked')
+  const historyWritableCurrent = useRef(historyWritable)
+  historyWritableCurrent.current = historyWritable
   nativeRecoveryHydrated.current = historyWritable && nativeRecoveryReady
   const startupReady = recoveryReady && historyWritable && nativeRecoveryReady
   const conversationPersistence = useConversationPersistence(
@@ -574,26 +581,27 @@ export function App() {
     setThreads,
     historyWritable && builtin.enabled('thread-git-metadata'),
   )
+  const snoozeDeadline = useMemo(() => nextThreadSnoozeDeadline(threads), [threads])
   useEffect(() => {
-    if (!historyWritable) return
-    const sleeping = threads.filter((thread) => typeof thread.snoozedUntil === 'number')
-    if (!sleeping.length) return
-    const wakeAt = Math.min(...sleeping.map((thread) => thread.snoozedUntil!))
-    const timer = window.setTimeout(
-      () => {
-        const now = Date.now()
-        setThreads((previous) =>
-          previous.map((thread) =>
-            thread.snoozedUntil && thread.snoozedUntil <= now
-              ? { ...thread, snoozedUntil: undefined }
-              : thread,
-          ),
-        )
-      },
-      Math.min(2147483647, Math.max(0, wakeAt - Date.now())),
-    )
-    return () => window.clearTimeout(timer)
-  }, [threads, historyWritable])
+    if (!historyWritable || snoozeDeadline === undefined) return
+    const wake = (now: number) =>
+      setThreads((previous) =>
+        historyWritableCurrent.current ? wakeExpiredThreadSnoozes(previous, now) : previous,
+      )
+    let cancel = startThreadSnoozeClock(snoozeDeadline, wake)
+    const resume = () => {
+      if (document.visibilityState === 'hidden') return
+      cancel()
+      cancel = startThreadSnoozeClock(snoozeDeadline, wake)
+    }
+    window.addEventListener('focus', resume)
+    document.addEventListener('visibilitychange', resume)
+    return () => {
+      cancel()
+      window.removeEventListener('focus', resume)
+      document.removeEventListener('visibilitychange', resume)
+    }
+  }, [snoozeDeadline, historyWritable])
   const [threadMenu, setThreadMenu] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const submitting = useRef<
@@ -2327,6 +2335,23 @@ export function App() {
     if (!canMutateHistory()) return
     const undo = threadUndo
     if (!undo) return
+    const preparingId = submitting.current?.id
+    if (
+      preparingId &&
+      undo.changes.some(
+        (change) =>
+          change.id === preparingId &&
+          ((change.before.settled && !change.after.settled) ||
+            (change.before.snoozedUntil &&
+              change.before.snoozedUntil !== change.after.snoozedUntil) ||
+            (change.before.archivedAt && change.before.archivedAt !== change.after.archivedAt)),
+      )
+    ) {
+      const message = 'This message is being prepared. Wait for it to finish, then retry Undo.'
+      setThreadUndo({ ...undo, message })
+      setToast(message)
+      return
+    }
     const current = threadsCurrent.current
     const restored = undoThreadArrangement(current, undo.changes)
     setThreads((previous) => undoThreadArrangement(previous, undo.changes))

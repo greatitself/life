@@ -48,6 +48,7 @@ export function SidebarProjectThreads({
   onArrange,
   onAction,
   compact = false,
+  shelf,
   draftThreadIds,
 }: {
   threads: Thread[]
@@ -59,6 +60,7 @@ export function SidebarProjectThreads({
   onArrange?: (thread: Thread, patch: Pick<Thread, 'settled' | 'snoozedUntil'>) => void
   onAction?: ThreadActionHandler
   compact?: boolean
+  shelf?: 'settled' | 'snoozed' | 'archived'
   draftThreadIds?: ReadonlySet<string>
 }) {
   const callbacks = useRef({ onSelect, onArrange, onAction })
@@ -92,7 +94,17 @@ export function SidebarProjectThreads({
   const day = useSidebarDay(group === 'date')
   const groups = useMemo(() => {
     const result = new Map<string, ThreadGroup>()
-    const sorted = [...threads].sort((a, b) => compareSidebarThreads(a, b, sort))
+    const sorted = [...threads].sort((a, b) => {
+      const shelfOrder =
+        shelf === 'snoozed'
+          ? (a.snoozedUntil || 0) - (b.snoozedUntil || 0)
+          : shelf === 'settled'
+            ? (b.settledAt || 0) - (a.settledAt || 0)
+            : shelf === 'archived'
+              ? (b.archivedAt || 0) - (a.archivedAt || 0)
+              : 0
+      return shelfOrder || compareSidebarThreads(a, b, sort)
+    })
     const today = new Date()
     const calendarDay = (date: Date) =>
       Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000
@@ -147,7 +159,7 @@ export function SidebarProjectThreads({
         (a, b) => a.name.localeCompare(b.name) || a.description.localeCompare(b.description),
       )
     return sections
-  }, [threads, profilesById, sort, group, day])
+  }, [threads, profilesById, sort, group, day, shelf])
 
   return (
     <>

@@ -119,6 +119,23 @@
   margin: 5px;
   background: var(--border);
 }
+.life-thread-snooze-menu {
+  width: min(230px, calc(100vw - 24px));
+  min-width: 0;
+}
+.life-thread-snooze-preset {
+  justify-content: space-between;
+  gap: 20px;
+  padding: 7px 9px;
+  font-size: 12px;
+}
+.life-thread-snooze-time {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
 .life-thread-actions-menu {
   max-height: min(520px, var(--radix-dropdown-menu-content-available-height));
   overflow-y: auto;
@@ -168,6 +185,16 @@
 .life-thread-settle:hover {
   color: var(--text-strong);
   background: var(--hover);
+}
+.life-thread-action-icon:disabled,
+.life-thread-settle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.life-thread-action-icon:focus-visible,
+.life-thread-settle:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 .thread-card-shell:hover .thread-card-project > time,
 .thread-card-shell:focus-within .thread-card-project > time {

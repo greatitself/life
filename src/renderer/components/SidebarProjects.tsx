@@ -105,6 +105,7 @@ function ParkedThreads({
         onAction={onAction}
         draftThreadIds={draftThreadIds}
         compact
+        shelf={name === 'Settled' ? 'settled' : name === 'Snoozed' ? 'snoozed' : 'archived'}
       />
       {open && !threads.length ? (
         <p>
@@ -235,7 +236,7 @@ export function SidebarProjects({
       aria-label="Settled, snoozed and archived threads"
       aria-busy={query !== searchValue}
     >
-      {(['Settled', 'Snoozed', 'Archived'] as const).map((name) => {
+      {(['Snoozed', 'Settled', 'Archived'] as const).map((name) => {
         const items =
           name === 'Settled'
             ? settledThreads

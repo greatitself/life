@@ -404,6 +404,7 @@ export class Agents {
   private readonly asyncQuestionAdmission = Semaphore.makeUnsafe(1)
   private readonly asyncQuestionBindings = new WeakMap<object, AsyncQuestionBinding>()
   private readonly asyncQuestionAdmissionFailures = new Set<string>()
+  private readonly acceptedAsyncQuestionRPCs = new Set<string>()
   private stopCompletions = new Map<string, Deferred.Deferred<void, NativeRecoveryError>>()
   private replayInitialization = new Map<
     string,
@@ -1242,13 +1243,20 @@ export class Agents {
           ),
       })
       this.asyncQuestions = questions
-      if (!publishProgress) return
+      let reconciled = false
       for (const question of questions.values()) {
         if (!question.reply || !['responding', 'answered'].includes(question.state)) continue
+        const accepted =
+          question.reply.input.written &&
+          this.acceptedAsyncQuestionRPCs.has(
+            JSON.stringify([question.reply.transportId, question.reply.input.semantic.requestId]),
+          )
+        const needsResolution = question.state === 'responding' && accepted
+        if (!publishProgress && !needsResolution) continue
         const source = question.source
         const snapshot = snapshots.find((value) => value.transport.id === source.transportId)
         if (!snapshot) continue
-        const answered = question.state === 'answered'
+        const answered = question.state === 'answered' || needsResolution
         const event: AgentEvent = answered
           ? {
               sessionId: source.sessionId,
@@ -1276,8 +1284,13 @@ export class Agents {
             eventId: `${source.transportId}:async-question:${question.reply.transportId}:input:${question.reply.input.sequence}:${answered ? 'answered' : 'responding'}`,
           },
         )
+        if (needsResolution) {
+          question.state = 'answered'
+          reconciled = true
+        }
       }
       yield* this.recovery.flushEffect()
+      return reconciled
     }.bind(this),
   )
   private assertAsyncQuestionDestination(
@@ -1417,7 +1430,13 @@ export class Agents {
       )
       if (this.nativeRecovery) {
         const admitted = this.asyncQuestions.get(requestId)
-        if (!admitted?.reply?.input.written || !isDeepStrictEqual(admitted.reply.binding, binding))
+        if (
+          !admitted?.reply?.input.written ||
+          !this.acceptedAsyncQuestionRPCs.has(
+            JSON.stringify([admitted.reply.transportId, admitted.reply.input.semantic.requestId]),
+          ) ||
+          !isDeepStrictEqual(admitted.reply.binding, binding)
+        )
           return yield* this.recoveryError(
             'question-reply',
             'The original native answer has not received its exact durable delivery receipt.',
@@ -2062,6 +2081,15 @@ export class Agents {
       if (!semantic || !this.isNativeCodexResponse(message)) return
       this.confirmNativeInputProcessing(rpc.channel as DurableChannel, input)
       if (message.error) return
+      if (
+        ['user-prompt', 'steer'].includes(semantic.kind) &&
+        ['turn/start', 'turn/steer'].includes(semantic.method || '') &&
+        semantic.requestId === message.id &&
+        Option.isSome(
+          Schema.decodeUnknownOption(asyncQuestionBindingSchema)(semantic.responseBinding),
+        )
+      )
+        this.acceptedAsyncQuestionRPCs.add(JSON.stringify([id, message.id]))
       if (semantic.kind === 'interrupt') {
         const acknowledged = this.nativeInterruptAcks.get(id) || new Set<string>()
         acknowledged.add(JSON.stringify([semantic.nativeThreadId, semantic.nativeTurnId]))
@@ -3326,8 +3354,9 @@ export class Agents {
             : this.recoveryError('recover', 'Native recovery could not be admitted.', cause),
       })
       yield* this.recovery.flushEffect()
-      const snapshots = this.nativeRecovery ? yield* this.nativeRecovery.listTransports() : []
-      yield* this.refreshAsyncQuestionsEffect(snapshots, false)
+      let snapshots = this.nativeRecovery ? yield* this.nativeRecovery.listTransports() : []
+      if (yield* this.refreshAsyncQuestionsEffect(snapshots, false))
+        snapshots = yield* this.nativeRecovery!.listTransports()
       const newest = new Map<string, NativeRecoverySnapshot>()
       for (const snapshot of snapshots)
         for (const owner of snapshot.transport.owners)
@@ -7315,7 +7344,7 @@ export class Agents {
     accepted: boolean,
     answers?: Record<string, string[]>,
     decisionId?: string,
-  ) {
+  ): Promise<void> {
     return this.respondOnce(sessionId, requestId, accepted, answers, decisionId)
   }
   private async respondOnce(

@@ -15,21 +15,27 @@ export function questionAllowsOther(question: AgentQuestion) {
   return question.isOther !== false && (!question.inputType || question.inputType === 'text')
 }
 
+/** Native question IDs are data, including names inherited by ordinary objects. */
+export function createQuestionRecord<Value>(values?: Record<string, Value>): Record<string, Value> {
+  return Object.assign(Object.create(null) as Record<string, Value>, values)
+}
+
 /** Validate without trimming, choosing defaults, or rewriting the user's response. */
 export function prepareQuestionAnswers(
   questions: AgentQuestion[],
   draft: Record<string, string[]>,
 ) {
-  const answers: Record<string, string[]> = {}
-  const errors: Record<string, string> = {}
+  const answers = createQuestionRecord<string[]>()
+  const errors = createQuestionRecord<string>()
   for (const question of questions) {
     const choices = new Set(question.options?.map(questionOptionValue))
-    const values = (draft[question.id] || []).filter(
+    const offered = Object.hasOwn(draft, question.id) ? draft[question.id] : undefined
+    const values = (offered || []).filter(
       (value) =>
         choices.has(value) || value.length > 0 || (question.allowEmpty && !question.multiple),
     )
     if (!values.length) {
-      if (question.allowEmpty && question.multiple && draft[question.id]?.length === 0) {
+      if (question.allowEmpty && question.multiple && offered?.length === 0) {
         answers[question.id] = []
         continue
       }

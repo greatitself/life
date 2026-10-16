@@ -269,6 +269,49 @@ describe('native asynchronous question state', () => {
     },
   )
 
+  it.each(['running', 'idle'] as const)(
+    'keeps current %s control when an older source resolves a question in the same local turn',
+    (status) => {
+      const async = question()
+      const saved = readThreads([applyEvent(thread(), async)])[0]
+      const recovered = applyNativeRecoveryOwner(saved, owner({ status, pending: [async] }))
+      const resolved = applyEvent(recovered, resolution(async))
+      expect(resolved.pending).toEqual([])
+      expect(requestRow(resolved)?.status).toBe('answered')
+      expect(resolved.nativeRecoveryOwner).toEqual(recovered.nativeRecoveryOwner)
+      expect(resolved.nativeRecoveryStatus).toBe(status)
+      expect(resolved.busy).toBe(recovered.busy)
+      expect(resolved.turnStatus).toBe(recovered.turnStatus)
+      expect(resolved.nativeRecovery?.source.appliedRevision).toBe(2)
+      expect(resolved.nativeRecovery?.destination).toBe(recovered.nativeRecovery?.destination)
+    },
+  )
+
+  it('keeps the current control after an equal-generation foreign transport delivery', () => {
+    const async = question()
+    const saved = readThreads([applyEvent(thread(), async)])[0]
+    const recovered = applyNativeRecoveryOwner(
+      saved,
+      owner({ status: 'running', pending: [async] }),
+    )
+    const event = resolution(async, {
+      nativeRecovery: {
+        ...async.nativeRecovery!,
+        transportId: 'unrelated',
+        ownerGeneration: 9,
+        revision: 1,
+        eventId: 'foreign-same-generation',
+      },
+    })
+    const projected = applyEvent(recovered, event)
+    expect(projected.nativeRecoveryOwner).toEqual(recovered.nativeRecoveryOwner)
+    expect(projected.nativeRecoveryStatus).toBe('running')
+    expect(projected.busy).toBe(true)
+    expect(projected.turnStatus).toBe('running')
+    expect(projected.pending).toEqual([async])
+    expect(projected.nativeRecovery?.unrelated.appliedRevision).toBe(1)
+  })
+
   it.each([
     { ownerGeneration: 8, snapshotToken: 'older-destination-token' },
     { ownerGeneration: 9, snapshotToken: 'mismatched-destination-token' },

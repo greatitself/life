@@ -512,3 +512,140 @@ describe('pending question native delivery ownership', () => {
     expect(respond).toHaveBeenCalledExactlyOnceWith(event, false, undefined)
   })
 })
+
+describe('pending question native field names', () => {
+  const nativeIds = ['constructor', 'toString', '__proto__'] as const
+
+  it('does not invent answers or custom choices from inherited object properties', () => {
+    const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype)
+    const store = createPendingQuestionDraftStore()
+    const event = request({
+      questions: nativeIds.map((id) => ({
+        id,
+        question: 'Answer the native ' + id + ' field?',
+        options: [{ label: 'Inspect', value: 'inspect-source' }],
+      })),
+    })
+    const respond = vi.fn(async () => {})
+    const projected = questionDraftAnswers(event, store.get(event))
+    expect(Object.keys(projected)).toEqual([])
+    for (const id of nativeIds) expect(Object.hasOwn(projected, id)).toBe(false)
+    expect(store.submit(event, respond)).toBe(false)
+    expect(store.get(event).status).toBe('idle')
+    expect(respond).not.toHaveBeenCalled()
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore)
+  })
+
+  it('round trips exact native option values from Object.fromEntries maps with own output keys', async () => {
+    const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype)
+    const store = createPendingQuestionDraftStore()
+    const entries = nativeIds.map<[string, string[]]>((id) => [
+      id,
+      ['  native option ' + id + '\r\n'],
+    ])
+    const answers: Record<string, string[]> = Object.fromEntries(entries)
+    const event = request({
+      questions: nativeIds.map((id) => ({
+        id,
+        question: 'Choose a native option for ' + id + '?',
+        isOther: false,
+        options: [{ label: 'Inspect', value: answers[id][0] }],
+      })),
+    })
+    const respond = vi.fn(
+      async (_event: AgentEvent, _accepted: boolean, _answers?: Record<string, string[]>) => {},
+    )
+    store.update(event, { answers })
+    const projected = questionDraftAnswers(event, store.get(event))
+    for (const id of nativeIds) {
+      expect(Object.hasOwn(store.get(event).answers, id)).toBe(true)
+      expect(Object.hasOwn(projected, id)).toBe(true)
+      expect(projected[id]).toEqual(answers[id])
+    }
+    expect(store.submit(event, respond)).toBe(true)
+    await vi.waitFor(() => expect(store.get(event).status).toBe('submitted'))
+    expect(respond).toHaveBeenCalledExactlyOnceWith(event, true, answers)
+    const delivered = respond.mock.calls[0][2]!
+    for (const id of nativeIds) {
+      expect(Object.hasOwn(delivered, id)).toBe(true)
+      expect(delivered[id]).toEqual(answers[id])
+      expect(Object.hasOwn(store.get(event).answers, id)).toBe(false)
+    }
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore)
+  })
+
+  it('preserves computed native keys and exact multiple-choice custom values through delivery', async () => {
+    const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype)
+    const store = createPendingQuestionDraftStore()
+    const answers: Record<string, string[]> = {
+      ['constructor']: ['native-constructor'],
+      ['toString']: ['native-toString'],
+      ['__proto__']: ['native-__proto__'],
+    }
+    const customAnswers: Record<string, string> = Object.fromEntries(
+      nativeIds.map((id) => [id, '  Additional answer for ' + id + '.\r\n']),
+    )
+    const customQuestions: Record<string, boolean> = {
+      ['constructor']: true,
+      ['toString']: true,
+      ['__proto__']: true,
+    }
+    const event = request({
+      questions: nativeIds.map((id) => ({
+        id,
+        question: 'Select checks for ' + id + '?',
+        multiple: true,
+        options: [{ label: 'Native selection', value: answers[id][0] }],
+      })),
+    })
+    const respond = vi.fn(
+      async (_event: AgentEvent, _accepted: boolean, _answers?: Record<string, string[]>) => {},
+    )
+    store.update(event, { answers, customAnswers, customQuestions })
+    const projected = questionDraftAnswers(event, store.get(event))
+    for (const id of nativeIds) {
+      expect(Object.hasOwn(projected, id)).toBe(true)
+      expect(projected[id]).toEqual([answers[id][0], customAnswers[id]])
+      expect(store.get(event).answers[id]).toEqual(answers[id])
+      expect(Object.hasOwn(store.get(event).customAnswers, id)).toBe(true)
+      expect(Object.hasOwn(store.get(event).customQuestions, id)).toBe(true)
+    }
+    expect(store.submit(event, respond)).toBe(true)
+    await vi.waitFor(() => expect(store.get(event).status).toBe('submitted'))
+    const delivered = respond.mock.calls[0][2]!
+    for (const id of nativeIds) {
+      expect(Object.hasOwn(delivered, id)).toBe(true)
+      expect(delivered[id]).toEqual([answers[id][0], customAnswers[id]])
+      expect(Object.hasOwn(store.get(event).customAnswers, id)).toBe(false)
+      expect(Object.hasOwn(store.get(event).customQuestions, id)).toBe(false)
+    }
+    expect(respond).toHaveBeenCalledExactlyOnceWith(event, true, projected)
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore)
+  })
+
+  it('keeps an enabled but unanswered custom field empty instead of reading inherited functions', () => {
+    const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype)
+    const store = createPendingQuestionDraftStore()
+    const event = request({
+      questions: nativeIds.map((id) => ({
+        id,
+        question: 'Provide a custom answer for ' + id + '?',
+        options: [{ label: 'Native selection', value: 'inspect-source' }],
+      })),
+    })
+    store.update(event, {
+      customQuestions: Object.fromEntries(nativeIds.map((id) => [id, true])),
+      customAnswers: {},
+    })
+    const projected = questionDraftAnswers(event, store.get(event))
+    for (const id of nativeIds) {
+      expect(Object.hasOwn(projected, id)).toBe(true)
+      expect(projected[id]).toEqual([''])
+    }
+    const respond = vi.fn(async () => {})
+    expect(store.submit(event, respond)).toBe(false)
+    expect(respond).not.toHaveBeenCalled()
+    expect(store.get(event).status).toBe('idle')
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore)
+  })
+})

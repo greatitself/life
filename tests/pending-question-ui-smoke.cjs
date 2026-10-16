@@ -419,8 +419,9 @@ async function run() {
     const retryId = await request({
       questions: [{ id: 'token', question: 'Private token?', isSecret: true }],
     })
-    const token = () => panel().getByLabel('Private token?', { exact: true })
+    const token = () => panel().locator('input[type="password"][aria-label="Private token?"]')
     assert.equal(await token().getAttribute('type'), 'password')
+    assert.equal(await token().getAttribute('aria-label'), 'Private token?')
     await token().fill('  exact-secret-value  ')
     await page.evaluate(() => {
       window.holdResponse = true

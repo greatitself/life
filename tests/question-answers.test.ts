@@ -111,6 +111,141 @@ describe('provider question answers', () => {
     if (valid) expect(result.answers).toEqual({ typed: [value] })
   })
 
+  describe('native question IDs that match Object.prototype keys', () => {
+    const nativeQuestionIds = ['constructor', 'toString', '__proto__'] as const
+
+    it.each(nativeQuestionIds)('preserves exact native option values under an own %s key', (id) => {
+      const value = 'native:exact/  value\n'
+      const question: AgentQuestion = {
+        id,
+        question: 'Native choice?',
+        isOther: false,
+        options: [{ label: 'Readable provider label', value }],
+      }
+      const result = prepareQuestionAnswers([question], { [id]: [value] })
+
+      expect(result.valid).toBe(true)
+      expect(Object.hasOwn(result.answers, id)).toBe(true)
+      expect(result.answers[id]).toEqual([value])
+      expect(Object.keys(result.answers)).toEqual([id])
+      expect(Object.keys(result.errors)).toEqual([])
+    })
+
+    it.each(nativeQuestionIds)(
+      'preserves exact custom and freeform text under an own %s key',
+      (id) => {
+        const value = '  Keep this exact text.\nNext line: café  '
+        const questions: AgentQuestion[] = [
+          { id, question: 'Freeform?' },
+          {
+            id,
+            question: 'Custom choice?',
+            options: [{ label: 'Known option', value: 'native-option' }],
+          },
+        ]
+
+        for (const question of questions) {
+          const result = prepareQuestionAnswers([question], { [id]: [value] })
+          expect(result.valid).toBe(true)
+          expect(Object.hasOwn(result.answers, id)).toBe(true)
+          expect(result.answers[id]).toEqual([value])
+          expect(Object.keys(result.errors)).toEqual([])
+        }
+      },
+    )
+
+    it.each(nativeQuestionIds)(
+      'returns an own validation error for unanswered required %s',
+      (id) => {
+        const result = prepareQuestionAnswers([{ id, question: 'Required?' }], {})
+
+        expect(result.valid).toBe(false)
+        expect(Object.hasOwn(result.errors, id)).toBe(true)
+        expect(result.errors[id]).toBe('Please answer this question.')
+        expect(Object.keys(result.errors)).toEqual([id])
+        expect(Object.hasOwn(result.answers, id)).toBe(false)
+        expect(Object.keys(result.answers)).toEqual([])
+      },
+    )
+
+    it.each(nativeQuestionIds)(
+      'omits unanswered optional %s without inheriting an answer',
+      (id) => {
+        const result = prepareQuestionAnswers([{ id, question: 'Optional?', required: false }], {})
+
+        expect(result.valid).toBe(true)
+        expect(Object.hasOwn(result.answers, id)).toBe(false)
+        expect(Object.hasOwn(result.errors, id)).toBe(false)
+        expect(Object.keys(result.answers)).toEqual([])
+        expect(Object.keys(result.errors)).toEqual([])
+      },
+    )
+
+    it.each(nativeQuestionIds)('preserves exact native selections and custom text for %s', (id) => {
+      const values = ['native-option', '  Custom selection\n']
+      const result = prepareQuestionAnswers(
+        [
+          {
+            id,
+            question: 'Multiple choices?',
+            multiple: true,
+            options: [{ label: 'Provider label', value: 'native-option' }],
+          },
+        ],
+        { [id]: values },
+      )
+
+      expect(result.valid).toBe(true)
+      expect(Object.hasOwn(result.answers, id)).toBe(true)
+      expect(result.answers[id]).toEqual(values)
+      expect(Object.keys(result.errors)).toEqual([])
+    })
+
+    it.each(nativeQuestionIds)('retains explicit empty text and selection lists for %s', (id) => {
+      const text = prepareQuestionAnswers([{ id, question: 'Empty text?', allowEmpty: true }], {
+        [id]: [''],
+      })
+      const selections = prepareQuestionAnswers(
+        [{ id, question: 'Empty selections?', multiple: true, allowEmpty: true }],
+        { [id]: [] },
+      )
+
+      expect(text.valid).toBe(true)
+      expect(Object.hasOwn(text.answers, id)).toBe(true)
+      expect(text.answers[id]).toEqual([''])
+      expect(selections.valid).toBe(true)
+      expect(Object.hasOwn(selections.answers, id)).toBe(true)
+      expect(selections.answers[id]).toEqual([])
+    })
+
+    it.each(nativeQuestionIds)(
+      'does not treat an inherited empty list as an explicit answer for %s',
+      (id) => {
+        const draft: Record<string, string[]> = Object.create({ [id]: [] })
+        const result = prepareQuestionAnswers(
+          [{ id, question: 'Explicit empty selections?', multiple: true, allowEmpty: true }],
+          draft,
+        )
+
+        expect(result.valid).toBe(false)
+        expect(Object.hasOwn(result.answers, id)).toBe(false)
+        expect(Object.hasOwn(result.errors, id)).toBe(true)
+        expect(result.errors[id]).toBe('Please answer this question.')
+      },
+    )
+
+    it('leaves Object.prototype descriptors unchanged when handling native IDs', () => {
+      const descriptors = Object.getOwnPropertyDescriptors(Object.prototype)
+
+      for (const id of nativeQuestionIds) {
+        prepareQuestionAnswers([{ id, question: 'Required?' }], {})
+        prepareQuestionAnswers([{ id, question: 'Exact answer?' }], { [id]: ['  Exact answer\n'] })
+      }
+
+      expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(descriptors)
+    })
+  })
+
   it('avoids collision between renderer placeholders and provider option values', () => {
     const question: AgentQuestion = {
       id: 'sentinels',

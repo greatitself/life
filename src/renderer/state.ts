@@ -1015,14 +1015,13 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
   const deliveredEvent = event
   event = persistentAgentEvent(event)
   const eventTurn = event.nativeRecovery?.localTurn
-  const currentGeneration =
-    thread.nativeRecoveryOwner?.transportId === event.nativeRecovery?.transportId
-      ? thread.nativeRecoveryOwner?.ownerGeneration
-      : undefined
+  const currentGeneration = thread.nativeRecoveryOwner?.ownerGeneration
   const historicalGeneration =
     event.nativeRecovery?.ownerGeneration !== undefined &&
     currentGeneration !== undefined &&
-    event.nativeRecovery.ownerGeneration < currentGeneration
+    (event.nativeRecovery.ownerGeneration < currentGeneration ||
+      (event.nativeRecovery.ownerGeneration === currentGeneration &&
+        thread.nativeRecoveryOwner?.transportId !== event.nativeRecovery.transportId))
   const historicalRoot =
     !event.agentId && ((eventTurn !== undefined && eventTurn < thread.turn) || historicalGeneration)
   const resolvesAdmittedMessageQuestion =
@@ -1086,17 +1085,23 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
         }
   if (!event.nativeRecovery) return carryNativeProjectionAuthoredTransition(thread, applied)
   const transportId = event.nativeRecovery.transportId
+  const currentOwner = applied.nativeRecoveryOwner
   const owner =
+    !historicalRoot &&
     !event.agentId &&
-    (applied.nativeRecoveryOwner?.transportId !== transportId ||
-      (event.nativeRecovery.ownerGeneration ?? 0) >
-        (applied.nativeRecoveryOwner.ownerGeneration ?? 0))
+    (!currentOwner ||
+      (!recoveryNumber(currentOwner.ownerGeneration) &&
+        (currentOwner.transportId !== transportId ||
+          recoveryNumber(event.nativeRecovery.ownerGeneration))) ||
+      (recoveryNumber(currentOwner.ownerGeneration) &&
+        recoveryNumber(event.nativeRecovery.ownerGeneration) &&
+        event.nativeRecovery.ownerGeneration > currentOwner.ownerGeneration))
       ? {
           transportId,
           ownerGeneration: event.nativeRecovery.ownerGeneration,
           snapshotToken: event.nativeRecovery.snapshotToken,
         }
-      : applied.nativeRecoveryOwner
+      : currentOwner
   return registerNativeProjectionDelivery(
     {
       ...applied,

@@ -8,7 +8,8 @@ const { resolve } = require('node:path')
 async function appMockSource() {
   const source = await readFile(resolve(__dirname, '../app-live-controls-smoke.cjs'), 'utf8')
   const startMarker = '    await page.addInitScript(\n'
-  const endMarker = '      { historyHydration, providerUtilities, fluidity },\n    )'
+  const endMarker =
+    '      { historyHydration, providerUtilities, fluidity, asyncQuestions },\n    )'
   const start = source.indexOf(startMarker)
   const end = source.indexOf(endMarker, start)
   assert.ok(
@@ -19,7 +20,9 @@ async function appMockSource() {
     .slice(start + startMarker.length, end)
     .trim()
     .replace(/,$/, '')
-  assert.ok(callback.startsWith('({ historyHydration, providerUtilities, fluidity }) => {'))
+  assert.ok(
+    callback.startsWith('({ historyHydration, providerUtilities, fluidity, asyncQuestions }) => {'),
+  )
   assert.ok(callback.endsWith('}'))
   return callback
 }

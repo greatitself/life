@@ -194,7 +194,8 @@ describe('native Studio async question replies', () => {
       canDismiss: true,
       questions: [{ id: '0', question: 'Which direction?' }],
     }
-    const callback: AgentEvent = { ...question, requestId: 'callback:one', responseMode: 'native' }
+    const { responseMode: _responseMode, canDismiss: _canDismiss, ...nativeQuestion } = question
+    const callback: AgentEvent = { ...nativeQuestion, requestId: 'callback:one' }
     session.thread.pending = [question, callback]
     expect(resetStudioSessionRequests(session).thread.pending).toEqual([question])
     expect(session.thread.pending).toEqual([question, callback])

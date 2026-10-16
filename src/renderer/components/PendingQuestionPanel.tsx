@@ -16,6 +16,7 @@ import {
   type PendingQuestionResponder,
 } from '../pending-question-drafts'
 import {
+  createQuestionRecord,
   prepareQuestionAnswers,
   questionAllowsOther,
   questionOptionValue,
@@ -422,7 +423,7 @@ export function PendingQuestionPanel({
                     onChange={(e) => {
                       stopAdvance()
                       pendingQuestionDrafts.update(event, (current) => {
-                        const next = { ...current.answers }
+                        const next = createQuestionRecord(current.answers)
                         if (e.target.checked) next[question.id] = question.multiple ? [] : ['']
                         else delete next[question.id]
                         return {

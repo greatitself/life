@@ -1,7 +1,7 @@
 import { Cause, Effect, Exit, Schema } from 'effect'
 import type { AgentEvent } from '../shared/types'
 import { errorText } from './api'
-import { prepareQuestionAnswers } from './question-answers'
+import { createQuestionRecord, prepareQuestionAnswers } from './question-answers'
 
 export interface PendingQuestionDraft {
   answers: Record<string, string[]>
@@ -57,21 +57,21 @@ export function pendingQuestionRequestKey(event: AgentEvent): string {
 }
 
 export function questionDraftAnswers(event: AgentEvent, draft: PendingQuestionDraft) {
-  const answers = { ...draft.answers }
+  const answers = createQuestionRecord(draft.answers)
   for (const question of event.questions || []) {
-    if (draft.customQuestions[question.id])
+    if (Object.hasOwn(draft.customQuestions, question.id) && draft.customQuestions[question.id])
       answers[question.id] = [
         ...(question.multiple ? answers[question.id] || [] : []),
-        draft.customAnswers[question.id] || '',
+        Object.hasOwn(draft.customAnswers, question.id) ? draft.customAnswers[question.id] : '',
       ]
   }
   return answers
 }
 
 const emptyDraft = (): PendingQuestionDraft => ({
-  answers: {},
-  customAnswers: {},
-  customQuestions: {},
+  answers: createQuestionRecord<string[]>(),
+  customAnswers: createQuestionRecord<string>(),
+  customQuestions: createQuestionRecord<boolean>(),
   step: 0,
   collapsed: false,
   status: 'idle',
@@ -106,7 +106,15 @@ export function createPendingQuestionDraftStore() {
     return { key, entry }
   }
   const publish = (entry: DraftEntry, patch: Partial<PendingQuestionDraft>) => {
-    entry.snapshot = { ...entry.snapshot, ...patch }
+    entry.snapshot = {
+      ...entry.snapshot,
+      ...patch,
+      ...(patch.answers ? { answers: createQuestionRecord(patch.answers) } : {}),
+      ...(patch.customAnswers ? { customAnswers: createQuestionRecord(patch.customAnswers) } : {}),
+      ...(patch.customQuestions
+        ? { customQuestions: createQuestionRecord(patch.customQuestions) }
+        : {}),
+    }
     for (const listener of entry.listeners) listener()
   }
 

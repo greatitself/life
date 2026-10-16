@@ -1,8 +1,22 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ArrowUpRight, FolderOpen, MessageSquare, Monitor, Plug, Server } from 'lucide-react'
 import type { ConnectionProfile, ConnectionState } from '../../shared/types'
 import { describeEnvironment, type EnvironmentScope } from '../environment'
 import './active-environment.css'
+import './prompt-font-preview.css'
+
+const promptFonts = [
+  { name: 'DM Sans', family: "'DM Sans Variable', 'DM Sans', sans-serif" },
+  { name: 'Manrope', family: "'Life Prompt Manrope', sans-serif" },
+  { name: 'Geist', family: "'Life Prompt Geist', sans-serif" },
+  { name: 'Plus Jakarta Sans', family: "'Life Prompt Plus Jakarta Sans', sans-serif" },
+  { name: 'Instrument Sans', family: "'Life Prompt Instrument Sans', sans-serif" },
+  { name: 'Outfit', family: "'Life Prompt Outfit', sans-serif" },
+  { name: 'Onest', family: "'Life Prompt Onest', sans-serif" },
+  { name: 'Urbanist', family: "'Life Prompt Urbanist', sans-serif" },
+  { name: 'Inter', family: "'Life Prompt Inter', sans-serif" },
+  { name: 'IBM Plex Sans', family: "'Life Prompt IBM Plex Sans', sans-serif" },
+] as const
 
 export interface ActiveProjectProps {
   connection: ConnectionState
@@ -24,6 +38,7 @@ export function ActiveProject({
   onConnect,
   children,
 }: ActiveProjectProps) {
+  const [promptFont, setPromptFont] = useState(0)
   const environment = describeEnvironment(connection, savedProfile, workspace, scope)
   const connected = connection.status === 'connected'
   const connecting = connection.status === 'connecting'
@@ -33,7 +48,7 @@ export function ActiveProject({
   if (scope === 'agents' && connected && hasProject) {
     return (
       <section className="active-project-start active-project-prompt" aria-label="New thread">
-        <h1>
+        <h1 style={{ fontFamily: promptFonts[promptFont].family }}>
           What do you want to do in{' '}
           <button
             type="button"
@@ -47,6 +62,29 @@ export function ActiveProject({
           </button>
           ?
         </h1>
+        <fieldset className="prompt-font-preview">
+          <legend>Choose a font to preview</legend>
+          <div className="prompt-font-options">
+            {promptFonts.map((font, index) => (
+              <button
+                key={font.name}
+                type="button"
+                className="prompt-font-option"
+                aria-label={`${index + 1}. ${font.name}`}
+                aria-pressed={promptFont === index}
+                onClick={() => setPromptFont(index)}
+              >
+                <span className="prompt-font-option-label">
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  <span>{font.name}</span>
+                </span>
+                <span className="prompt-font-sample" style={{ fontFamily: font.family }}>
+                  What would you like to do?
+                </span>
+              </button>
+            ))}
+          </div>
+        </fieldset>
       </section>
     )
   }

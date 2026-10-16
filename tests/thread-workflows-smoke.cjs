@@ -64,6 +64,7 @@ async function run() {
   }
   const errors = []
   const cardGeometry = []
+  let fontPreview
   let server
   let browser
   let page
@@ -96,14 +97,20 @@ async function run() {
           ? 'fixture.js'
           : request.url === '/fixture.css'
             ? 'fixture.css'
-            : undefined
+            : /^\/([a-zA-Z0-9_.-]+\.(?:woff2?|ttf))$/.exec(request.url)?.[1]
       response.setHeader(
         'Content-Type',
         file?.endsWith('.js')
           ? 'text/javascript'
           : file?.endsWith('.css')
             ? 'text/css'
-            : 'text/html',
+            : file?.endsWith('.woff2')
+              ? 'font/woff2'
+              : file?.endsWith('.woff')
+                ? 'font/woff'
+                : file?.endsWith('.ttf')
+                  ? 'font/ttf'
+                  : 'text/html',
       )
       response.end(
         file
@@ -531,6 +538,125 @@ async function run() {
     await page.getByRole('button', { name: 'New thread', exact: true }).click()
     await page.waitForFunction(
       () => document.querySelector('[data-thread-row="thread-a"]') === null,
+    )
+    const fontNames = [
+      'DM Sans',
+      'Manrope',
+      'Geist',
+      'Plus Jakarta Sans',
+      'Instrument Sans',
+      'Outfit',
+      'Onest',
+      'Urbanist',
+      'Inter',
+      'IBM Plex Sans',
+    ]
+    const fontFamilies = fontNames.map((name, index) =>
+      index === 0 ? 'DM Sans Variable' : 'Life Prompt ' + name,
+    )
+    const fontChoices = page.getByRole('group', { name: 'Choose a font to preview', exact: true })
+    await fontChoices.waitFor()
+    assert.equal(await fontChoices.locator('legend').innerText(), 'Choose a font to preview')
+    assert.equal(await fontChoices.locator('.prompt-font-option').count(), 10)
+    const preview = page.locator('.active-project-prompt')
+    const projectButton = preview.locator('h1 .active-project-selector')
+    const initialProject = await projectButton.innerText()
+    const initialProjectWorkspace = await page.evaluate(
+      async () => (await window.relay.connection.state()).workspace,
+    )
+    const originalFonts = await page.evaluate(() => ({
+      sidebar: getComputedStyle(document.querySelector('.sidebar')).fontFamily,
+      row: getComputedStyle(document.querySelector('.sidebar .thread-card-title')).fontFamily,
+      composer: getComputedStyle(document.querySelector('[aria-label="Message your coding agent"]'))
+        .fontFamily,
+    }))
+    const originalPreviewHistory = await arrangementSnapshot()
+    const originalPreviewDraft = await composer.inputValue()
+    for (let index = 0; index < fontNames.length; index++) {
+      const choice = fontChoices.getByRole('button', {
+        name: `${index + 1}. ${fontNames[index]}`,
+        exact: true,
+      })
+      await choice.click()
+      assert.equal(await choice.getAttribute('aria-pressed'), 'true')
+      assert.equal(await fontChoices.locator('[aria-pressed="true"]').count(), 1)
+      const selected = await preview.locator('h1').evaluate((heading) =>
+        getComputedStyle(heading)
+          .fontFamily.split(',')[0]
+          .trim()
+          .replace(/^['"]|['"]$/g, ''),
+      )
+      assert.equal(selected, fontFamilies[index])
+      assert.equal(await projectButton.innerText(), initialProject)
+      assert.deepEqual(
+        await page.evaluate(() => ({
+          sidebar: getComputedStyle(document.querySelector('.sidebar')).fontFamily,
+          row: getComputedStyle(document.querySelector('.sidebar .thread-card-title')).fontFamily,
+          composer: getComputedStyle(
+            document.querySelector('[aria-label="Message your coding agent"]'),
+          ).fontFamily,
+        })),
+        originalFonts,
+      )
+    }
+    fontPreview = await page.evaluate(async (families) => {
+      await Promise.all(
+        families.map((family) => document.fonts.load(`400 32px "${family}"`, 'Preview')),
+      )
+      await document.fonts.ready
+      const unquote = (value) => value.trim().replace(/^['"]|['"]$/g, '')
+      const faces = [...document.fonts]
+      const sources = []
+      const inspect = (rules) => {
+        for (const rule of rules) {
+          if (rule.type === CSSRule.FONT_FACE_RULE) {
+            for (const match of rule.style
+              .getPropertyValue('src')
+              .matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/g)) {
+              const url = new URL(match[2], rule.parentStyleSheet.href || document.baseURI)
+              sources.push({
+                family: unquote(rule.style.getPropertyValue('font-family')),
+                local: url.origin === location.origin,
+                path: url.pathname,
+              })
+            }
+          } else if (rule.cssRules) inspect(rule.cssRules)
+        }
+      }
+      for (const sheet of document.styleSheets) inspect(sheet.cssRules)
+      const loadedPaths = new Set(
+        performance.getEntriesByType('resource').map((entry) => new URL(entry.name).pathname),
+      )
+      return families.map((family) => ({
+        family,
+        checked: document.fonts.check(`400 32px "${family}"`, 'Preview'),
+        loaded: faces.some((face) => unquote(face.family) === family && face.status === 'loaded'),
+        source: sources.find((source) => source.family === family && loadedPaths.has(source.path)),
+      }))
+    }, fontFamilies)
+    for (const face of fontPreview) {
+      assert.equal(face.checked, true, face.family)
+      assert.equal(face.loaded, true, face.family)
+      assert.equal(face.source?.local, true, face.family)
+      assert.match(face.source.path, /\.(?:woff2?|ttf)$/)
+    }
+    assert.equal(new Set(fontPreview.map((face) => face.source.path)).size, 10)
+    await projectButton.click()
+    const chooseProject = page.getByRole('dialog', { name: 'Select a project', exact: true })
+    await chooseProject.waitFor()
+    await chooseProject.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    assert.equal(await projectButton.innerText(), initialProject)
+    assert.equal(
+      await page.evaluate(async () => (await window.relay.connection.state()).workspace),
+      initialProjectWorkspace,
+    )
+    await fontChoices.getByRole('button', { name: '1. DM Sans', exact: true }).click()
+    assert.equal(await composer.inputValue(), originalPreviewDraft)
+    assert.deepEqual(await arrangementSnapshot(), originalPreviewHistory)
+    assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
+    assert.deepEqual(await page.evaluate(() => window.controlsTest.records.stops), [])
+    checks.push(
+      'All ten numbered local font previews load distinct font assets and change only the new-thread heading; selection is exclusive and its original project picker, draft and saved conversations remain intact',
     )
     await page.getByRole('button', { name: 'Settled (2)', exact: true }).click()
     assert.deepEqual(
@@ -967,6 +1093,7 @@ async function run() {
       count: checks.length,
       browserErrors: errors,
       cardGeometry,
+      fontPreview,
       records: await page.evaluate(() => window.controlsTest.records),
     }
     await writeFile(

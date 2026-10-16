@@ -864,7 +864,7 @@ async function fluidityChecks(page, checks, settle) {
   )
 
   if (!fluidityBaseline) {
-    const alphaAge = alpha.locator('time')
+    const alphaAge = alpha.locator('..').locator('time')
     assert.equal(await alphaAge.textContent(), 'Now')
     const currentTime = await page.evaluate(() => Date.now())
     await settle()
@@ -875,7 +875,7 @@ async function fluidityChecks(page, checks, settle) {
       const row = [...document.querySelectorAll('.thread-row')].find((button) =>
         button.getAttribute('aria-label')?.startsWith('Thread Alpha,'),
       )
-      return row?.querySelector('time')?.textContent === '2m'
+      return row?.closest('.thread-card-shell')?.querySelector('time')?.textContent === '2m'
     })
     assert.equal(
       await page.evaluate(() => window.controlsTest.metrics.sidebarRowRenders),

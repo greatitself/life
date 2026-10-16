@@ -1,0 +1,132 @@
+@font-face {
+  font-family: 'Life Prompt Manrope';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/manrope.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Geist';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/geist.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/plus-jakarta-sans.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Instrument Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/instrument-sans.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Outfit';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/outfit.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Onest';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/onest.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Urbanist';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/urbanist.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt Inter';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/inter.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Life Prompt IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/ibm-plex-sans.woff2') format('woff2');
+}
+.prompt-font-preview {
+  min-width: 0;
+  margin: 28px 0 0;
+  padding: 0;
+  border: 0;
+  text-align: left;
+}
+.prompt-font-preview > legend {
+  margin-bottom: 12px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.prompt-font-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.prompt-font-option {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  text-align: left;
+}
+.prompt-font-option:hover {
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+.prompt-font-option[aria-pressed='true'] {
+  border-color: var(--text);
+  background: var(--surface);
+}
+.prompt-font-option:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+.prompt-font-option-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.prompt-font-option-label > span:first-child {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.prompt-font-sample {
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 450;
+  letter-spacing: -0.3px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .prompt-font-sample {
+    font-size: 16px;
+  }
+  .prompt-font-option {
+    padding: 9px;
+  }
+}

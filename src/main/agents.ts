@@ -682,11 +682,12 @@ export class Agents {
       channel.off('close', closedDuringRead)
       this.recoveryLoaded.delete(id)
       if (
-        snapshot?.closeInputSequence !== undefined &&
-        !snapshot.outputs.some(isConfirmedNativeExit)
+        (snapshot?.closeInputSequence !== undefined || this.pendingProviderExits.has(channel)) &&
+        !snapshot?.outputs.some(isConfirmedNativeExit)
       ) {
-        // Its existing close owner must keep observing the original terminal
-        // receipt; attachment retirement alone gives no native-exit credit.
+        // Retirement owns the attachment before the close reaches the WAL.
+        // Keep observing its original terminal receipt throughout that handoff;
+        // attachment retirement alone gives no native-exit credit.
         if (
           attachmentClosed ||
           channel.destroyed ||

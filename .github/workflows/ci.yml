@@ -27,7 +27,16 @@ on:
         default: all
         type: choice
         options:
-          [all, active-recovery, active-tail, studio-source, navigation, ownership, ssh-allocated]
+          [
+            all,
+            active-recovery,
+            active-tail,
+            studio-source,
+            navigation,
+            ownership,
+            ssh-allocated,
+            ssh-preallocation,
+          ]
       windows_only:
         description: 'Run only packaged Windows compatibility while diagnosing that gate'
         required: false
@@ -770,8 +779,8 @@ jobs:
               done
               test "$failed" = 0
               ;;
-            ssh-allocated)
-              export LIFE_METADATA_QUIT_CASE=ssh-allocated
+            ssh-allocated|ssh-preallocation)
+              export LIFE_METADATA_QUIT_CASE="$NATIVE_SUITE"
               export LIFE_METADATA_QUIT_ARTIFACTS="$LIFE_TEST_ARTIFACTS_DIR"
               node tests/metadata-startup-quit/owned-runner.cjs
               ;;

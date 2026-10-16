@@ -54,3 +54,4 @@ Recovered idle Codex connections recognize deliberate retirement and confirmed n
 
 Changed Studio cache rows wait for their exact current native owner and projection proof before replacing acknowledged bytes. A crash after a source commit preserves the compiled revision while retaining the existing built-in-interface safety fallback.
 Recovery refreshes one stale pre-attachment journal cutoff while preserving the original transport, controller, and exact journal prefix. Repeated changes, ownership changes, and uncertain native attachment remain blocked.
+An idle provider opening keeps its original attachment while retirement records the close command, preventing a handshake callback from detaching it before the provider can confirm exit.

@@ -2157,6 +2157,89 @@ describe('Agents native recovery boundaries', () => {
     }
   })
 
+  it('retains an idle Codex opening while its retirement owns the not-yet-recorded close', async () => {
+    await withFixture(
+      'codex',
+      async (fixture) => {
+        const ready = Deferred.makeUnsafe<void>()
+        const retiring = Deferred.makeUnsafe<void>()
+        const admitClose = Deferred.makeUnsafe<void>()
+        const { launched } = installLaunch(
+          fixture,
+          (channel) => {
+            channel.closeAndWaitEffect = () =>
+              Effect.gen(function* () {
+                channel.isClosing = true
+                yield* Deferred.succeed(retiring, undefined)
+                yield* Deferred.await(admitClose)
+                const close = yield* fixture.store.reserveInput(
+                  channel.recoveryId,
+                  { type: 'close' },
+                  { kind: 'close' },
+                )
+                yield* Effect.promise(() =>
+                  deliverWrittenInput(fixture.store, channel.recoveryId, close.sequence),
+                )
+                const before = yield* fixture.store.readTransport(channel.recoveryId)
+                yield* fixture.store.appendOutputs(channel.recoveryId, [
+                  {
+                    type: 'exit',
+                    cursor: before.outputCursor + 1,
+                    code: 0,
+                    nativeExitConfirmed: true,
+                  },
+                ])
+                channel.emit('exit', 0)
+                return true
+              })
+          },
+          undefined,
+          () => run(Deferred.await(ready)),
+        )
+        const opening = fixture.agents.models('codex')
+        void opening.catch(() => {})
+        let releasing: Promise<boolean[]> | undefined
+        let released = false
+        try {
+          await vi.waitFor(() => expect(launched).toHaveLength(1))
+          await launched[0].registration
+          releasing = fixture.agents.releaseIdleProviders().then((result) => {
+            released = true
+            return result
+          })
+          await run(Deferred.await(retiring))
+          const before = await run(fixture.store.readTransport(launched[0].recoveryId))
+          expect(before.closeInputSequence).toBeUndefined()
+          Deferred.doneUnsafe(ready, Effect.void)
+          await expect(opening).rejects.toThrow(/closed its idle Codex connection/)
+          expect(launched[0].detach).not.toHaveBeenCalled()
+          expect(launched[0].destroyed).toBe(false)
+          expect(launched[0].nativeWrites).toEqual([])
+          expect(released).toBe(false)
+          expect(fixture.agents.hasProviderRetirementTargets()).toBe(true)
+          const pending = await run(fixture.store.readTransport(launched[0].recoveryId))
+          expect(pending.closeInputSequence).toBeUndefined()
+          expect(pending.outputs.some((output) => output.type === 'exit')).toBe(false)
+          Deferred.doneUnsafe(admitClose, Effect.void)
+          expect(await releasing).toEqual([true])
+          const after = await run(fixture.store.readTransport(launched[0].recoveryId))
+          expect(after.inputs).toHaveLength(1)
+          expect(after.inputs[0]).toMatchObject({ frame: { type: 'close' }, written: true })
+          expect(after.outputs.at(-1)).toMatchObject({ type: 'exit', nativeExitConfirmed: true })
+          expect(launched).toHaveLength(1)
+          expect(launched[0].nativeWrites).toEqual([])
+          expect(fixture.ssh.channel).not.toHaveBeenCalled()
+          expect(fixture.ssh.exec).not.toHaveBeenCalled()
+        } finally {
+          Deferred.doneUnsafe(ready, Effect.void)
+          Deferred.doneUnsafe(admitClose, Effect.void)
+          await Promise.allSettled([opening, ...(releasing ? [releasing] : [])])
+        }
+      },
+      false,
+    )
+  })
+
   it('releases a failed fresh Codex opening after local close races its held cleanup read without inventing native exit proof', async () => {
     await withFixture(
       'codex',

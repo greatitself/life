@@ -157,8 +157,15 @@ function sourceThreadResponse(prompt, request, studio) {
     if (!hasSourceRead)
       return '<life-source-read>{"paths":["src/renderer/App.tsx"]}</life-source-read>'
     const app = context.files.find((file) => file.path === 'src/renderer/App.tsx')
-    if (!app?.content.includes('<main className="main-workspace" id="main-content">'))
-      throw new Error('The source continuation omitted the requested App.tsx workspace source.')
+    const workspaceTags =
+      app?.content.match(
+        /<main\b(?=[^>]*\bclassName="main-workspace")(?=[^>]*\bid="main-content")[^>]*>/g,
+      ) || []
+    if (workspaceTags.length !== 1)
+      throw new Error(
+        `Expected exactly one main workspace opening tag in the requested App.tsx source; found ${workspaceTags.length}.`,
+      )
+    const workspaceTag = workspaceTags[0]
     return `<life-source>${JSON.stringify({
       summary: 'Add a real hypothesis backlog to the Life workspace source',
       baseRevision: context.revision,
@@ -177,9 +184,8 @@ function sourceThreadResponse(prompt, request, studio) {
                 "import { FixtureHypothesisBacklog } from './components/FixtureHypothesisBacklog'\nimport './enhancements.css'",
             },
             {
-              find: '<main className="main-workspace" id="main-content">',
-              replace:
-                '<main className="main-workspace" id="main-content">\n                <FixtureHypothesisBacklog />',
+              find: workspaceTag,
+              replace: workspaceTag + '\n                <FixtureHypothesisBacklog />',
             },
           ],
         },

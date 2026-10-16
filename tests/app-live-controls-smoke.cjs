@@ -24,6 +24,35 @@ async function workspacePanelChecks(page, checks, settle) {
   const picker = panel.locator('.surface-picker[aria-label="Open a surface"]')
   const tablist = page.getByRole('tablist', { name: 'Open workspace surfaces', exact: true })
   const tab = (name) => tablist.getByRole('tab', { name, exact: true })
+  const assertCloseLayout = async (name) => {
+    const geometry = await tab(name)
+      .locator('..')
+      .evaluate((element) => {
+        const close = element.querySelector('.surface-tab-close')
+        const rect = (node) => {
+          const bounds = node.getBoundingClientRect()
+          return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }
+        }
+        return {
+          control: rect(close),
+          label: rect(element.querySelector('[role="tab"] span')),
+          glyphs: [...close.querySelectorAll('svg')].map(rect),
+        }
+      })
+    assert.ok(
+      geometry.label.left >= geometry.control.right - 0.5,
+      'Tab labels must start after the close control',
+    )
+    assert.equal(geometry.glyphs.length, 2)
+    for (const glyph of geometry.glyphs)
+      assert.ok(
+        glyph.left >= geometry.control.left - 0.5 &&
+          glyph.right <= geometry.control.right + 0.5 &&
+          glyph.top >= geometry.control.top - 0.5 &&
+          glyph.bottom <= geometry.control.bottom + 0.5,
+        'Both idle and hover glyphs must fit inside the tab close control',
+      )
+  }
   const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
   const exactText = (name) => page.locator('span').filter({ hasText: new RegExp('^' + name + '$') })
   const openSurface = async (name) => {
@@ -194,6 +223,33 @@ async function workspacePanelChecks(page, checks, settle) {
     .getByText('Native Alpha child completed with preserved output.', { exact: true })
     .waitFor()
   assert.match(await alpha.textContent(), /child-model-fixture/)
+  const accessibleStatus = await alpha.locator('.agents-panel-status').evaluate((element) => {
+    const style = getComputedStyle(element)
+    const bounds = element.getBoundingClientRect()
+    return {
+      text: element.textContent,
+      width: bounds.width,
+      height: bounds.height,
+      position: style.position,
+      clipPath: style.clipPath,
+      display: style.display,
+      visibility: style.visibility,
+      ariaHidden: element.getAttribute('aria-hidden'),
+    }
+  })
+  assert.equal(accessibleStatus.text, 'Completed')
+  assert.equal(accessibleStatus.ariaHidden, null)
+  assert.notEqual(accessibleStatus.display, 'none')
+  assert.notEqual(accessibleStatus.visibility, 'hidden')
+  assert.equal(accessibleStatus.position, 'absolute')
+  assert.equal(accessibleStatus.width, 1)
+  assert.equal(accessibleStatus.height, 1)
+  assert.equal(accessibleStatus.clipPath, 'inset(50%)')
+  await page.mouse.move(900, 60)
+  await assertCloseLayout('Agents')
+  await tab('Agents').locator('..').hover()
+  await assertCloseLayout('Agents')
+  await page.mouse.move(900, 60)
 
   const geometry = await workspace.evaluate((element) => {
     const bounds = (selector) => {
@@ -519,6 +575,7 @@ async function workspacePanelChecks(page, checks, settle) {
   await tab('Files').click()
   await preview.waitFor()
   await tab('Agents').click()
+  await assertCloseLayout('Agents')
   for (let index = 0; index < 8; index++) {
     await page.keyboard.press('Tab')
     assert.equal(await panel.evaluate((element) => element.contains(document.activeElement)), true)

@@ -839,11 +839,16 @@ body:has(.sidebar-resize-handle[data-dragging='true']) iframe {
   flex: 0 0 16px;
   width: 16px;
   height: 16px;
+  padding: 0;
+  box-sizing: border-box;
   color: inherit;
   border-radius: 3px;
 }
 .surface-tab-close svg {
-  grid-area: 1 / 1;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 .surface-tab-close-icon,
 .surface-tab:hover .surface-tab-icon,

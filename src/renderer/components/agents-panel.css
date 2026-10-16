@@ -29,6 +29,18 @@
   border-radius: 6px;
   padding: 4px 6px;
 }
+.agents-panel-row > .agents-panel-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .agents-panel-dot {
   grid-column: 1;
   grid-row: 1;

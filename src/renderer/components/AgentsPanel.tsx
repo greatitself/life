@@ -292,7 +292,7 @@ export const AgentsPanel = memo(
                       .filter(Boolean)
                       .join(' · ')}
                   </span>
-                  <span className="sr-only">{statusLabels[agent.status]}</span>
+                  <span className="agents-panel-status">{statusLabels[agent.status]}</span>
                 </div>
               )
             })}

@@ -91,8 +91,8 @@
     },
     {
       "path": "tests/active-recovery-bootstrap.test.ts",
-      "bytes": 17588,
-      "sha256": "0a413125df830e9d3b70ec17327b4b083c8ff14deffc6ea349c13136ab1737a8"
+      "bytes": 22792,
+      "sha256": "09312cd22db786bac47db6410e4fbafd9e693aec33bf62af1d27bc01b2859d12"
     },
     {
       "path": "tests/active-recovery-runner.test.ts",
@@ -250,6 +250,11 @@
       "path": "tests/helpers/active-recovery-observer/local-bootstrap.cjs",
       "previousSha256": "70c8ddb59139868ee198cb6c11158d6cd308495c3e5c17f7b9a92ff3a49a53f1",
       "reason": "Admit the genuine Local connection command boundary exec \"$SHELL\" -s by reading and validating the complete bounded UTF-8 stdin script before execution. Require its exact native owned cwd prefix, preserve the existing native realpath/workspace case guard verbatim, apply the existing private HOME/provider mapping, retain original and rewritten bytes/hashes, reject malformed/oversized/unowned scripts without partial execution, and retain the no-unexpected-command proof. Native provider protocols, broker/controller ownership, WAL, source/out/dependency fingerprints, crash, permission and forced-cleanup assertions are unchanged."
+    },
+    {
+      "path": "tests/active-recovery-bootstrap.test.ts",
+      "previousSha256": "0a413125df830e9d3b70ec17327b4b083c8ff14deffc6ea349c13136ab1737a8",
+      "reason": "Extend the existing private bootstrap tests to verify the actual prepared shell stdin-script boundary: exact original and rewritten Unicode/trailing bytes, preserved native inside/outside-home workspace guard, and rejection of unowned, invalid, oversized and absolute-provider-bypass scripts with no partial execution. Product/native scenario assertions are unchanged."
     }
   ]
 }

@@ -1,0 +1,7 @@
+@font-face {
+  font-family: 'Life Prompt Onest';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../assets/prompt-fonts/onest.woff2') format('woff2');
+}

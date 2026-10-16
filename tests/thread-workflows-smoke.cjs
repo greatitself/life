@@ -541,28 +541,22 @@ async function run() {
     await page.waitForFunction(
       () => document.querySelector('[data-thread-row="thread-a"]') === null,
     )
-    const fontNames = [
-      'DM Sans',
-      'Manrope',
-      'Geist',
-      'Plus Jakarta Sans',
-      'Instrument Sans',
-      'Outfit',
-      'Onest',
-      'Urbanist',
-      'Inter',
-      'IBM Plex Sans',
-    ]
-    const fontFamilies = fontNames.map((name, index) =>
-      index === 0 ? 'DM Sans Variable' : 'Life Prompt ' + name,
-    )
-    const fontChoices = page.getByRole('group', { name: 'Choose a font to preview', exact: true })
-    await fontChoices.waitFor()
-    assert.equal(await fontChoices.locator('legend').innerText(), 'Choose a font to preview')
-    assert.equal(await fontChoices.locator('.prompt-font-option').count(), 10)
+    const fontFamilies = ['Life Prompt Onest']
     const preview = page.locator('.active-project-prompt')
     const projectButton = preview.locator('h1 .active-project-selector')
     const initialProject = await projectButton.innerText()
+    assert.equal(
+      (await preview.locator('h1').innerText()).replace(/\s+/g, ' ').trim(),
+      `What do you want to do in ${initialProject}?`,
+    )
+    assert.equal(await preview.locator('fieldset, .prompt-font-option').count(), 0)
+    const headingFamily = await preview.locator('h1').evaluate((heading) =>
+      getComputedStyle(heading)
+        .fontFamily.split(',')[0]
+        .trim()
+        .replace(/^['"]|['"]$/g, ''),
+    )
+    assert.equal(headingFamily, 'Life Prompt Onest')
     const initialProjectWorkspace = await page.evaluate(
       async () => (await window.relay.connection.state()).workspace,
     )
@@ -572,35 +566,12 @@ async function run() {
       composer: getComputedStyle(document.querySelector('[aria-label="Message your coding agent"]'))
         .fontFamily,
     }))
+    for (const family of Object.values(originalFonts)) {
+      assert.match(family, /^["']?DM Sans(?: Variable)?["']?(?:,|$)/)
+      assert.doesNotMatch(family, /Onest/)
+    }
     const originalPreviewHistory = await arrangementSnapshot()
     const originalPreviewDraft = await composer.inputValue()
-    for (let index = 0; index < fontNames.length; index++) {
-      const choice = fontChoices.getByRole('button', {
-        name: `${index + 1}. ${fontNames[index]}`,
-        exact: true,
-      })
-      await choice.click()
-      assert.equal(await choice.getAttribute('aria-pressed'), 'true')
-      assert.equal(await fontChoices.locator('[aria-pressed="true"]').count(), 1)
-      const selected = await preview.locator('h1').evaluate((heading) =>
-        getComputedStyle(heading)
-          .fontFamily.split(',')[0]
-          .trim()
-          .replace(/^['"]|['"]$/g, ''),
-      )
-      assert.equal(selected, fontFamilies[index])
-      assert.equal(await projectButton.innerText(), initialProject)
-      assert.deepEqual(
-        await page.evaluate(() => ({
-          sidebar: getComputedStyle(document.querySelector('.sidebar')).fontFamily,
-          row: getComputedStyle(document.querySelector('.sidebar .thread-card-title')).fontFamily,
-          composer: getComputedStyle(
-            document.querySelector('[aria-label="Message your coding agent"]'),
-          ).fontFamily,
-        })),
-        originalFonts,
-      )
-    }
     fontPreview = await page.evaluate(async (families) => {
       await Promise.all(
         families.map((family) => document.fonts.load(`400 32px "${family}"`, 'Preview')),
@@ -640,9 +611,9 @@ async function run() {
       assert.equal(face.checked, true, face.family)
       assert.equal(face.loaded, true, face.family)
       assert.equal(face.source?.local, true, face.family)
-      assert.match(face.source.path, /\.(?:woff2?|ttf)$/)
+      assert.match(face.source.path, /\.woff2$/)
     }
-    assert.equal(new Set(fontPreview.map((face) => face.source.path)).size, 10)
+    assert.equal(fontPreview.length, 1)
     await projectButton.click()
     const chooseProject = page.getByRole('dialog', { name: 'Select a project', exact: true })
     await chooseProject.waitFor()
@@ -652,13 +623,22 @@ async function run() {
       await page.evaluate(async () => (await window.relay.connection.state()).workspace),
       initialProjectWorkspace,
     )
-    await fontChoices.getByRole('button', { name: '1. DM Sans', exact: true }).click()
+    assert.deepEqual(
+      await page.evaluate(() => ({
+        sidebar: getComputedStyle(document.querySelector('.sidebar')).fontFamily,
+        row: getComputedStyle(document.querySelector('.sidebar .thread-card-title')).fontFamily,
+        composer: getComputedStyle(
+          document.querySelector('[aria-label="Message your coding agent"]'),
+        ).fontFamily,
+      })),
+      originalFonts,
+    )
     assert.equal(await composer.inputValue(), originalPreviewDraft)
     assert.deepEqual(await arrangementSnapshot(), originalPreviewHistory)
     assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
     assert.deepEqual(await page.evaluate(() => window.controlsTest.records.stops), [])
     checks.push(
-      'All ten numbered local font previews load distinct font assets and change only the new-thread heading; selection is exclusive and its original project picker, draft and saved conversations remain intact',
+      'The original new-thread wording uses a locally loaded Onest heading with no font chooser; the sidebar and composer retain DM Sans and the original project picker, draft and saved conversations remain intact',
     )
     await page.getByRole('button', { name: 'Settled (2)', exact: true }).click()
     assert.deepEqual(

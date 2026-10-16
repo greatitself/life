@@ -106,8 +106,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 39060,
-      "sha256": "52663b0a570d6a127667afc8b3b488fd7c70a578d9d949ffdb1c586adfebc52a"
+      "bytes": 39048,
+      "sha256": "55f4bdd402f9b17db8fffe4048e4b59f77f220aafb96960228f09a07e2eec41a"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -143,8 +143,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 39060,
-      "sha256": "52663b0a570d6a127667afc8b3b488fd7c70a578d9d949ffdb1c586adfebc52a"
+      "bytes": 39048,
+      "sha256": "55f4bdd402f9b17db8fffe4048e4b59f77f220aafb96960228f09a07e2eec41a"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -240,6 +240,11 @@
       "path": "tests/helpers/active-recovery-observer/source-artifacts.cjs",
       "previousSha256": "1a5a50bcdb8f03212e6e5e625bf1280a258b035408c7263ee1c303511708b4ca",
       "reason": "Supplemental read-only source-commit verification now recognizes only the exact crash-safety-fallback outcome: current source must be disabled, inactive and recovered with the existing unclean-shutdown error; private state current and the historical successful apply snapshot must equal committedRevision, and compiled entry bytes must match compiledSha256. Retain exact ledger checksum, intent hash, native identity, single marker, immutable snapshot and original enabled-at-commit checks. Ordinary source application still requires the actual active revision."
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "previousSha256": "52663b0a570d6a127667afc8b3b488fd7c70a578d9d949ffdb1c586adfebc52a",
+      "reason": "Restrict the setup-only renderer reload to Studio archive seeding. Ordinary scenarios already read the native conversations.json archive seeded before launch and need no replacement document. Genuine Local auto-connect can still be opening the model catalog at this unrelated setup reload, where the strict native handoff guard correctly refuses. Keep all actual SIGKILL, cold attachment, native identity, journal, permission, archive and forced-cleanup assertions unchanged; dedicated reload stages remain mandatory."
     }
   ]
 }

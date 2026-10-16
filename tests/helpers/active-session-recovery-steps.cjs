@@ -419,7 +419,7 @@ class RecoveryHarness {
         ),
       'the renderer loads the archive seeded before the native process starts',
     )
-    if (studio)
+    if (studio) {
       await this.page.addInitScript((sessions) => {
         if (window.top !== window) return
         const marker = 'life.fixture.opaque-studio-seeded.v1'
@@ -430,9 +430,8 @@ class RecoveryHarness {
         localStorage.removeItem('life.studio.active.v1')
         localStorage.setItem(marker, '1')
       }, opaqueStudioArchive)
-    await this.page.reload()
-    await this.page.locator('.app-shell').waitFor()
-    if (studio) {
+      await this.page.reload()
+      await this.page.locator('.app-shell').waitFor()
       await this.assertStudioOpaque()
       // Establish a genuinely pre-existing archive on disk before the active
       // crash case. Renderer setItem alone does not prove Chromium persisted it.

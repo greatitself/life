@@ -32,6 +32,7 @@ on:
             active-recovery,
             active-tail,
             studio-source,
+            local-recovery,
             navigation,
             ownership,
             ssh-allocated,
@@ -709,7 +710,7 @@ jobs:
         if: matrix.suite == 'ownership'
         run: npm test -- --maxWorkers=1 tests/renderer-idle-retirement.test.ts
       - name: Verify native recovery boundary regressions
-        if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail' || matrix.suite == 'studio-source'
+        if: matrix.suite == 'active-recovery' || matrix.suite == 'active-tail' || matrix.suite == 'studio-source' || matrix.suite == 'local-recovery'
         run: npm test -- --maxWorkers=1 tests/agent-native-recovery.test.ts tests/agents-native-recovery-boundaries.test.ts tests/active-recovery-runner.test.ts tests/active-recovery-observer.test.ts tests/renderer-idle-retirement.test.ts tests/agent-native-recovery-studio-proof.test.ts
       - name: Capture source before the Linux build
         run: node scripts/record-recovery-build.cjs capture-source output/linux-source-before.json
@@ -768,6 +769,13 @@ jobs:
             active-tail)
               failed=0
               for stage in ssh-thread-binding ssh-turn-start ssh-string-approval ssh-codex-studio-planning ssh-codex-studio-source-read ssh-codex-studio-source-proposal ssh-codex-studio-repair ssh-claude-studio-planning ssh-claude-studio-source-read ssh-claude-studio-source-proposal ssh-claude-studio-repair source-commit reload; do
+                node tests/active-recovery-run.cjs "$stage" || failed=1
+              done
+              test "$failed" = 0
+              ;;
+            local-recovery)
+              failed=0
+              for stage in local-codex-stream local-claude-approval; do
                 node tests/active-recovery-run.cjs "$stage" || failed=1
               done
               test "$failed" = 0

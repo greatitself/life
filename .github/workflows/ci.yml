@@ -774,7 +774,7 @@ jobs:
               ;;
             studio-source)
               failed=0
-              for stage in ssh-codex-studio-source-proposal source-commit ssh-codex-studio-repair; do
+              for stage in ssh-codex-studio-source-proposal source-commit source-artifacts-commit ssh-codex-studio-repair; do
                 node tests/active-recovery-run.cjs "$stage" || failed=1
               done
               test "$failed" = 0

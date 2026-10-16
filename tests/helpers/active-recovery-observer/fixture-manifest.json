@@ -66,8 +66,8 @@
     },
     {
       "path": "tests/helpers/active-recovery-observer/source-artifacts.cjs",
-      "bytes": 5043,
-      "sha256": "1a5a50bcdb8f03212e6e5e625bf1280a258b035408c7263ee1c303511708b4ca"
+      "bytes": 5920,
+      "sha256": "a75082744f7a07cf337e6fce77a13c26b483bebfd3de736c9bcc64f25748b00e"
     },
     {
       "path": "tests/helpers/active-recovery-observer/local-bootstrap.cjs",
@@ -235,6 +235,11 @@
       "path": "tests/helpers/active-session-recovery-steps.cjs",
       "previousSha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3",
       "reason": "Before starting a Studio crash scenario, gracefully close the archive-seeding native app, launch a fresh app and assert the exact archived rows on the cold read. Renderer localStorage setItem alone does not establish Chromium disk durability. The page-scoped seed script is gone before provider work begins; actual active-owner SIGKILL, pre-crash archive check and final exact preservation assertions remain unchanged, with no post-crash reseeding."
+    },
+    {
+      "path": "tests/helpers/active-recovery-observer/source-artifacts.cjs",
+      "previousSha256": "1a5a50bcdb8f03212e6e5e625bf1280a258b035408c7263ee1c303511708b4ca",
+      "reason": "Supplemental read-only source-commit verification now recognizes only the exact crash-safety-fallback outcome: current source must be disabled, inactive and recovered with the existing unclean-shutdown error; private state current and the historical successful apply snapshot must equal committedRevision, and compiled entry bytes must match compiledSha256. Retain exact ledger checksum, intent hash, native identity, single marker, immutable snapshot and original enabled-at-commit checks. Ordinary source application still requires the actual active revision."
     }
   ]
 }

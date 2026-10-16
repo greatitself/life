@@ -90,7 +90,29 @@ async function main() {
       }
       assert.deepEqual(snapshot, record.receipt.snapshot)
       assert.equal(snapshot.active.revision, snapshot.revision)
-      assert.equal(snapshot.revision, result.sourceAfter.active.revision)
+      if (result.outcome === 'verified-source-commit-reconciled-with-crash-safety-fallback') {
+        assert.equal(result.sourceAfter.enabled, false)
+        assert.equal(result.sourceAfter.active, undefined)
+        assert.equal(result.sourceAfter.recovered, true)
+        assert.match(result.sourceAfter.error, /did not close cleanly/)
+        assert.equal(state.value.enabled, false)
+        assert.equal(state.value.current, result.committedRevision)
+        assert.equal(snapshot.revision, result.committedRevision)
+        assert.equal(
+          digest(
+            await readFile(
+              join(
+                result.sourceAfter.path,
+                'revisions',
+                String(result.committedRevision),
+                'dist',
+                'entry.js',
+              ),
+            ),
+          ),
+          result.compiledSha256,
+        )
+      } else assert.equal(snapshot.revision, result.sourceAfter.active.revision)
       assert.equal(snapshot.enabled, true)
       verified.push({
         name: completed.name,

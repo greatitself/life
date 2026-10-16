@@ -2829,6 +2829,8 @@ export function App() {
     workspaceOpen &&
     panels.rightInline &&
     workspaceMaximizedKey === workspaceScopeKey
+  const workspacePanelCovered =
+    workspacePanelMaximized || (view === 'workspace' && workspaceOpen && !panels.rightInline)
   const setWorkspacePanelMaximized = useCallback(
     (value: boolean) => setWorkspaceMaximizedKey(value ? workspaceScopeKey : undefined),
     [workspaceScopeKey],
@@ -3359,8 +3361,8 @@ export function App() {
                 className="main-workspace"
                 id="main-content"
                 data-agent-workspace={view === 'workspace' ? 'true' : undefined}
-                inert={workspacePanelMaximized || undefined}
-                aria-hidden={workspacePanelMaximized || undefined}
+                inert={workspacePanelCovered || undefined}
+                aria-hidden={workspacePanelCovered || undefined}
               >
                 <TitleBarContent target={titleBarContent}>
                   <header className="workspace-header">
@@ -3663,7 +3665,7 @@ export function App() {
                             pendingCount={pendingQuestions.length}
                             active={
                               (view !== 'investigation' || researchAgentOpen) &&
-                              !workspacePanelMaximized
+                              !workspacePanelCovered
                             }
                           />
                           {busy || (active && threadHasRunningChildren(active)) ? (

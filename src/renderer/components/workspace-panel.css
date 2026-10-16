@@ -45,9 +45,10 @@
 .workspace-panel .workspace-review-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px 10px;
-  min-height: 40px;
+  gap: 4px;
+  padding: 0 8px;
+  min-height: 28px;
+  margin-bottom: 12px;
   flex-shrink: 0;
   font-size: calc(var(--life-font-size, 12px) * 0.95);
 }
@@ -58,6 +59,7 @@
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
+  font-weight: 500;
 }
 .workspace-panel .workspace-review-toolbar .icon-button {
   width: 26px;
@@ -73,7 +75,7 @@
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
-  font-size: calc(var(--life-font-size, 12px) * 0.85);
+  font: calc(var(--life-font-size, 12px) * 0.91667) var(--mono);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -91,37 +93,64 @@
   padding-bottom: 24px;
 }
 .workspace-panel .workspace-diff-file {
-  padding-bottom: 10px;
+  padding-bottom: 4px;
 }
 .workspace-panel .workspace-diff-file-heading {
   display: flex;
   align-items: center;
-  min-height: 41px;
-  padding: 0 12px 0 9px;
-  gap: 6px;
+  min-height: 32px;
+  padding: 6px 12px 6px 8px;
+  gap: 7px;
   background: var(--base);
   position: sticky;
   top: 0;
   z-index: 1;
+  font-size: var(--life-font-size, 12px);
+  line-height: 1;
+}
+.workspace-panel .workspace-diff-file-heading:hover {
+  box-shadow: inset 3px 0 color-mix(in srgb, var(--text) 24%, transparent);
 }
 .workspace-panel .workspace-diff-file-toggle {
   display: flex;
   align-items: center;
-  min-width: 0;
-  gap: 7px;
-  padding: 7px 0;
-  flex: 1;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  flex-shrink: 0;
+  justify-content: center;
+  border-radius: 4px;
   text-align: left;
   color: var(--text);
-  font-size: calc(var(--life-font-size, 12px) * 0.95);
+  font-size: inherit;
 }
 .workspace-panel .workspace-diff-file-toggle > svg {
   color: var(--dim);
 }
-.workspace-panel .workspace-diff-file-toggle > span {
+.workspace-panel .workspace-diff-file-name {
+  min-width: 0;
+  flex: 1;
+  padding: 2px 0;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+}
+.workspace-panel .workspace-diff-file-name:not(:disabled):hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+.workspace-panel .workspace-diff-file-heading > svg {
+  flex-shrink: 0;
+  color: var(--dim);
+}
+.workspace-panel .workspace-diff-file-toggle:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 .workspace-panel .workspace-diff-file-heading .icon-button {
   width: 23px;
@@ -134,14 +163,28 @@
   tab-size: 2;
 }
 .workspace-panel .workspace-diff-hunk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--dim);
-  padding: 7px 13px;
-  margin: 3px 12px 5px;
-  border-top: 1px solid var(--border);
-  font-size: calc(var(--life-font-size, 12px) * 0.85);
+  height: 24px;
+  padding: 0 12px 0 8px;
+  margin: 0;
+  font:
+    calc(var(--life-font-size, 12px) * 0.91667) 'DM Sans Variable',
+    'DM Sans',
+    sans-serif;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.workspace-panel .workspace-diff-hunk::before,
+.workspace-panel .workspace-diff-hunk::after {
+  content: '';
+  flex: 1;
+  min-width: 8px;
+  height: 1px;
+  background: color-mix(in srgb, var(--base) 92%, var(--text));
 }
 .workspace-panel .workspace-diff-line {
   display: grid;
@@ -277,8 +320,8 @@
   text-overflow: ellipsis;
 }
 .workspace-panel .workspace-path {
-  padding: 10px 16px 14px;
-  font-size: calc(var(--life-font-size, 12px) * 0.95);
+  padding: 3px 12px 7px;
+  font-size: var(--life-font-size, 12px);
 }
 .workspace-panel .workspace-path > span:first-of-type {
   max-width: none;
@@ -291,10 +334,14 @@
 .workspace-panel .file-list {
   flex: 1;
   min-height: 0;
+  padding: 0 6px 12px;
 }
 .workspace-panel .file-row {
-  min-height: 34px;
-  font-size: calc(var(--life-font-size, 12px) * 0.975);
+  min-height: 26px;
+  padding-block: 4px;
+  gap: 6px;
+  color: var(--text);
+  font-size: var(--life-font-size, 12px);
 }
 .workspace-panel .workspace-file-preview {
   display: flex;
@@ -302,9 +349,9 @@
   overflow: hidden;
 }
 .workspace-panel .workspace-file-preview > header {
-  min-height: 39px;
+  min-height: 32px;
   gap: 8px;
-  padding: 0 12px 9px;
+  padding: 0 8px 6px;
   flex-shrink: 0;
 }
 .workspace-panel .workspace-file-preview > header > span {
@@ -348,4 +395,156 @@
 }
 .workspace-panel .diff-empty > span {
   max-width: 250px;
+}
+.workspace-panel .workspace-files-toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  height: 36px;
+  margin-bottom: 4px;
+  padding: 0 8px;
+}
+.workspace-panel .workspace-files-toolbar .icon-button {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.workspace-panel .workspace-files-search {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  color: var(--dim);
+}
+.workspace-panel .workspace-files-search > input {
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  font-family: inherit;
+  font-size: var(--life-font-size, 12px);
+  color: var(--text);
+}
+.workspace-panel .workspace-files-search > input::placeholder {
+  color: var(--dim);
+}
+.workspace-panel .file-row > .file-tree-chevron-space {
+  width: 12px;
+  flex: 0 0 12px;
+}
+.workspace-panel .file-row > svg {
+  flex-shrink: 0;
+}
+.workspace-panel .file-row:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+.workspace-panel .file-row[aria-current='true'] {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.workspace-panel .workspace-file-search-note {
+  margin: 0;
+  padding: 6px 12px 10px;
+  color: var(--dim);
+  font-size: calc(var(--life-font-size, 12px) * 0.91667);
+}
+.workspace-panel .workspace-diff-layout {
+  display: flex;
+  flex-shrink: 0;
+  gap: 1px;
+  padding: 2px;
+  background: var(--surface);
+  border-radius: 6px;
+}
+.workspace-panel .workspace-diff-layout .icon-button {
+  width: 24px;
+  height: 22px;
+}
+.workspace-panel .workspace-diff-layout .icon-button[aria-pressed='true'] {
+  background: var(--base);
+  box-shadow: 0 1px 2px #0000001a;
+}
+.workspace-panel .workspace-diff-layout-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.workspace-panel .workspace-diff-layout-body > .workspace-diff-view {
+  min-width: 0;
+}
+.workspace-panel .workspace-diff-tree {
+  display: flex;
+  flex-direction: column;
+  width: min(16rem, 40%);
+  min-width: 160px;
+  min-height: 0;
+  flex-shrink: 0;
+  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.workspace-panel .workspace-diff-tree > header {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 0 8px;
+  color: var(--dim);
+  font-size: var(--life-font-size, 12px);
+}
+.workspace-panel .workspace-diff-tree > header > strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.workspace-panel .workspace-diff-tree > header > span {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.workspace-panel .workspace-diff-tree .icon-button {
+  width: 24px;
+  height: 24px;
+}
+.workspace-panel .workspace-diff-tree-rows {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 6px 12px;
+}
+.workspace-panel .workspace-diff-split-hunk {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 100%;
+}
+.workspace-panel .workspace-diff-split-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+.workspace-panel .diff-split:not(.diff-wrap) .workspace-diff-split-hunk {
+  grid-template-columns: minmax(max-content, 1fr) minmax(max-content, 1fr);
+}
+.workspace-panel .workspace-diff-split-row > .workspace-diff-line {
+  grid-template-columns: 35px 16px minmax(0, 1fr);
+  min-width: 0;
+  align-content: start;
+  padding-right: 8px;
+}
+.workspace-panel .workspace-diff-split-row > .workspace-diff-line + .workspace-diff-line {
+  box-shadow: inset 1px 0 color-mix(in srgb, var(--border) 60%, transparent);
+}
+.workspace-panel .workspace-diff-line.diff-empty {
+  padding: 0 8px 0 0;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+.workspace-panel .workspace-diff-split-annotation {
+  grid-column: 1 / -1;
+  padding-left: 54px;
+  color: var(--dim);
+  font-style: italic;
 }

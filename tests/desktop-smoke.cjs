@@ -425,9 +425,13 @@ export function activityLabel(activity: ThreadActivity): string {
       return
     }
     const picker = page.locator('.surface-picker')
-    if (!(await picker.isVisible()))
-      await page.getByRole('button', { name: 'Open a surface', exact: true }).click()
-    await picker.getByRole('button', { name: new RegExp(`^${name}(?:\\s|$)`) }).click()
+    const launcherName = new RegExp(`^${name}(?:\\s|$)`)
+    if (await picker.isVisible()) {
+      await picker.getByRole('button', { name: launcherName }).click()
+    } else {
+      await page.getByRole('button', { name: 'Add panel surface', exact: true }).click()
+      await page.locator('.surface-menu').getByRole('menuitem', { name: launcherName }).click()
+    }
     await tab.waitFor()
   }
   const filesPanel = () => surface('Files')

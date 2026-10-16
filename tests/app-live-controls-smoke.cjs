@@ -75,6 +75,31 @@ async function workspacePanelChecks(page, checks, settle) {
     .locator('.file-row')
     .filter({ has: exactText('src') })
     .click()
+  const sourceDirectory = panel.locator('.file-row').filter({ has: exactText('src') })
+  const sourceFile = panel.locator('.file-row').filter({ has: exactText('agent.ts') })
+  await sourceFile.waitFor()
+  assert.equal(await sourceDirectory.isVisible(), true)
+  await sourceDirectory.click()
+  await sourceFile.waitFor({ state: 'hidden' })
+  await sourceDirectory.click()
+  await sourceFile.waitFor()
+  assert.equal(
+    await page.evaluate(
+      () =>
+        window.controlsTest.records.workspaceReads.filter(
+          (read) => read.method === 'list' && read.path === '/srv/project/src',
+        ).length,
+    ),
+    1,
+    'Expanded directories load lazily once and retain their cached children when collapsed',
+  )
+  const fileSearch = panel.getByRole('searchbox', { name: 'Search project files', exact: true })
+  await fileSearch.fill('missing-file')
+  await sourceFile.waitFor({ state: 'hidden' })
+  await fileSearch.fill('agent')
+  await sourceFile.waitFor()
+  await fileSearch.press('Escape')
+  assert.equal(await fileSearch.inputValue(), '')
   await panel
     .locator('.file-row')
     .filter({ has: exactText('agent.ts') })
@@ -93,6 +118,48 @@ async function workspacePanelChecks(page, checks, settle) {
   assert.match(
     await panel.locator('[aria-label="Git diff"]').textContent(),
     /export const enabled = true/,
+  )
+  const stacked = panel.getByRole('button', { name: 'Stacked diff view', exact: true })
+  const split = panel.getByRole('button', { name: 'Split diff view', exact: true })
+  assert.equal(await stacked.getAttribute('aria-pressed'), 'true')
+  await split.click()
+  assert.equal(await split.getAttribute('aria-pressed'), 'true')
+  assert.equal(await stacked.getAttribute('aria-pressed'), 'false')
+  const splitRow = panel
+    .locator('.workspace-diff-split-row')
+    .filter({ hasText: 'export const enabled = false' })
+  await splitRow.waitFor()
+  const splitCells = splitRow.locator('.workspace-diff-line')
+  assert.equal(await splitCells.count(), 2)
+  assert.match(await splitCells.nth(0).textContent(), /export const enabled = false/)
+  assert.match(await splitCells.nth(1).textContent(), /export const enabled = true/)
+  const changedFiles = panel.getByRole('navigation', { name: 'Changed files', exact: true })
+  if (!(await changedFiles.isVisible()))
+    await panel.getByRole('button', { name: 'Show file tree', exact: true }).click()
+  const changedFile = changedFiles.getByRole('button', { name: 'src/agent.ts', exact: true })
+  await changedFile.click()
+  assert.equal(await changedFile.getAttribute('aria-current'), 'true')
+  await panel.getByRole('button', { name: 'Hide file tree', exact: true }).click()
+  await changedFiles.waitFor({ state: 'hidden' })
+  await panel.getByRole('button', { name: 'Show file tree', exact: true }).click()
+  await changedFiles.waitFor()
+  assert.equal(await changedFile.getAttribute('aria-current'), 'true')
+  await page.screenshot({ path: join(directory, 'diff-split.png') })
+  await panel.getByRole('button', { name: 'Open file src/agent.ts', exact: true }).click()
+  await preview.waitFor()
+  assert.match(await preview.textContent(), /native protocols preserved/)
+  await panel
+    .locator('.workspace-file-preview header')
+    .getByRole('button', { name: 'Files', exact: true })
+    .click()
+  await sourceDirectory.waitFor()
+  await sourceFile.waitFor()
+  await sourceFile.click()
+  await preview.waitFor()
+  await tab('Diff').click()
+  assert.equal(await split.getAttribute('aria-pressed'), 'true')
+  checks.push(
+    'Files lazily retain expanded folders and search; Split diff renders both original and changed cells, toggles its file tree, and opens the original file preview',
   )
   await openSurface('Agents')
   const alpha = panel.locator('.agents-panel-row[data-agent-id="workspace-child-0"]')
@@ -195,6 +262,7 @@ async function workspacePanelChecks(page, checks, settle) {
   )
   assert.equal(await panel.getAttribute('data-maximized'), 'true')
   assert.equal(await workspace.getAttribute('inert'), '')
+  assert.equal(await workspace.getAttribute('aria-hidden'), 'true')
   assert.equal(
     await page.locator('textarea[aria-label="Message your coding agent"]').inputValue(),
     draft,
@@ -209,6 +277,8 @@ async function workspacePanelChecks(page, checks, settle) {
   await page.waitForFunction(
     () => !document.querySelector('.app-shell')?.hasAttribute('data-right-panel-maximized'),
   )
+  assert.equal(await workspace.getAttribute('inert'), null)
+  assert.equal(await workspace.getAttribute('aria-hidden'), null)
   assert.ok(
     Math.abs(
       (await panel.evaluate((element) => element.getBoundingClientRect().width)) -
@@ -351,6 +421,8 @@ async function workspacePanelChecks(page, checks, settle) {
   await page.getByRole('dialog', { name: 'Workspace surfaces', exact: true }).waitFor()
   assert.equal(await panel.getAttribute('data-panel-mode'), 'sheet')
   assert.equal(await panel.getAttribute('aria-modal'), 'true')
+  assert.equal(await workspace.getAttribute('inert'), '')
+  assert.equal(await workspace.getAttribute('aria-hidden'), 'true')
   assert.equal(await page.getByRole('button', { name: 'Maximize panel', exact: true }).count(), 0)
   assert.equal(await resize.count(), 0)
   for (let index = 0; index < 8; index++) {
@@ -360,6 +432,8 @@ async function workspacePanelChecks(page, checks, settle) {
   await page.screenshot({ path: join(directory, 'narrow-sheet.png') })
   await page.keyboard.press('Escape')
   await panel.waitFor({ state: 'hidden' })
+  assert.equal(await workspace.getAttribute('inert'), null)
+  assert.equal(await workspace.getAttribute('aria-hidden'), null)
   await page.getByRole('button', { name: 'Expand workspace sidebar', exact: true }).click()
   await panel.waitFor({ state: 'visible' })
   assert.equal(await tab('Agents').getAttribute('aria-selected'), 'true')
@@ -862,13 +936,20 @@ async function presentationChecks(page, checks) {
   await composer.fill(exact)
   assert.equal(
     await send.evaluate((el) => getComputedStyle(el).backgroundColor),
-    'rgba(0, 0, 0, 0)',
+    'oklch(0.571 0.21 264)',
   )
-  assert.equal(await send.evaluate((el) => getComputedStyle(el).color), 'rgb(244, 196, 78)')
+  assert.equal(await send.evaluate((el) => getComputedStyle(el).color), 'rgb(255, 255, 255)')
+  assert.deepEqual(
+    await send.evaluate((el) => {
+      const style = getComputedStyle(el)
+      return { width: style.width, height: style.height, radius: style.borderRadius }
+    }),
+    { width: '32px', height: '32px', radius: '50%' },
+  )
   await composer.press('Enter')
   await page.waitForFunction(() => window.controlsTest.records.steering.length === 1)
   assert.equal(await page.evaluate(() => window.controlsTest.records.steering[0].prompt), exact)
-  await composer.fill('Steering from the yellow send button.')
+  await composer.fill('Steering from the blue send button.')
   await send.click()
   await page.waitForFunction(() => window.controlsTest.records.steering.length === 2)
   assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
@@ -883,7 +964,7 @@ async function presentationChecks(page, checks) {
   assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
   await page.getByRole('button', { name: 'Remove queued message', exact: true }).click()
   checks.push(
-    'Enter and the yellow send button steer the exact draft; Tab queues without steering or starting another turn',
+    'Enter and the blue send button steer the exact draft; Tab queues without steering or starting another turn',
   )
 
   await page.evaluate(() => {

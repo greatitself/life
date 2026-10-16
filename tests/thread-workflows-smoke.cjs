@@ -584,10 +584,14 @@ async function run() {
       composer: getComputedStyle(document.querySelector('[aria-label="Message your coding agent"]'))
         .fontFamily,
     }))
-    for (const family of Object.values(originalFonts)) {
+    for (const family of [originalFonts.sidebar, originalFonts.row]) {
       assert.match(family, /^["']?DM Sans(?: Variable)?["']?(?:,|$)/)
       assert.doesNotMatch(family, /Onest/)
     }
+    assert.deepEqual(
+      originalFonts.composer.split(',').map((family) => family.trim().replace(/^['"]|['"]$/g, '')),
+      ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+    )
     const originalPreviewHistory = await arrangementSnapshot()
     const originalPreviewDraft = await composer.inputValue()
     fontPreview = await page.evaluate(async (families) => {
@@ -656,7 +660,7 @@ async function run() {
     assert.equal(await page.evaluate(() => window.controlsTest.records.starts.length), 0)
     assert.deepEqual(await page.evaluate(() => window.controlsTest.records.stops), [])
     checks.push(
-      'The original new-thread wording uses a locally loaded Onest heading with no font chooser; the sidebar and composer retain DM Sans and the original project picker, draft and saved conversations remain intact',
+      'The original new-thread wording uses a locally loaded Onest heading with no font chooser; the sidebar retains DM Sans, the agent composer uses its scoped system font, and the original project picker, draft and saved conversations remain intact',
     )
     await page.getByRole('button', { name: 'Settled (2)', exact: true }).click()
     assert.deepEqual(

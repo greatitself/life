@@ -77,6 +77,8 @@ async function run() {
         contents: `
           import React from 'react'
           import {createRoot} from 'react-dom/client'
+          import '@fontsource-variable/dm-sans'
+          import '@fontsource/ibm-plex-mono/400.css'
           import {App} from './src/renderer/App'
           import {defaultLifeConfig} from './src/shared/customization'
           import './src/renderer/styles.css'

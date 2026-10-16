@@ -505,10 +505,22 @@ async function runStudioChecks(context) {
   const createLog = (await fixture.log())
     .slice(sourceStart)
     .filter((entry) => entry.kind === 'studio-context')
-  assert.ok(
+  const workspaceTagPattern =
+    /<main\b(?=[^>]*\bclassName="main-workspace")(?=[^>]*\bid="main-content")[^>]*>/g
+  const sourceReadWorkspaceTags =
     createLog[1].source.files
       .find((file) => file.path === 'src/renderer/App.tsx')
-      .content.includes('<main className="main-workspace" id="main-content">'),
+      .content.match(workspaceTagPattern) || []
+  const compiledWorkspaceTags =
+    sourceFiles.files
+      .find((file) => file.path === 'src/renderer/App.tsx')
+      .content.match(workspaceTagPattern) || []
+  assert.equal(sourceReadWorkspaceTags.length, 1)
+  assert.equal(compiledWorkspaceTags.length, 1)
+  assert.deepEqual(
+    sourceReadWorkspaceTags,
+    compiledWorkspaceTags,
+    'Studio source-read preserves the complete workspace opening tag and every attribute in the compiled source',
   )
   assert.deepEqual(createLog[1].diagnostics.sourceRead.paths, ['src/renderer/App.tsx'])
   assert.equal(createdSession.thread.reasoningEffort, 'high')

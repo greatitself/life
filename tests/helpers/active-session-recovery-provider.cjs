@@ -387,9 +387,15 @@ function completionText(turn) {
   }
   if (!repairing && !context.diagnostics?.sourceRead)
     throw new Error('The native Studio source proposal was not preceded by its requested read')
-  const anchor = '<main className="main-workspace" id="main-content">'
-  if (app.content.split(anchor).length !== 2)
-    throw new Error('The native Studio source has no unique workspace insertion point')
+  const workspaceTags =
+    app.content.match(
+      /<main\b(?=[^>]*\bclassName="main-workspace")(?=[^>]*\bid="main-content")[^>]*>/g,
+    ) || []
+  if (workspaceTags.length !== 1)
+    throw new Error(
+      `Expected exactly one native Studio workspace opening tag; found ${workspaceTags.length}.`,
+    )
+  const anchor = workspaceTags[0]
   const broken = turn.mode === 'STUDIO_REPAIR' && !repairing
   const label = repairing ? 'Recovery source repaired' : 'Recovery source verified'
   const element = broken

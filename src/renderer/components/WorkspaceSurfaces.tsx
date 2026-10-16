@@ -296,10 +296,31 @@ export function WorkspaceSurfaces(props: Props) {
           node.tabIndex >= 0 && !node.hasAttribute('disabled') && node.getClientRects().length,
       )
     if (!element.contains(previous)) (picker.current || focusables()[0] || element).focus()
+    const onSheetEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        typingTarget(event.target) ||
+        document.querySelector('.modal-overlay,[role="menu"][data-state="open"]')
+      )
+        return
+      // A background HoverCard consumes Escape in Radix's document capture phase.
+      // This visible sheet owns it first; editable fields and native terminals keep
+      // their own key handling before the bubble fallback below.
+      event.preventDefault()
+      event.stopPropagation()
+      closePanel()
+    }
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || document.querySelector('.modal-overlay')) return
+      if (event.defaultPrevented || event.isComposing || document.querySelector('.modal-overlay'))
+        return
       if (event.key === 'Escape') {
-        if (document.querySelector('[role="menu"][data-state="open"]')) return
+        if (
+          document.querySelector('[role="menu"][data-state="open"]') ||
+          (event.target instanceof Element && event.target.closest('.terminal-panel'))
+        )
+          return
         event.preventDefault()
         closePanel()
       } else if (event.key === 'Tab') {
@@ -321,8 +342,10 @@ export function WorkspaceSurfaces(props: Props) {
         }
       }
     }
+    window.addEventListener('keydown', onSheetEscape, true)
     document.addEventListener('keydown', onKey)
     return () => {
+      window.removeEventListener('keydown', onSheetEscape, true)
       document.removeEventListener('keydown', onKey)
       if (
         previous instanceof HTMLElement &&

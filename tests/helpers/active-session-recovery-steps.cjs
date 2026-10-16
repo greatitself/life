@@ -432,7 +432,14 @@ class RecoveryHarness {
       }, opaqueStudioArchive)
     await this.page.reload()
     await this.page.locator('.app-shell').waitFor()
-    if (studio) await this.assertStudioOpaque()
+    if (studio) {
+      await this.assertStudioOpaque()
+      // Establish a genuinely pre-existing archive on disk before the active
+      // crash case. Renderer setItem alone does not prove Chromium persisted it.
+      await this.shutdown('quit', [])
+      await this.launch()
+      await this.assertStudioOpaque()
+    }
     await this.observeEvents()
     await this.connect()
     await this.openAgents()

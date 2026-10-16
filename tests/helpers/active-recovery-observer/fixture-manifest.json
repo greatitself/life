@@ -106,8 +106,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38784,
-      "sha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3"
+      "bytes": 39060,
+      "sha256": "52663b0a570d6a127667afc8b3b488fd7c70a578d9d949ffdb1c586adfebc52a"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -143,8 +143,8 @@
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
-      "bytes": 38784,
-      "sha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3"
+      "bytes": 39060,
+      "sha256": "52663b0a570d6a127667afc8b3b488fd7c70a578d9d949ffdb1c586adfebc52a"
     },
     {
       "path": "tests/helpers/active-session-recovery-provider.cjs",
@@ -230,6 +230,11 @@
       "path": "tests/active-session-recovery-smoke.cjs",
       "previousSha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d",
       "reason": "A pre-bind cache can lack remoteId even after the provider created its original thread. Await the actual retained conversation binding to the exact ID proven by the intercepted native thread/start response, instead of requiring that missing cache field to stay undefined. Preserve genuine Main unknown-owner identity, exact raw messages and user timestamps, zero turn submissions, one original thread/process and no competing writer."
+    },
+    {
+      "path": "tests/helpers/active-session-recovery-steps.cjs",
+      "previousSha256": "56aa6a9f8a0ff808856f3270c3561601f697895599310afa3624d1156e0f02c3",
+      "reason": "Before starting a Studio crash scenario, gracefully close the archive-seeding native app, launch a fresh app and assert the exact archived rows on the cold read. Renderer localStorage setItem alone does not establish Chromium disk durability. The page-scoped seed script is gone before provider work begins; actual active-owner SIGKILL, pre-crash archive check and final exact preservation assertions remain unchanged, with no post-crash reseeding."
     }
   ]
 }

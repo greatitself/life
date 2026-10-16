@@ -49,11 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           source_sha=$(git rev-parse HEAD)
-          gh run list --workflow ci.yml --commit "$source_sha" --status success --limit 30 --json databaseId,headSha > candidate-ci-runs.json
+          export LIFE_RELEASE_CI_RUNS_PATH="$RUNNER_TEMP/life-release-candidate-ci-runs.json"
+          gh run list --workflow ci.yml --commit "$source_sha" --status success --limit 30 --json databaseId,headSha > "$LIFE_RELEASE_CI_RUNS_PATH"
           node <<'NODE'
           const fs = require('node:fs')
           const { execFileSync } = require('node:child_process')
-          const runs = JSON.parse(fs.readFileSync('candidate-ci-runs.json', 'utf8'))
+          const runs = JSON.parse(fs.readFileSync(process.env.LIFE_RELEASE_CI_RUNS_PATH, 'utf8'))
           const expected = ['verify', 'Windows packaged native compatibility', 'Linux native active recovery',
             ...[1,2,3,4].map(n => `Unit shard ${n}/4`),
             ...['local-switch','streaming','navigation','ownership','dispatch','studio','ordinary-draft','local-source','helpers-source','local-package','helpers-package'].map(n => `Linux native ${n}`),

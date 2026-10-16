@@ -401,11 +401,15 @@ async function runScenario(harness, scenario, index) {
     }, 'genuine Main recovery retains the unadmitted original native start as unknown')
     assert.match(blockedOwner.message, /startup intent|private source proof/i)
 
-    const retained = await harness.thread(prompt)
+    let retained
+    await waitUntil(async () => {
+      retained = await harness.thread(prompt)
+      return retained?.remoteId === original.nativeReplyBoundary.native.result.thread.id
+    }, 'the retained unadmitted conversation binds the exact original native thread identity')
     assert.equal(retained.id, original.thread.id)
     assert.equal(retained.profileId, original.thread.profileId)
     assert.equal(retained.workspace, original.thread.workspace)
-    assert.equal(retained.remoteId, beforeShutdown[0].remoteId)
+    assert.equal(retained.remoteId, original.thread.remoteId)
     assert.deepEqual(retained.messages, beforeShutdown[0].messages)
     assert.equal(original.nativeReplyBoundary.native.result.thread.id, original.thread.remoteId)
     const users = retained.messages.filter(

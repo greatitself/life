@@ -101,8 +101,8 @@
     },
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 61348,
-      "sha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d"
+      "bytes": 61577,
+      "sha256": "035ff28a6bb7c202bb738636aa7658fdc0827c5f06a36e6755be10d0dea83383"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -138,8 +138,8 @@
   "preservedOriginalInputs": [
     {
       "path": "tests/active-session-recovery-smoke.cjs",
-      "bytes": 61348,
-      "sha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d"
+      "bytes": 61577,
+      "sha256": "035ff28a6bb7c202bb738636aa7658fdc0827c5f06a36e6755be10d0dea83383"
     },
     {
       "path": "tests/helpers/active-session-recovery-steps.cjs",
@@ -225,6 +225,11 @@
       "path": "tests/helpers/active-session-recovery-steps.cjs",
       "previousSha256": "f9650f4445527210fbcc940953ce8e1398ced4bb9b0514cf1b82c594f7900276",
       "reason": "Seed the exact opaque Studio archive once in the replacement document before application code, after the previous document unload flush, rather than overwriting live storage under an old empty history owner. A separate fixture marker forbids reseeding after later loss. Assert exact archive immediately after setup, before every actual Studio crash, and at the unchanged final retention check."
+    },
+    {
+      "path": "tests/active-session-recovery-smoke.cjs",
+      "previousSha256": "4e7e3a1f46140cf5957cbaffb6f6ca827186381a039bfe74a75f50a89623278d",
+      "reason": "A pre-bind cache can lack remoteId even after the provider created its original thread. Await the actual retained conversation binding to the exact ID proven by the intercepted native thread/start response, instead of requiring that missing cache field to stay undefined. Preserve genuine Main unknown-owner identity, exact raw messages and user timestamps, zero turn submissions, one original thread/process and no competing writer."
     }
   ]
 }

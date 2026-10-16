@@ -4,6 +4,7 @@ import type { LifeExtensionsSnapshot } from '../shared/extensions'
 import type { LifeSourceContext, LifeSourceSnapshot } from '../shared/source-code'
 import type {
   AgentEvent,
+  AgentQuestionReply,
   ConnectionState,
   ModelOption,
   NativeRecoveryOwnerState,
@@ -12,6 +13,13 @@ import type {
   StartInput,
 } from '../shared/types'
 import { api, errorText } from './api'
+import { formatAsyncQuestionReply } from '../shared/async-questions'
+import { pendingQuestionDrafts, pendingQuestionRequestKey } from './pending-question-drafts'
+import {
+  insertStudioQuestionFollowup,
+  restoreStudioQuestionFollowups,
+  type StudioQuestionFollowup,
+} from './studio-async-questions'
 import {
   carryNativeProjectionAuthoredTransition,
   nativeProjectionAdmissions,
@@ -30,6 +38,7 @@ import {
   applyEvent,
   applyNativeRecoveryOwner,
   finishThreadTurn,
+  isMessageQuestionRequest,
   nativeRecoveryBlocksMutation,
   normalizeNativeRecovery,
   resolveAgentRequest,
@@ -121,6 +130,7 @@ export function useCustomizationStudio(options: StudioOptions) {
   const current = useRef(sessions)
   const latest = useRef(options)
   const runs = useRef(new Map<string, StudioRun>())
+  const questionMessages = useRef(new Map<string, StudioQuestionFollowup>())
   const historyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const historyDirty = useRef(false)
   const historyWait = useRef('')
@@ -160,6 +170,22 @@ export function useCustomizationStudio(options: StudioOptions) {
   current.current = sessions
   latest.current = options
   const active = sessions.find((session) => session.id === activeId) || sessions[0]
+
+  useEffect(() => {
+    if (
+      !nativeRecoveryReady ||
+      options.documentRecoveryReady === false ||
+      !historyOwner.current.canSave
+    )
+      return
+    const pendingKeys = new Set<string>()
+    for (const session of sessions) {
+      pendingQuestionDrafts.pruneSession(session.id, session.thread.pending)
+      for (const event of session.thread.pending) pendingKeys.add(pendingQuestionRequestKey(event))
+    }
+    for (const key of questionMessages.current.keys())
+      if (!pendingKeys.has(key)) questionMessages.current.delete(key)
+  }, [sessions, nativeRecoveryReady, options.documentRecoveryReady])
 
   function usesDurableRecovery(): boolean {
     return recoverySupportCurrent.current?.mode === 'durable'
@@ -860,7 +886,9 @@ export function useCustomizationStudio(options: StudioOptions) {
         thread: carryNativeProjectionAuthoredTransition(finished, {
           ...finished,
           busy: false,
-          pending: finished.pending.filter((request) => Boolean(request.agentId)),
+          pending: finished.pending.filter(
+            (request) => Boolean(request.agentId) || isMessageQuestionRequest(request),
+          ),
           messages:
             error && !finished.messages.some((message) => message.id === errorMessageId)
               ? [
@@ -959,7 +987,11 @@ export function useCustomizationStudio(options: StudioOptions) {
           ...session,
           stage: 'complete',
           changes: action.intent.patch.files.map((file) => file.path),
-          thread: { ...finishThreadTurn(session.thread, 'completed'), busy: false, pending: [] },
+          thread: {
+            ...finishThreadTurn(session.thread, 'completed'),
+            busy: false,
+            pending: session.thread.pending.filter(isMessageQuestionRequest),
+          },
         }))
         admitOwnedStudioProjection(id)
         await persistHistory(current.current)
@@ -1069,6 +1101,9 @@ export function useCustomizationStudio(options: StudioOptions) {
     run.ownerGeneration = undefined
     run.finishing = false
     run.input.remoteId = session.thread.remoteId || run.input.remoteId
+    // An async answer belongs to its first native iteration. Later source reads
+    // and repairs continue that request without answering the same question again.
+    if ((run.recovery?.nativeIteration ?? 0) > 0) delete run.input.questionReply
     const input: StartInput = {
       ...run.input,
       localTurn: session.thread.turn,
@@ -1302,7 +1337,11 @@ export function useCustomizationStudio(options: StudioOptions) {
         mutate(id, (session) => ({
           ...session,
           stage: 'complete',
-          thread: { ...finishThreadTurn(session.thread, 'completed'), busy: false, pending: [] },
+          thread: {
+            ...finishThreadTurn(session.thread, 'completed'),
+            busy: false,
+            pending: session.thread.pending.filter(isMessageQuestionRequest),
+          },
         }))
         if (run && usesDurableRecovery() && api.agent.performRecoveryAction)
           admitOwnedStudioProjection(id)
@@ -1650,8 +1689,8 @@ export function useCustomizationStudio(options: StudioOptions) {
           recoveredNativeOwners.current.set(owner.sessionId, owner)
           mutate(owner.sessionId, (session) => ({
             ...session,
-            thread: applyNativeRecoveryOwner(
-              bindNativeStudioWorkspace(session.thread, owner),
+            thread: restoreStudioQuestionFollowups(
+              applyNativeRecoveryOwner(bindNativeStudioWorkspace(session.thread, owner), owner),
               owner,
             ),
           }))
@@ -1886,11 +1925,36 @@ export function useCustomizationStudio(options: StudioOptions) {
     }
   }, [recoverySupport?.mode])
 
-  async function submit(request: string) {
-    const selected = active
-      ? current.current.find((session) => session.id === active.id)
+  async function submit(
+    request: string,
+    question?: { event: AgentEvent; reply: AgentQuestionReply },
+  ) {
+    const selectedId = question?.event.sessionId || active?.id
+    const selected = selectedId
+      ? current.current.find((session) => session.id === selectedId)
       : undefined
-    if (!selected || selected.thread.busy || runs.current.has(selected.id)) return false
+    const selectedRun = selected ? runs.current.get(selected.id) : undefined
+    if (
+      !selected ||
+      selected.thread.busy ||
+      (selectedRun && selectedRun.recovery?.phase !== 'review')
+    )
+      return false
+    if (selected.thread.pending.some((event) => !isMessageQuestionRequest(event))) {
+      setFeedback('Answer the pending native request before starting another customization turn.')
+      return false
+    }
+    if (
+      question &&
+      (!selected.thread.workspace ||
+        !selected.thread.remoteId ||
+        !selected.thread.pending.some(
+          (event) => pendingQuestionRequestKey(event) === pendingQuestionRequestKey(question.event),
+        ))
+    )
+      throw new Error(
+        'Life must recover the original Studio question and workspace before answering.',
+      )
     if (
       !nativeRecoveryReady ||
       options.documentRecoveryReady === false ||
@@ -1911,7 +1975,7 @@ export function useCustomizationStudio(options: StudioOptions) {
     setNotice('')
     const id = selected.id
     const turn = selected.thread.turn + 1
-    const localPatch = planLocalCustomization(request, latest.current.config)
+    const localPatch = question ? undefined : planLocalCustomization(request, latest.current.config)
     const previousRun = runs.current.get(id)
     if (
       previousRun?.recovery?.phase === 'review' &&
@@ -1955,6 +2019,25 @@ export function useCustomizationStudio(options: StudioOptions) {
       )
       return false
     }
+    if (question) {
+      const currentSelected = current.current.find((session) => session.id === id)
+      if (
+        !currentSelected ||
+        currentSelected.thread.busy ||
+        currentSelected.thread.turn !== selected.thread.turn ||
+        currentSelected.thread.workspace !== selected.thread.workspace ||
+        currentSelected.thread.remoteId !== selected.thread.remoteId ||
+        currentSelected.thread.profileId !== selected.thread.profileId ||
+        currentSelected.thread.provider !== selected.thread.provider ||
+        nativeRecoveryBlocksMutation(currentSelected.thread) ||
+        !currentSelected.thread.pending.some(
+          (event) => pendingQuestionRequestKey(event) === pendingQuestionRequestKey(question.event),
+        )
+      )
+        throw new Error(
+          'The native Studio question changed before the answer was sent. Your answers are kept.',
+        )
+    }
     mutate(id, (session) =>
       resetStudioSessionRequests({
         ...session,
@@ -1967,7 +2050,7 @@ export function useCustomizationStudio(options: StudioOptions) {
           ...session.thread,
           turn,
           busy: true,
-          pending: [],
+          pending: session.thread.pending.filter(isMessageQuestionRequest),
           profileId: localPatch ? session.thread.profileId : state.profile?.id || '',
           messages: [
             ...session.thread.messages,
@@ -2006,11 +2089,15 @@ export function useCustomizationStudio(options: StudioOptions) {
         reasoningEffort: selected.thread.reasoningEffort || undefined,
         serviceTier: selected.thread.serviceTier || undefined,
         mode: 'plan',
+        ...(question
+          ? { questionReply: question.reply, workspace: selected.thread.workspace }
+          : {}),
       },
     }
     runs.current.set(id, run)
     try {
       if (
+        !question &&
         usesDurableRecovery() &&
         api!.agent.reserveRecoveryOwner &&
         api!.agent.performRecoveryAction
@@ -2065,6 +2152,7 @@ export function useCustomizationStudio(options: StudioOptions) {
         if (error instanceof StudioRecoveryPending) pauseNativePlanner(id, errorText(error))
         else await finish(id, 'failed', errorText(error))
       }
+      if (question) throw error
     }
     return true
   }
@@ -2187,6 +2275,14 @@ export function useCustomizationStudio(options: StudioOptions) {
       active &&
       !active.thread.busy &&
       !runs.current.has(active.id) &&
+      !active.thread.pending.some((event) => !isMessageQuestionRequest(event)) &&
+      nativeRecoveryReady &&
+      options.documentRecoveryReady !== false &&
+      !supportBlocksMutation() &&
+      !nativeRecoveryBlocksMutation(active.thread),
+    ),
+    canRespond: Boolean(
+      active &&
       nativeRecoveryReady &&
       options.documentRecoveryReady !== false &&
       !supportBlocksMutation() &&
@@ -2272,26 +2368,102 @@ export function useCustomizationStudio(options: StudioOptions) {
       answers?: Record<string, string[]>,
       decisionId?: string,
     ) => {
-      if (!api || !active || !event.requestId)
-        throw new Error('This request is no longer available.')
+      if (!api || !event.requestId) throw new Error('This request is no longer available.')
+      const target = current.current.find((session) => session.id === event.sessionId)
       if (
+        !target ||
         !nativeRecoveryReady ||
+        options.documentRecoveryReady === false ||
         supportBlocksMutation() ||
-        nativeRecoveryBlocksMutation(active.thread)
+        nativeRecoveryBlocksMutation(target.thread)
       )
         throw new Error(
           'Life must verify the original native Studio owner before answering this request.',
         )
       if (
-        event.sessionId !== active.id ||
-        !current.current
-          .find((session) => session.id === active.id)
-          ?.thread.pending.some((request) => request.requestId === event.requestId)
+        !target.thread.pending.some(
+          (request) => pendingQuestionRequestKey(request) === pendingQuestionRequestKey(event),
+        )
       )
         throw new Error('This request is no longer pending.')
-      await api.agent.respond(active.id, event.requestId, accepted, answers, decisionId)
+      if (isMessageQuestionRequest(event) && accepted) {
+        if (!answers) throw new Error('Answer the questions before sending this reply.')
+        if (event.agentId)
+          throw new Error(
+            'This question belongs to a child agent. Its owning conversation must receive the answer.',
+          )
+        const prompt = formatAsyncQuestionReply(event.questions || [], answers)
+        const reply = { requestId: event.requestId, answers }
+        if (target.thread.busy) {
+          const run = runs.current.get(target.id)
+          const state = await api.connection.state()
+          const currentTarget = current.current.find((session) => session.id === target.id)
+          if (
+            !run ||
+            runs.current.get(target.id) !== run ||
+            run.finishing ||
+            run.recoveryBlocked ||
+            !currentTarget?.thread.busy ||
+            currentTarget.thread.turn !== target.thread.turn ||
+            state.status !== 'connected' ||
+            state.profile?.id !== target.thread.profileId ||
+            !target.thread.workspace ||
+            !target.thread.remoteId ||
+            currentTarget.thread.workspace !== target.thread.workspace ||
+            currentTarget.thread.remoteId !== target.thread.remoteId ||
+            !currentTarget.thread.pending.some(
+              (request) => pendingQuestionRequestKey(request) === pendingQuestionRequestKey(event),
+            ) ||
+            nativeRecoveryBlocksMutation(currentTarget.thread)
+          )
+            throw new Error(
+              'The native Studio turn is not ready to receive this answer. Your answers are kept.',
+            )
+          const key = pendingQuestionRequestKey(event)
+          let followup = questionMessages.current.get(key)
+          if (!followup || followup.userMessage.text !== prompt) {
+            followup = {
+              kind: 'studio-question-followup',
+              sessionId: target.id,
+              profileId: target.thread.profileId,
+              provider: target.thread.provider,
+              workspace: target.thread.workspace,
+              remoteId: target.thread.remoteId,
+              userMessage: {
+                id: crypto.randomUUID(),
+                role: 'user',
+                submission: 'steering',
+                text: prompt,
+                turn: target.thread.turn,
+                createdAt: Date.now(),
+              },
+            }
+            questionMessages.current.set(key, followup)
+          }
+          const authored = followup
+          await api.agent.steer({
+            sessionId: target.id,
+            prompt,
+            questionReply: reply,
+            clientRecovery: authored,
+          })
+          const user = authored.userMessage
+          mutate(target.id, (session) => ({
+            ...session,
+            updatedAt: Math.max(session.updatedAt, user.createdAt),
+            thread: insertStudioQuestionFollowup(session.thread, authored),
+          }))
+        } else if (!(await submit(prompt, { event, reply })))
+          throw new Error(
+            'The native Studio conversation is not ready to receive this answer. Your answers are kept.',
+          )
+      } else {
+        if (isMessageQuestionRequest(event) && !event.canDismiss)
+          throw new Error('This native question cannot be dismissed.')
+        await api.agent.respond(target.id, event.requestId, accepted, answers, decisionId)
+      }
       const choice = event.approvalChoices?.find((choice) => choice.id === decisionId)
-      mutate(active.id, (session) => ({
+      mutate(target.id, (session) => ({
         ...session,
         thread: resolveAgentRequest(
           session.thread,
@@ -2302,6 +2474,7 @@ export function useCustomizationStudio(options: StudioOptions) {
           choice,
         ),
       }))
+      questionMessages.current.delete(pendingQuestionRequestKey(event))
     },
   }
 }

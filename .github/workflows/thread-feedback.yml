@@ -36,6 +36,72 @@ jobs:
           path: output/thread-feedback/
           if-no-files-found: warn
 
+  async-questions:
+    name: Async questions and native callback recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Select explicit question, protocol and recovery test paths
+        run: |
+          mkdir -p output/thread-feedback
+          node <<'NODE'
+          const assert = require('node:assert/strict')
+          const fs = require('node:fs')
+          const { execFileSync } = require('node:child_process')
+          const required = [
+            'tests/question-answers.test.ts',
+            'tests/codex-requests.test.ts',
+            'tests/claude-requests.test.ts',
+            'tests/agents-claude-elicitation.test.ts',
+            'tests/agents-live-controls.test.ts',
+            'tests/agent-native-recovery.test.ts',
+            'tests/agents-native-recovery.test.ts',
+            'tests/studio-planner-recovery.test.ts',
+            'tests/studio-history-recovery.test.ts',
+            'tests/studio-history-restore.test.ts',
+            'tests/thread-event-state.test.ts',
+            'tests/native-renderer-recovery.test.ts',
+            'tests/ssh-request-lifecycle.test.ts',
+            'tests/ssh-agents.integration.test.ts',
+          ]
+          for (const file of required) assert(fs.statSync(file).isFile(), 'Missing required test: ' + file)
+          const questions = fs.readdirSync('tests')
+            .filter(name => /(?:^|-)async-question[^/]*\.test\.ts$/.test(name) || name === 'pending-question-drafts.test.ts')
+            .map(name => 'tests/' + name)
+            .filter(file => fs.statSync(file).isFile())
+          assert(questions.length > 0, 'No async question or question draft tests were discovered')
+          const tests = [...new Set([...required, ...questions])].sort()
+          const source = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+          const command = ['npm', 'test', '--', '--maxWorkers=1', ...tests]
+          fs.writeFileSync('output/thread-feedback/question-tests.json', JSON.stringify({ source, questions, tests, command }, null, 2) + '\n')
+          console.log(tests.join('\n'))
+          NODE
+      - name: Verify drafts, async ownership and exact native question responses
+        run: |
+          node <<'NODE' 2>&1 | tee output/thread-feedback/async-questions.log
+          const fs = require('node:fs')
+          const { spawnSync } = require('node:child_process')
+          const { tests } = JSON.parse(fs.readFileSync('output/thread-feedback/question-tests.json'))
+          // Pass only existing, explicit filenames. Vitest receives no literal
+          // wildcard patterns that could silently fail to select new suites.
+          const result = spawnSync('npm', ['test', '--', '--maxWorkers=1', ...tests], { stdio: 'inherit' })
+          if (result.error) throw result.error
+          if (result.signal) throw new Error('Question verification terminated: ' + result.signal)
+          process.exitCode = result.status ?? 1
+          NODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: thread-feedback-async-questions
+          path: output/thread-feedback/
+          if-no-files-found: warn
+
   build:
     name: Build candidate
     runs-on: ubuntu-24.04
@@ -74,6 +140,7 @@ jobs:
             renderer-recovery,
             thread-queue,
             provider-request-ui,
+            pending-question-ui,
             app-live-controls,
           ]
     steps:
@@ -92,6 +159,9 @@ jobs:
           args=()
           if [ "$SUITE" = app-live-controls ]; then args+=(--fluidity); fi
           node "tests/$SUITE-smoke.cjs" "${args[@]}" 2>&1 | tee "output/thread-feedback/$SUITE.log"
+          if [ "$SUITE" = app-live-controls ]; then
+            node tests/app-live-controls-smoke.cjs --async-questions 2>&1 | tee output/thread-feedback/app-live-controls-async-questions.log
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

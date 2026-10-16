@@ -24,6 +24,7 @@ import { useCustomizationStudio, type StudioOptions } from '../useCustomizationS
 import type { StudioProposal, StudioStage } from '../studio-history'
 import { STUDIO_DRAFTS_KEY, StudioDraftStore, studioDraftRecovery } from '../studio-drafts'
 import { ApprovalCard } from './MessageView'
+import { PendingQuestionPanel } from './PendingQuestionPanel'
 import { ProviderIcon } from './Icons'
 import { ReferenceComposerControls } from './ReferenceComposer'
 import { ThreadTimeline } from './ThreadTimeline'
@@ -166,6 +167,8 @@ export function CustomizationStudio({
   const [search, setSearch] = useState('')
   const viewport = useRef<HTMLDivElement>(null)
   const active = studio.active
+  const pendingQuestions = active?.thread.pending.filter((event) => event.type === 'question') || []
+  const pendingQuestion = pendingQuestions[0]
   const draft = active ? draftStore.get(active.id) : ''
   const connected = connection.status === 'connected'
   const runtimeCount = extensions.extensions.filter((extension) => extension.enabled).length
@@ -342,15 +345,17 @@ export function CustomizationStudio({
           ) : active ? (
             <ThreadTimeline thread={active.thread} />
           ) : null}
-          {active?.thread.pending.map((event) => (
-            <ApprovalCard
-              key={event.requestId}
-              event={event}
-              onRespond={(accepted, answers, decisionId) =>
-                studio.respond(event, accepted, answers, decisionId)
-              }
-            />
-          ))}
+          {active?.thread.pending
+            .filter((event) => event.type !== 'question')
+            .map((event) => (
+              <ApprovalCard
+                key={event.requestId}
+                event={event}
+                onRespond={(accepted, answers, decisionId) =>
+                  studio.respond(event, accepted, answers, decisionId)
+                }
+              />
+            ))}
           {review && active?.proposal ? (
             <section className="studio-review-card" aria-label="Customization proposal">
               <div>
@@ -407,78 +412,100 @@ export function CustomizationStudio({
               </button>
             </div>
           ) : null}
-          <form
-            className="studio-composer"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void submit()
-            }}
-          >
-            <label className="sr-only" htmlFor="studio-request">
-              Describe a Life customization
-            </label>
-            <textarea
-              id="studio-request"
-              value={draft}
-              disabled={!active || applying}
-              rows={3}
-              placeholder="What would you like to change in Life?"
-              onChange={(event) => active && updateDraft(active.id, event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault()
-                  if (!active?.thread.busy) void submit()
-                }
-              }}
-            />
-            <div className="studio-composer-bottom">
-              {active ? (
-                <ReferenceComposerControls
-                  models={studio.models}
-                  provider={active.thread.provider}
-                  model={active.thread.model}
-                  reasoningEffort={active.thread.reasoningEffort || ''}
-                  serviceTier={active.thread.serviceTier || ''}
-                  mode="plan"
-                  modeDisabled
-                  providerDisabled={Boolean(active.thread.busy || active.thread.remoteId)}
-                  onChange={(patch) => studio.updateThread(patch)}
-                  onProviderChange={(provider, model) =>
-                    studio.updateThread({ provider, model, reasoningEffort: '', serviceTier: '' })
-                  }
-                />
-              ) : null}
+          {pendingQuestion ? (
+            <>
+              <PendingQuestionPanel
+                event={pendingQuestion}
+                onRespond={studio.respond}
+                disabled={!studio.canRespond}
+                pendingCount={pendingQuestions.length}
+                active={visible}
+              />
               {active?.thread.busy ? (
                 <button
-                  key="stop"
                   type="button"
-                  className="studio-submit"
+                  className="button secondary"
                   disabled={applying}
-                  aria-label={applying ? 'Applying customization' : 'Stop customization'}
-                  onClick={(event) => {
+                  onClick={() => void studio.stop()}
+                >
+                  <Square size={14} /> Stop customization
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <form
+              className="studio-composer"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void submit()
+              }}
+            >
+              <label className="sr-only" htmlFor="studio-request">
+                Describe a Life customization
+              </label>
+              <textarea
+                id="studio-request"
+                value={draft}
+                disabled={!active || applying}
+                rows={3}
+                placeholder="What would you like to change in Life?"
+                onChange={(event) => active && updateDraft(active.id, event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault()
-                    void studio.stop()
-                  }}
-                >
-                  {applying ? (
-                    <LoaderCircle size={16} className="spinning" />
-                  ) : (
-                    <Square size={14} />
-                  )}
-                </button>
-              ) : (
-                <button
-                  key="send"
-                  type="submit"
-                  className="studio-submit"
-                  aria-label="Send customization request"
-                  disabled={!draft.trim() || !studio.canSubmit}
-                >
-                  <ArrowUp size={17} />
-                </button>
-              )}
-            </div>
-          </form>
+                    if (!active?.thread.busy) void submit()
+                  }
+                }}
+              />
+              <div className="studio-composer-bottom">
+                {active ? (
+                  <ReferenceComposerControls
+                    models={studio.models}
+                    provider={active.thread.provider}
+                    model={active.thread.model}
+                    reasoningEffort={active.thread.reasoningEffort || ''}
+                    serviceTier={active.thread.serviceTier || ''}
+                    mode="plan"
+                    modeDisabled
+                    providerDisabled={Boolean(active.thread.busy || active.thread.remoteId)}
+                    onChange={(patch) => studio.updateThread(patch)}
+                    onProviderChange={(provider, model) =>
+                      studio.updateThread({ provider, model, reasoningEffort: '', serviceTier: '' })
+                    }
+                  />
+                ) : null}
+                {active?.thread.busy ? (
+                  <button
+                    key="stop"
+                    type="button"
+                    className="studio-submit"
+                    disabled={applying}
+                    aria-label={applying ? 'Applying customization' : 'Stop customization'}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      void studio.stop()
+                    }}
+                  >
+                    {applying ? (
+                      <LoaderCircle size={16} className="spinning" />
+                    ) : (
+                      <Square size={14} />
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    key="send"
+                    type="submit"
+                    className="studio-submit"
+                    aria-label="Send customization request"
+                    disabled={!draft.trim() || !studio.canSubmit}
+                  >
+                    <ArrowUp size={17} />
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
           <label className="studio-auto-apply">
             <input
               type="checkbox"

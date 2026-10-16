@@ -49,6 +49,7 @@ import {
 } from 'lucide-react'
 import type {
   AgentEvent,
+  AgentQuestionReply,
   ConnectionProfile,
   ConnectionState,
   HostKeyRequest,
@@ -94,6 +95,9 @@ import {
   PortForwardDialog,
 } from './components/DeferredDialogs'
 import { ApprovalCard } from './components/MessageView'
+import { PendingQuestionPanel } from './components/PendingQuestionPanel'
+import { pendingQuestionDrafts } from './pending-question-drafts'
+import { formatAsyncQuestionReply } from '../shared/async-questions'
 import { ThreadTimeline } from './components/ThreadTimeline'
 import { previewNavigableMessages, threadHasRunningChildren } from './thread-presentation'
 import { WorkspaceSurfaces } from './components/WorkspaceSurfaces'
@@ -614,6 +618,15 @@ export function App() {
   const appContext = useRef({ preferences, config, extensions, connection })
   appContext.current = { preferences, config, extensions, connection }
   const active = threads.find((t) => t.id === activeId)
+  const pendingQuestions =
+    active?.pending.filter(
+      (event) => event.type === 'question' && Boolean(event.questions?.length),
+    ) || []
+  const pendingQuestion = pendingQuestions[0]
+  useEffect(() => {
+    if (!historyWritable || !nativeRecoveryReady || !pendingQuestionDrafts.hasDrafts()) return
+    for (const thread of threads) pendingQuestionDrafts.pruneSession(thread.id, thread.pending)
+  }, [threads, historyWritable, nativeRecoveryReady])
   useEffect(() => {
     const markVisibleRead = () => {
       if (
@@ -1549,9 +1562,17 @@ export function App() {
     if (selected.errors.length) setToast(selected.errors.join(' '))
   }
 
-  async function send(queued?: QueuedSubmission, intent?: 'queue'): Promise<boolean | undefined> {
+  async function send(
+    queued?: QueuedSubmission,
+    intent?: 'queue',
+    question?: { event: AgentEvent; answers: Record<string, string[]> },
+  ): Promise<boolean | undefined> {
     if (!startupReady) return
-    if (!queued && (draftState.restoring || draftState.unavailableAttachments.length)) {
+    if (
+      !queued &&
+      !question &&
+      (draftState.restoring || draftState.unavailableAttachments.length)
+    ) {
       setToast(
         draftState.restoring
           ? 'Your draft attachments are being restored. Try again shortly.'
@@ -1560,7 +1581,8 @@ export function App() {
       return
     }
     let active = threadsCurrent.current.find(
-      (thread) => thread.id === (queued?.threadId || activeIdCurrent.current),
+      (thread) =>
+        thread.id === (question?.event.sessionId || queued?.threadId || activeIdCurrent.current),
     )
     if (nativeRecoveryBlocksMutation(active)) {
       setToast(
@@ -1573,30 +1595,45 @@ export function App() {
     const researchScope = researchThreadContext?.scope || workbench.scope
     const researchTarget = queued
       ? workbench.forThread(active?.id)
-      : view === 'investigation'
+      : !question && view === 'investigation'
         ? workbench.selection()
         : workbench.forThread(active?.id)
     const queuedMessage = queued
       ? active?.queue?.find((item) => item.id === queued.messageId)
       : undefined
     if (queued && (!active || !queuedMessage || active.busy)) return
-    if (!queued && view === 'investigation' && !researchTarget) {
+    if (!queued && !question && view === 'investigation' && !researchTarget) {
       workbench.newGoal()
       return
     }
-    if (!queued && !draft.trim() && !attachments.length) return
-    const selectedAttachments = queued ? queued.files : [...attachments]
+    if (!queued && !question && !draft.trim() && !attachments.length) return
+    const selectedAttachments = question ? [] : queued ? queued.files : [...attachments]
     if (selectedAttachments.length && !builtin.enabled('thread-attachments')) {
       setToast(
         'Enable the attachments extension before sending these files. Your message and attachments are kept.',
       )
       return
     }
-    const prompt = queued ? queuedMessage!.text : draft
+    const prompt = question
+      ? formatAsyncQuestionReply(question.event.questions || [], question.answers)
+      : queued
+        ? queuedMessage!.text
+        : draft
     let connection = appContext.current.connection
     let connected = connection.status === 'connected'
     let projectReady = connected && Boolean(connection.workspace)
     if (!prompt.trim() && !selectedAttachments.length) return
+    if (
+      question &&
+      active?.pending.some(
+        (request) =>
+          request.requestId !== question.event.requestId && request.responseMode !== 'message',
+      )
+    )
+      throw new Error('Resolve the native approval request before sending this follow-up answer.')
+    if (question && active?.busy) {
+      return submitQuestionSteering(active, question.event, question.answers)
+    }
     if (streamlinedWorkspace && !queued && active?.busy && intent !== 'queue') {
       await steerDraft()
       return
@@ -1607,6 +1644,7 @@ export function App() {
     }
     if (
       !queued &&
+      !question &&
       active &&
       (active.busy ||
         queue.sendingThreadId ||
@@ -1671,7 +1709,11 @@ export function App() {
         !latest ||
         latest.turn !== active.turn ||
         (latest.busy && !active.busy) ||
-        latest.pending.length
+        latest.pending.some(
+          (request) =>
+            !question ||
+            (request.requestId !== question.event.requestId && request.responseMode !== 'message'),
+        )
       ) {
         if (!queued)
           setToast(
@@ -1687,7 +1729,7 @@ export function App() {
       : undefined
     const submission = { id: active?.id, start: { cancelled: false, dispatched: false } }
     submitting.current = submission
-    if (!queued) {
+    if (!queued && !question) {
       setDraft((current) => (current === prompt ? '' : current))
       setStickToBottom(true)
     }
@@ -1846,6 +1888,9 @@ export function App() {
         reasoningEffort: thread.reasoningEffort ?? '',
         serviceTier: thread.serviceTier ?? '',
         mode: next.mode,
+        ...(question
+          ? { questionReply: { requestId: question.event.requestId!, answers: question.answers } }
+          : {}),
       }
       if (transfer) {
         const uploaded = await ensureAttachmentUploads(
@@ -1936,7 +1981,7 @@ export function App() {
       }
       return true
     } catch (e) {
-      if (!queued) draftState.restoreSubmission(prompt, selectedAttachments)
+      if (!queued && !question) draftState.restoreSubmission(prompt, selectedAttachments)
       if (transfer?.controller.signal.aborted) {
         setThreads((previous) =>
           previous.map((item) =>
@@ -1954,6 +1999,7 @@ export function App() {
             : t,
         ),
       )
+      if (question) throw e
     } finally {
       if (attachmentTransfer.current === transfer) attachmentTransfer.current = undefined
       if (transfer) setAttachmentProgress((current) => (current?.id === id ? undefined : current))
@@ -1961,7 +2007,13 @@ export function App() {
       queue.wake()
     }
   }
-  async function submitSteering(thread: Thread, prompt: string, files: DraftAttachment[]) {
+  async function submitSteering(
+    thread: Thread,
+    prompt: string,
+    files: DraftAttachment[],
+    questionReply?: AgentQuestionReply,
+    clientRecovery?: unknown,
+  ) {
     if (!nativeRecoveryReady || nativeRecoveryBlocksMutation(thread)) return
     if (!api || !startupReady || submitting.current || attachmentTransfer.current) return
     const turn = thread.turn
@@ -2007,6 +2059,7 @@ export function App() {
       await api.agent.steer({
         sessionId: thread.id,
         prompt,
+        ...(questionReply ? { questionReply, clientRecovery } : {}),
         attachments: uploaded
           .filter((file) => file.remotePath)
           .map((file) => ({ remotePath: file.remotePath!, name: file.name, mimeType: file.mime })),
@@ -2024,6 +2077,94 @@ export function App() {
     const message = thread?.queue?.find((item) => item.id === submission.messageId)
     if (!thread || !message) return
     return (await submitSteering(thread, message.text, submission.files)) ? true : undefined
+  }
+  async function submitQuestionSteering(
+    thread: Thread,
+    event: AgentEvent,
+    answers: Record<string, string[]>,
+  ): Promise<boolean> {
+    const prompt = formatAsyncQuestionReply(event.questions || [], answers)
+    const precedingMessageId = thread.messages.at(-1)?.id
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      submission: 'steering',
+      text: prompt,
+      turn: thread.turn,
+      createdAt: Date.now(),
+    }
+    const uploaded = await submitSteering(
+      thread,
+      prompt,
+      [],
+      { requestId: event.requestId!, answers },
+      {
+        kind: 'main',
+        userMessage,
+        threadSeed: {
+          id: thread.id,
+          profileId: thread.profileId,
+          workspace: thread.workspace,
+          provider: thread.provider,
+          title: thread.title,
+          ...(thread.purpose ? { purpose: thread.purpose } : {}),
+          ...(thread.researchContext ? { researchContext: thread.researchContext } : {}),
+          createdAt: thread.createdAt,
+          updatedAt: userMessage.createdAt,
+          turn: thread.turn,
+          messages: [],
+          busy: false,
+          pending: [],
+          model: thread.model,
+          mode: thread.mode,
+          reasoningEffort: thread.reasoningEffort,
+          serviceTier: thread.serviceTier,
+        },
+      },
+    )
+    if (!uploaded)
+      throw new Error('The turn is not ready to receive your answer. Your answers are kept.')
+    setThreads((previous) =>
+      previous.map((item) => {
+        if (item.id !== thread.id || item.messages.some((message) => message.id === userMessage.id))
+          return item
+        const precedingIndex = precedingMessageId
+          ? item.messages.findIndex((message) => message.id === precedingMessageId)
+          : -1
+        const nextTurnIndex = item.messages.findIndex((message) => message.turn > userMessage.turn)
+        const insertAt =
+          precedingIndex >= 0
+            ? precedingIndex + 1
+            : nextTurnIndex >= 0
+              ? nextTurnIndex
+              : item.messages.length
+        const completed = !item.busy || item.turn !== userMessage.turn
+        const message: Message = completed
+          ? {
+              ...userMessage,
+              finishedAt: Date.now(),
+              finishStatus:
+                item.turnStatus === 'interrupted' && item.turn === userMessage.turn
+                  ? 'interrupted'
+                  : 'completed',
+            }
+          : userMessage
+        return carryNativeProjectionAuthoredTransition(
+          item,
+          {
+            ...item,
+            updatedAt: Date.now(),
+            messages: [
+              ...item.messages.slice(0, insertAt),
+              message,
+              ...item.messages.slice(insertAt),
+            ],
+          },
+          userMessage.id,
+        )
+      }),
+    )
+    return true
   }
   async function steerDraft() {
     const thread = threadsCurrent.current.find((item) => item.id === activeIdCurrent.current)
@@ -2164,7 +2305,14 @@ export function App() {
       throw new Error('Life must verify the original native owner before answering this request.')
     if (!target?.pending.some((request) => request.requestId === event.requestId))
       throw new Error('This request is no longer pending.')
-    await api.agent.respond(event.sessionId, event.requestId, accepted, answers, decisionId)
+    if (event.responseMode === 'message' && accepted) {
+      if (!answers) throw new Error('Answer the question before submitting.')
+      const sent = await send(undefined, undefined, { event, answers })
+      if (!sent)
+        throw new Error('The thread is not ready to receive your answer. Your answers are kept.')
+    } else {
+      await api.agent.respond(event.sessionId, event.requestId, accepted, answers, decisionId)
+    }
     const choice = event.approvalChoices?.find((choice) => choice.id === decisionId)
     setThreads((previous) =>
       previous.map((thread) =>
@@ -3345,15 +3493,19 @@ export function App() {
                             </div>
                           ) : null}
                           <ThreadTimeline thread={active} />
-                          {active.pending.map((event) => (
-                            <ApprovalCard
-                              key={event.requestId}
-                              event={event}
-                              onRespond={(accepted, answers, decisionId) =>
-                                respond(event, accepted, answers, decisionId)
-                              }
-                            />
-                          ))}
+                          {active.pending
+                            .filter(
+                              (event) => event.type !== 'question' || !event.questions?.length,
+                            )
+                            .map((event) => (
+                              <ApprovalCard
+                                key={event.requestId}
+                                event={event}
+                                onRespond={(accepted, answers, decisionId) =>
+                                  respond(event, accepted, answers, decisionId)
+                                }
+                              />
+                            ))}
                           {busy && !active.pending.length ? (
                             <div className="agent-working" role="status">
                               <span className="working-indicator">
@@ -3405,7 +3557,33 @@ export function App() {
                       </section>
                     ) : null}
                     <div className="composer-container life-reference-composer">
-                      {config.commands.length ? (
+                      {pendingQuestion ? (
+                        <>
+                          <PendingQuestionPanel
+                            event={pendingQuestion}
+                            onRespond={respond}
+                            disabled={
+                              !historyWritable ||
+                              !nativeRecoveryReady ||
+                              nativeRecoveryBlocksMutation(active)
+                            }
+                            pendingCount={pendingQuestions.length}
+                            active={view !== 'investigation' || researchAgentOpen}
+                          />
+                          {busy || (active && threadHasRunningChildren(active)) ? (
+                            <button
+                              type="button"
+                              className="button secondary"
+                              aria-label="Stop agent and pause queued messages"
+                              disabled={Boolean(queue.actionId)}
+                              onClick={() => void stop()}
+                            >
+                              <Square size={13} /> Stop
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null}
+                      {!pendingQuestion && config.commands.length ? (
                         <div className="prompt-commands" aria-label="Custom prompt commands">
                           {config.commands.map((command) => (
                             <button
@@ -3432,6 +3610,8 @@ export function App() {
                       ) : null}
 
                       <div
+                        hidden={Boolean(pendingQuestion)}
+                        style={pendingQuestion ? { display: 'none' } : undefined}
                         className={`composer ${busy ? 'busy' : ''}`}
                         onDragOver={(event) => {
                           if (event.dataTransfer.types.includes('Files')) {

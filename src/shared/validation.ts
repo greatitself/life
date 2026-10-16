@@ -180,6 +180,12 @@ export const agentAttachmentsSchema = z
       .strict(),
   )
   .max(20)
+const agentQuestionReplySchema = z
+  .object({
+    requestId: z.string().min(1).max(1000),
+    answers: z.record(z.string(), z.array(z.string())),
+  })
+  .strict()
 export const startSchema = z
   .object({
     sessionId: z.string().min(1).max(100),
@@ -197,6 +203,7 @@ export const startSchema = z
     attachments: agentAttachmentsSchema.optional(),
     localTurn: z.number().int().nonnegative().safe().optional(),
     clientRecovery: z.unknown().optional(),
+    questionReply: agentQuestionReplySchema.optional(),
   })
   .superRefine((value, context) => {
     if (!value.prompt.trim() && !value.attachments?.length)
@@ -226,6 +233,8 @@ export const agentSteerSchema = z
     sessionId: z.string().min(1).max(100),
     prompt: z.string().max(1000000),
     attachments: agentAttachmentsSchema.optional(),
+    questionReply: agentQuestionReplySchema.optional(),
+    clientRecovery: z.unknown().optional(),
   })
   .strict()
   .refine(

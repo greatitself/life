@@ -1,0 +1,304 @@
+.pending-question-panel {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 12px;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--panel, var(--sidebar));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 12px;
+}
+.pending-question-panel:focus {
+  outline: none;
+}
+.pending-question-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+}
+.pending-question-header > svg {
+  color: var(--muted);
+}
+.pending-question-header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.pending-question-header strong {
+  color: var(--text-strong, var(--text));
+  font-size: 12px;
+  font-weight: 550;
+}
+.pending-question-header span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.pending-question-collapse {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.pending-question-collapse:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.pending-question-collapse[aria-expanded='false'] svg {
+  transform: rotate(-90deg);
+}
+.pending-question-body {
+  max-height: min(55vh, 500px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 15px 13px;
+}
+.pending-question-hint {
+  margin: 10px 0 0;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.pending-question-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 0 12px;
+  overflow-x: auto;
+}
+.pending-question-tabs button {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 8px;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.pending-question-tabs button > span {
+  color: var(--dim);
+  font-size: 10px;
+}
+.pending-question-tabs button[aria-selected='true'] {
+  color: var(--text);
+  background: var(--hover);
+  border-color: var(--border);
+}
+.pending-question-prompt {
+  display: grid;
+  gap: 5px;
+  margin: 2px 0 12px;
+}
+.pending-question-prompt > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.pending-question-prompt h3 {
+  margin: 0;
+  color: var(--text-strong, var(--text));
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pending-question-prompt small {
+  color: var(--dim);
+  font-size: 11px;
+}
+.pending-question-options {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.pending-question-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 49px;
+  padding: 10px 11px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.pending-question-option:hover {
+  background: var(--hover);
+}
+.pending-question-option[data-selected] {
+  background: var(--hover);
+  border-color: var(--muted);
+}
+.pending-question-option > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.pending-question-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.pending-question-option > kbd,
+.pending-question-other-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 23px;
+  width: 23px;
+  height: 23px;
+  color: var(--muted);
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: 11px var(--mono);
+}
+.pending-question-option > span:not(.pending-question-other-icon) {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+.pending-question-option strong {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pending-question-option small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pending-question-option > svg {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+.pending-question-options:disabled .pending-question-option {
+  cursor: default;
+  opacity: 0.65;
+}
+.pending-question-input {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+.pending-question-input > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.pending-question-input :is(input, textarea) {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 39px;
+  padding: 10px 11px;
+  color: var(--text);
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  line-height: 1.6;
+}
+.pending-question-input textarea {
+  resize: vertical;
+  min-height: 85px;
+  max-height: 230px;
+}
+.pending-question-input :is(input, textarea)::placeholder {
+  color: var(--dim);
+}
+.pending-question-empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pending-question-error {
+  margin: 10px 0 0;
+  color: var(--danger, #e88787);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pending-question-context {
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.pending-question-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 13px;
+}
+.pending-question-footer > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.pending-question-footer .button {
+  min-height: 32px;
+  padding: 6px 11px;
+  font-size: 11px;
+}
+.pending-question-decline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 5px 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pending-question-decline:hover {
+  color: var(--text);
+}
+.pending-question-panel button:disabled,
+.pending-question-panel input:disabled,
+.pending-question-panel textarea:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.pending-question-panel :is(button, input, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.pending-question-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media (max-width: 600px) {
+  .pending-question-header {
+    padding: 12px;
+  }
+  .pending-question-body {
+    padding: 0 12px 12px;
+  }
+  .pending-question-tabs button,
+  .pending-question-collapse,
+  .pending-question-footer .button,
+  .pending-question-decline {
+    min-height: 40px;
+  }
+}

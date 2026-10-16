@@ -12,6 +12,294 @@ const historyHydration = process.argv.includes('--history-hydration')
 const providerUtilities = process.argv.includes('--provider-utilities')
 const fluidity = process.argv.includes('--fluidity') || process.argv.includes('--fluidity-baseline')
 const fluidityBaseline = process.argv.includes('--fluidity-baseline')
+const asyncQuestions = process.argv.includes('--async-questions')
+
+async function asyncQuestionChecks(page, checks, settle) {
+  const composer = page.getByRole('textbox', { name: 'Message your coding agent', exact: true })
+  const panel = page.getByRole('region', { name: 'Agent questions', exact: true })
+  const select = async (title) => {
+    await page.getByRole('button', { name: new RegExp('^' + title + ',') }).click()
+    await settle()
+  }
+  const counters = () =>
+    page.evaluate(() => ({
+      starts: window.controlsTest.records.starts.length,
+      steering: window.controlsTest.records.steering.length,
+      responses: window.controlsTest.records.responses.length,
+    }))
+  await page.evaluate(() => {
+    window.controlsTest.emit('thread-a', 'complete', { status: 'completed' })
+    window.controlsTest.emit('thread-b', 'complete', { status: 'completed' })
+  })
+  await select('Thread Alpha')
+  const ordinaryDraft = '  Keep this unrelated draft.\nDo not send it as an answer.  '
+  await composer.fill(ordinaryDraft)
+  const idleQuestion = 'Which exact directory should I use?'
+  const idleAnswer = '  /srv/project/custom directory\nKeep both lines.  '
+  const idleBefore = await counters()
+  const idleTurn = await page.evaluate(
+    () => window.controlsTest.stored().find((thread) => thread.id === 'thread-a').turn,
+  )
+  await page.evaluate((question) => {
+    window.controlsTest.emit('thread-a', 'question', {
+      requestId: 'codex-async:remote-thread-a:idle-question',
+      itemId: 'idle-question',
+      provider: 'codex',
+      responseMode: 'message',
+      canDismiss: true,
+      questions: [{ id: '0', header: 'Directory', question, isOther: true }],
+    })
+  }, idleQuestion)
+  await panel.waitFor()
+  assert.equal(await composer.isVisible(), false)
+  assert.equal(await composer.inputValue(), ordinaryDraft)
+  await panel.getByRole('textbox', { name: idleQuestion, exact: true }).fill(idleAnswer)
+  await panel.getByRole('button', { name: 'Send answers', exact: true }).click()
+  await page.waitForFunction(
+    (count) => window.controlsTest.records.starts.length === count + 1,
+    idleBefore.starts,
+  )
+  await panel.waitFor({ state: 'hidden' })
+  const idleStart = await page.evaluate(() => window.controlsTest.records.starts.at(-1))
+  const idlePrompt = 'Question: ' + idleQuestion + '\nAnswer: ' + idleAnswer
+  assert.equal(idleStart.sessionId, 'thread-a')
+  assert.equal(idleStart.remoteId, 'remote-thread-a')
+  assert.equal(idleStart.workspace, '/srv/project')
+  assert.equal(idleStart.prompt, idlePrompt)
+  assert.equal(idleStart.localTurn, idleTurn + 1)
+  assert.deepEqual(idleStart.questionReply, {
+    requestId: 'codex-async:remote-thread-a:idle-question',
+    answers: { 0: [idleAnswer] },
+  })
+  if (asyncQuestions) {
+    assert.equal(idleStart.clientRecovery.kind, 'main')
+    assert.equal(idleStart.clientRecovery.userMessage.text, idlePrompt)
+    assert.equal(idleStart.clientRecovery.userMessage.turn, idleStart.localTurn)
+    assert.equal(idleStart.clientRecovery.threadSeed.id, 'thread-a')
+    await page.waitForFunction(
+      ({ id, text }) =>
+        window.controlsTest
+          .stored()
+          .find((thread) => thread.id === 'thread-a')
+          .messages.some((message) => message.id === id && message.text === text),
+      { id: idleStart.clientRecovery.userMessage.id, text: idlePrompt },
+    )
+  }
+  assert.deepEqual(await counters(), { ...idleBefore, starts: idleBefore.starts + 1 })
+  assert.equal(await composer.inputValue(), ordinaryDraft)
+  checks.push(
+    'An idle Codex async answer uses normal native start with exact answers, request identity and turn, while preserving the unrelated composer draft',
+  )
+
+  await page.evaluate(() =>
+    window.controlsTest.emit('thread-a', 'complete', { status: 'completed' }),
+  )
+  await select('Thread Beta')
+  const betaDraft = 'Keep the second thread draft too.'
+  await composer.fill(betaDraft)
+  const callbackQuestion = 'What evidence should I retain?'
+  const callbackAnswer = '  Preserve the original traces.\nAnd their whitespace.  '
+  const callbackBefore = await counters()
+  await page.evaluate((question) => {
+    window.controlsTest.emit('thread-b', 'question', {
+      requestId: 'claude-callback-question',
+      provider: 'claude',
+      questions: [
+        {
+          id: 'approach',
+          header: 'Approach',
+          question: 'Which approach should I take?',
+          isOther: false,
+          options: [
+            {
+              label: 'Keep the current approach',
+              value: 'keep',
+              description: 'Preserve behavior.',
+            },
+            { label: 'Change the approach', value: 'change', description: 'Try the alternative.' },
+          ],
+        },
+        { id: 'evidence', header: 'Evidence', question, isOther: true },
+      ],
+    })
+  }, callbackQuestion)
+  await panel.waitFor()
+  assert.equal(await panel.getByRole('button', { name: 'Dismiss', exact: true }).count(), 0)
+  await panel.getByRole('radio', { name: /Keep the current approach/ }).check()
+  await panel.getByRole('textbox', { name: callbackQuestion, exact: true }).waitFor()
+  await panel.getByRole('textbox', { name: callbackQuestion, exact: true }).fill(callbackAnswer)
+  await select('Thread Alpha')
+  assert.equal(await composer.inputValue(), ordinaryDraft)
+  await select('Thread Beta')
+  assert.equal(
+    await panel.getByRole('textbox', { name: callbackQuestion, exact: true }).inputValue(),
+    callbackAnswer,
+  )
+  await panel.getByRole('button', { name: 'Previous question', exact: true }).click()
+  assert.equal(
+    await panel.getByRole('radio', { name: /Keep the current approach/ }).isChecked(),
+    true,
+  )
+  await panel.getByRole('button', { name: 'Next question', exact: true }).click()
+  await panel.getByRole('button', { name: 'Send answers', exact: true }).click()
+  await page.waitForFunction(
+    (count) => window.controlsTest.records.responses.length === count + 1,
+    callbackBefore.responses,
+  )
+  await panel.waitFor({ state: 'hidden' })
+  assert.deepEqual(await page.evaluate(() => window.controlsTest.records.responses.at(-1)), {
+    sessionId: 'thread-b',
+    requestId: 'claude-callback-question',
+    accepted: true,
+    answers: { approach: ['keep'], evidence: [callbackAnswer] },
+  })
+  assert.deepEqual(await counters(), { ...callbackBefore, responses: callbackBefore.responses + 1 })
+  assert.equal(await composer.inputValue(), betaDraft)
+  checks.push(
+    'Native callback questions retain their step and exact answers across thread switches, support review, and respond through the native callback channel',
+  )
+
+  await select('Thread Alpha')
+  const dismissBefore = await counters()
+  await page.evaluate(() =>
+    window.controlsTest.emit('thread-a', 'question', {
+      requestId: 'codex-async:remote-thread-a:dismiss-question',
+      itemId: 'dismiss-question',
+      responseMode: 'message',
+      canDismiss: true,
+      questions: [{ id: '0', question: 'Would you like to add more detail?' }],
+    }),
+  )
+  await panel.getByRole('button', { name: 'Dismiss', exact: true }).click()
+  await panel.waitFor({ state: 'hidden' })
+  assert.deepEqual(await counters(), { ...dismissBefore, responses: dismissBefore.responses + 1 })
+  assert.deepEqual(await page.evaluate(() => window.controlsTest.records.responses.at(-1)), {
+    sessionId: 'thread-a',
+    requestId: 'codex-async:remote-thread-a:dismiss-question',
+    accepted: false,
+  })
+  assert.equal(await composer.inputValue(), ordinaryDraft)
+  checks.push('Dismissing a nonblocking message question resolves it without sending native input')
+
+  // Build an ordinary paused queue through actual App handlers. Answering a
+  // question must not consume this message or silently enqueue an unbound reply.
+  const queuedText = 'Ordinary queued follow-up stays separate from question answers.'
+  await page.evaluate(() => window.controlsTest.emit('thread-a'))
+  await page.getByRole('button', { name: 'Steer current response', exact: true }).waitFor()
+  await composer.fill(queuedText)
+  await composer.press('Tab')
+  const queuedRegion = page.getByRole('region', { name: 'Queued follow-up messages', exact: true })
+  await queuedRegion.waitFor()
+  await page
+    .getByRole('button', { name: 'Stop agent and pause queued messages', exact: true })
+    .click()
+  await queuedRegion.getByText('Paused', { exact: true }).waitFor()
+  await composer.fill(ordinaryDraft)
+  await page.evaluate(() => window.controlsTest.emit('thread-a'))
+  const busyBefore = await counters()
+  const busyQuestion = 'What should I do while this run continues?'
+  const busyAnswer = '  Keep working on this thread only.\nUse the existing native turn.  '
+  await page.evaluate((question) => {
+    window.controlsTest.holdSteering(true)
+    window.controlsTest.emit('thread-a', 'question', {
+      requestId: 'codex-async:remote-thread-a:busy-question',
+      itemId: 'busy-question',
+      responseMode: 'message',
+      canDismiss: true,
+      questions: [{ id: '0', question, isOther: true }],
+    })
+  }, busyQuestion)
+  await panel.getByRole('textbox', { name: busyQuestion, exact: true }).fill(busyAnswer)
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('.pending-question-panel button')].find(
+      (item) => item.textContent.trim() === 'Send answers',
+    )
+    if (!button) throw new Error('The pending question must expose its submit action')
+    button.click()
+    button.click()
+  })
+  await page.waitForFunction(
+    (count) => window.controlsTest.records.steering.length === count + 1,
+    busyBefore.steering,
+  )
+  const busySteer = await page.evaluate(() => window.controlsTest.records.steering.at(-1))
+  const busyPrompt = 'Question: ' + busyQuestion + '\nAnswer: ' + busyAnswer
+  assert.equal(busySteer.sessionId, 'thread-a')
+  assert.equal(busySteer.prompt, busyPrompt)
+  assert.deepEqual(busySteer.questionReply, {
+    requestId: 'codex-async:remote-thread-a:busy-question',
+    answers: { 0: [busyAnswer] },
+  })
+  assert.equal(busySteer.clientRecovery.kind, 'main')
+  const authored = busySteer.clientRecovery.userMessage
+  assert.equal(authored.text, busyPrompt)
+  assert.equal(authored.submission, 'steering')
+  await select('Thread Beta')
+  const betaAfterSwitch = 'Second thread edits while the first answer is being acknowledged.'
+  await composer.fill(betaAfterSwitch)
+  await page.evaluate(() => {
+    window.controlsTest.emit('thread-a', 'text', {
+      itemId: 'late-question-final',
+      phase: 'final_answer',
+      status: 'replace',
+      text: 'The original run completed before the answer acknowledgment.',
+    })
+    window.controlsTest.emit('thread-a', 'complete', { status: 'completed' })
+  })
+  await page.waitForFunction(() => {
+    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
+    return (
+      !thread.busy &&
+      thread.pending.some(
+        (event) => event.requestId === 'codex-async:remote-thread-a:busy-question',
+      )
+    )
+  })
+  await page.evaluate(() => window.controlsTest.releaseSteering())
+  await page.waitForFunction((id) => {
+    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
+    return !thread.pending.length && thread.messages.some((message) => message.id === id)
+  }, authored.id)
+  const recoveredAnswer = await page.evaluate((id) => {
+    const thread = window.controlsTest.stored().find((item) => item.id === 'thread-a')
+    const message = thread.messages.find((item) => item.id === id)
+    return {
+      message,
+      answerIndex: thread.messages.findIndex((item) => item.id === id),
+      finalIndex: thread.messages.findIndex(
+        (item) => item.text === 'The original run completed before the answer acknowledgment.',
+      ),
+      copies: thread.messages.filter((item) => item.id === id).length,
+      queue: thread.queue,
+      betaCopies: window.controlsTest
+        .stored()
+        .find((item) => item.id === 'thread-b')
+        .messages.filter((item) => item.id === id).length,
+    }
+  }, authored.id)
+  assert.equal(recoveredAnswer.message.text, busyPrompt)
+  assert.equal(recoveredAnswer.message.turn, authored.turn)
+  assert.equal(recoveredAnswer.message.createdAt, authored.createdAt)
+  assert.equal(recoveredAnswer.message.finishStatus, 'completed')
+  assert.equal(typeof recoveredAnswer.message.finishedAt, 'number')
+  assert.equal(recoveredAnswer.copies, 1)
+  assert.equal(recoveredAnswer.betaCopies, 0)
+  assert.ok(
+    recoveredAnswer.answerIndex >= 0 && recoveredAnswer.answerIndex < recoveredAnswer.finalIndex,
+  )
+  assert.equal(recoveredAnswer.queue.length, 1)
+  assert.equal(recoveredAnswer.queue[0].text, queuedText)
+  assert.equal(recoveredAnswer.queue[0].paused, true)
+  assert.deepEqual(await counters(), { ...busyBefore, steering: busyBefore.steering + 1 })
+  assert.equal(await composer.inputValue(), betaAfterSwitch)
+  await select('Thread Alpha')
+  await panel.waitFor({ state: 'hidden' })
+  assert.equal(await composer.inputValue(), ordinaryDraft)
+  await queuedRegion.getByRole('button', { name: 'Remove queued message', exact: true }).click()
+  checks.push(
+    'A busy async answer steers exactly once past a paused queue, keeps its original durable message identity and ordering after completion, and cannot affect a subsequently selected thread',
+  )
+}
 
 async function presentationChecks(page, checks) {
   const artifacts = resolve(__dirname, '../output/playwright/v0.8.0')
@@ -1020,7 +1308,7 @@ async function run() {
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
     page.on('pageerror', (error) => errors.push(error.message))
     await page.addInitScript(
-      ({ historyHydration, providerUtilities, fluidity }) => {
+      ({ historyHydration, providerUtilities, fluidity, asyncQuestions }) => {
         const profile = {
           id: 'machine-test',
           name: 'Test machine',
@@ -1046,6 +1334,7 @@ async function run() {
           steering: [],
           configure: [],
           starts: [],
+          responses: [],
           stateReads: 0,
           heldStateReads: 0,
           heldWrites: 0,
@@ -1062,9 +1351,11 @@ async function run() {
         const pendingUsageReads = []
         let holdState = false
         let holdWrites = false
+        let holdSteering = false
         const states = []
         const writes = []
         const configurations = []
+        const steeringAcknowledgments = []
         const off = () => () => {}
         const emptySource = {
           revision: 0,
@@ -1392,6 +1683,7 @@ async function run() {
             cancel: async () => {},
           },
           agent: {
+            ...(asyncQuestions ? { recover: async () => ({ owners: [] }) } : {}),
             models: async () => [
               {
                 id: 'test-model',
@@ -1423,6 +1715,17 @@ async function run() {
             ],
             steer: async (input) => {
               records.steering.push(structuredClone(input))
+              if (holdSteering)
+                await new Promise((resolve) => steeringAcknowledgments.push(resolve))
+            },
+            respond: async (sessionId, requestId, accepted, answers, decisionId) => {
+              records.responses.push({
+                sessionId,
+                requestId,
+                accepted,
+                ...(answers !== undefined ? { answers: structuredClone(answers) } : {}),
+                ...(decisionId !== undefined ? { decisionId } : {}),
+              })
             },
             configure: (input) => {
               records.configure.push(structuredClone(input))
@@ -1507,6 +1810,13 @@ async function run() {
           releaseWrites: () => {
             holdWrites = false
             for (const resolve of writes.splice(0)) resolve()
+          },
+          holdSteering: (value) => {
+            holdSteering = value
+          },
+          releaseSteering: () => {
+            holdSteering = false
+            for (const resolve of steeringAcknowledgments.splice(0)) resolve()
           },
           resolveConfiguration: (index, note) =>
             configurations[index].resolve({ applied: 'live', note }),
@@ -1674,7 +1984,7 @@ async function run() {
               records.historySaves.push({ threadCount: threads.length, savedAt }),
           }
       },
-      { historyHydration, providerUtilities, fluidity },
+      { historyHydration, providerUtilities, fluidity, asyncQuestions },
     )
     await page.goto(`http://127.0.0.1:${server.address().port}`)
     const settle = async () =>
@@ -1856,6 +2166,7 @@ async function run() {
     }
     if (fluidity) {
       await fluidityChecks(page, checks, settle)
+      if (!fluidityBaseline) await asyncQuestionChecks(page, checks, settle)
       assert.deepEqual(errors, [])
       console.log(
         JSON.stringify(
@@ -1863,6 +2174,14 @@ async function run() {
           null,
           2,
         ),
+      )
+      return
+    }
+    if (asyncQuestions) {
+      await asyncQuestionChecks(page, checks, settle)
+      assert.deepEqual(errors, [])
+      console.log(
+        JSON.stringify({ ok: true, asyncQuestions: true, checks, browserErrors: errors }, null, 2),
       )
       return
     }

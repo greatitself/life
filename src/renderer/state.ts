@@ -218,8 +218,95 @@ export function admitAgentEvents(thread: Thread, events: readonly AgentEvent[]):
   }
   return accepted
 }
+export function isMessageQuestionRequest(event: AgentEvent): boolean {
+  return event.type === 'question' && event.responseMode === 'message'
+}
+function isMessageQuestionHistory(message: Message): boolean {
+  return (
+    message.kind === 'event' &&
+    message.details?.requestType === 'question' &&
+    message.details.responseMode === 'message'
+  )
+}
 export function nativeRecoveryBlocksMutation(thread?: Thread): boolean {
   return thread?.nativeRecoveryStatus === 'recovering' || thread?.nativeRecoveryStatus === 'unknown'
+}
+/** Written followups are supplied only after the native owner verifies their exact input binding. */
+function restoreNativeMainFollowups(thread: Thread, owner: NativeRecoveryOwnerState): Thread {
+  for (const recovery of owner.admittedFollowups || []) {
+    if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) continue
+    const value = recovery as Record<string, unknown>
+    const user = value.userMessage
+    const seed = value.threadSeed
+    if (
+      value.kind !== 'main' ||
+      !user ||
+      typeof user !== 'object' ||
+      Array.isArray(user) ||
+      !seed ||
+      typeof seed !== 'object' ||
+      Array.isArray(seed)
+    )
+      continue
+    const message = user as Record<string, unknown>
+    const original = seed as Record<string, unknown>
+    if (
+      original.id !== owner.sessionId ||
+      original.id !== thread.id ||
+      original.profileId !== thread.profileId ||
+      original.provider !== thread.provider ||
+      original.workspace !== thread.workspace ||
+      typeof message.id !== 'string' ||
+      !message.id ||
+      message.role !== 'user' ||
+      typeof message.text !== 'string' ||
+      (value.prompt !== undefined && value.prompt !== message.text) ||
+      !recoveryNumber(message.turn) ||
+      original.turn !== message.turn ||
+      !recoveryNumber(message.createdAt)
+    )
+      continue
+    const previous = thread.messages.find((candidate) => candidate.id === message.id)
+    if (previous) continue
+    const attachments =
+      message.attachments === undefined
+        ? undefined
+        : normalizeThreadAttachments(message.attachments)
+    if (
+      message.attachments !== undefined &&
+      (!Array.isArray(message.attachments) ||
+        (attachments?.length ?? 0) !== message.attachments.length)
+    )
+      continue
+    const restored: Message = {
+      ...normalizeMessageMetadata(message),
+      id: message.id,
+      role: 'user',
+      text: message.text,
+      turn: message.turn,
+      createdAt: message.createdAt,
+      ...(attachments ? { attachments } : {}),
+    }
+    // An older written answer belongs before later local turns, without reordering existing history.
+    const nextMessage = thread.messages.findIndex(
+      (candidate) =>
+        candidate.turn > restored.turn ||
+        (candidate.turn === restored.turn &&
+          typeof candidate.createdAt === 'number' &&
+          candidate.createdAt > restored.createdAt!),
+    )
+    const insertAt = nextMessage < 0 ? thread.messages.length : nextMessage
+    thread = {
+      ...thread,
+      turn: Math.max(thread.turn, restored.turn),
+      messages: [
+        ...thread.messages.slice(0, insertAt),
+        restored,
+        ...thread.messages.slice(insertAt),
+      ],
+    }
+  }
+  return thread
 }
 export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOwnerState): Thread {
   if (thread.id !== owner.sessionId) return thread
@@ -243,15 +330,21 @@ export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOw
         'Saved transcript progress could not be verified. Native recovery must reconcile this history before replay can continue.',
     }
   const projectionBefore = thread
+  thread = restoreNativeMainFollowups(thread, owner)
   const currentOwner = thread.nativeRecoveryOwner
   const acceptsOwnerRequests =
     !currentOwner ||
     (currentOwner.transportId === owner.transportId &&
-      ((currentOwner.ownerGeneration === owner.ownerGeneration &&
-        currentOwner.snapshotToken === owner.snapshotToken) ||
-        (recoveryNumber(currentOwner.ownerGeneration) &&
-          recoveryNumber(owner.ownerGeneration) &&
-          owner.ownerGeneration > currentOwner.ownerGeneration)))
+      currentOwner.ownerGeneration === owner.ownerGeneration &&
+      currentOwner.snapshotToken === owner.snapshotToken) ||
+    (!recoveryNumber(currentOwner.ownerGeneration) &&
+      (currentOwner.transportId !== owner.transportId || recoveryNumber(owner.ownerGeneration))) ||
+    (recoveryNumber(currentOwner.ownerGeneration) &&
+      recoveryNumber(owner.ownerGeneration) &&
+      owner.ownerGeneration > currentOwner.ownerGeneration)
+  // Native handoffs advance the enclosing generation even when their transport changes.
+  // Stale snapshots must never rewind authority or reopen settled requests.
+  if (!acceptsOwnerRequests) return carryNativeProjectionOwnerSnapshot(projectionBefore, thread)
   if (owner.status === 'running' || owner.status === 'idle') {
     for (const child of owner.currentChildren || []) {
       if (
@@ -274,20 +367,34 @@ export function applyNativeRecoveryOwner(thread: Thread, owner: NativeRecoveryOw
           (request) =>
             request.sessionId === thread.id &&
             Boolean(request.requestId) &&
-            (request.type === 'approval' || request.type === 'question'),
+            (request.type === 'approval' || request.type === 'question') &&
+            (!isMessageQuestionRequest(request) ||
+              (validRecoveryEvent(request) && Boolean(request.nativeRecovery))),
         )
         .map(persistentAgentEvent)
-      const currentRequests = acceptsOwnerRequests
-        ? pending.filter(
-            (request) =>
-              validRecoveryEvent(request) &&
-              request.nativeRecovery?.transportId === owner.transportId &&
-              owner.ownerGeneration !== undefined &&
-              request.nativeRecovery.ownerGeneration === owner.ownerGeneration &&
-              Boolean(owner.snapshotToken) &&
-              request.nativeRecovery.snapshotToken === owner.snapshotToken,
-          )
-        : []
+      // Message questions retain their immutable source journal identity across later turns.
+      // Only this native owner snapshot can restore them; saved history never grants pending work.
+      const currentRequests = pending.filter(
+        (request) =>
+          isMessageQuestionRequest(request) ||
+          (validRecoveryEvent(request) &&
+            request.nativeRecovery?.transportId === owner.transportId &&
+            owner.ownerGeneration !== undefined &&
+            request.nativeRecovery.ownerGeneration === owner.ownerGeneration &&
+            Boolean(owner.snapshotToken) &&
+            request.nativeRecovery.snapshotToken === owner.snapshotToken),
+      )
+      for (const request of currentRequests.filter(isMessageQuestionRequest)) {
+        const currentTurn = thread.turn
+        const priorRequest = thread.messages.findLast(
+          (message) => message.kind === 'event' && message.details?.requestId === request.requestId,
+        )
+        const requestTurn = request.nativeRecovery?.localTurn ?? priorRequest?.turn ?? currentTurn
+        thread = {
+          ...applyAdmittedEvent({ ...thread, turn: requestTurn }, request, false, true),
+          turn: currentTurn,
+        }
+      }
       const needsWake =
         currentRequests.length > 0 &&
         (thread.settled || thread.snoozedUntil !== undefined || thread.archivedAt !== undefined)
@@ -709,7 +816,12 @@ export function finishThreadTurn(thread: Thread, status: string, at = Date.now()
     messages: thread.messages.map((message) => {
       if (message.turn !== thread.turn || message.agentId || message.kind === 'subagent')
         return message
-      if (message.kind === 'event' && message.details?.requestType && message.status === 'waiting')
+      if (
+        message.kind === 'event' &&
+        message.details?.requestType &&
+        message.status === 'waiting' &&
+        !isMessageQuestionHistory(message)
+      )
         return { ...message, finishedAt: at, status: 'cancelled' }
       if (message.role === 'user' || message.role === 'assistant')
         return {
@@ -913,6 +1025,15 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     event.nativeRecovery.ownerGeneration < currentGeneration
   const historicalRoot =
     !event.agentId && ((eventTurn !== undefined && eventTurn < thread.turn) || historicalGeneration)
+  const resolvesAdmittedMessageQuestion =
+    event.type === 'request-resolved' &&
+    Boolean(event.nativeRecovery) &&
+    thread.pending.some(
+      (request) =>
+        isMessageQuestionRequest(request) &&
+        request.requestId === event.requestId &&
+        request.nativeRecovery?.transportId === event.nativeRecovery!.transportId,
+    )
   const projected = applyAdmittedEvent(
     eventTurn === undefined || eventTurn === thread.turn ? thread : { ...thread, turn: eventTurn },
     event,
@@ -943,7 +1064,7 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
                 settledAt: thread.settledAt,
                 snoozedAt: thread.snoozedAt,
                 snoozedUntil: thread.snoozedUntil,
-                pending: thread.pending,
+                pending: resolvesAdmittedMessageQuestion ? projected.pending : thread.pending,
                 queue: thread.queue,
                 ...(historicalGeneration
                   ? {
@@ -988,7 +1109,12 @@ export function applyEvent(thread: Thread, event: AgentEvent): Thread {
     deliveredEvent,
   )
 }
-function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle = true): Thread {
+function applyAdmittedEvent(
+  thread: Thread,
+  event: AgentEvent,
+  authorLifecycle = true,
+  restoreNativeQuestion = false,
+): Thread {
   const reconcileLifecycle = authorLifecycle
     ? reconcileConversationLifecycle
     : (value: Thread) => value
@@ -1051,6 +1177,15 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
     }
   if (event.type === 'request-resolved') {
     if (!event.requestId) return thread
+    const existingRequest = thread.pending.find((request) => request.requestId === event.requestId)
+    if (
+      existingRequest &&
+      isMessageQuestionRequest(existingRequest) &&
+      existingRequest.nativeRecovery &&
+      event.nativeRecovery &&
+      existingRequest.nativeRecovery.transportId !== event.nativeRecovery.transportId
+    )
+      return thread
     let requestIndex = -1
     for (let index = thread.messages.length - 1; index >= 0; index--) {
       const message = thread.messages[index]
@@ -1115,7 +1250,9 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
       busy: false,
       turnStatus: status,
       agentStatus: status,
-      pending: thread.pending.filter((request) => Boolean(request.agentId)),
+      pending: thread.pending.filter(
+        (request) => Boolean(request.agentId) || isMessageQuestionRequest(request),
+      ),
       queue: status === 'completed' ? thread.queue : pauseQueuedMessages(thread.queue),
     })
   }
@@ -1136,7 +1273,8 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
     const id = `${requestTurn}:request:${event.requestId || event.itemId || event.type}`
     const previous = thread.messages.find((message) => message.id === id)
     // A reconnect can replay the original native request after its answer or cancellation.
-    if (previous?.finishedAt && previous.status !== 'waiting') return thread
+    if (!restoreNativeQuestion && previous?.finishedAt && previous.status !== 'waiting')
+      return thread
     const request: Message = {
       ...previous,
       ...eventMetadata(event),
@@ -1157,6 +1295,7 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
         '',
       input: event.input ?? previous?.input,
       status: 'waiting',
+      ...(restoreNativeQuestion ? { finishedAt: undefined } : {}),
       createdAt: previous?.createdAt ?? at,
       turn: requestTurn,
       details: {
@@ -1164,6 +1303,11 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
         ...eventDetails(event.details),
         requestType: event.type,
         requestId: event.requestId,
+        ...(mergedEvent.responseMode !== undefined
+          ? { responseMode: mergedEvent.responseMode }
+          : {}),
+        ...(mergedEvent.canDismiss !== undefined ? { canDismiss: mergedEvent.canDismiss } : {}),
+        ...(restoreNativeQuestion ? { response: undefined } : {}),
         ...(questions ? { questions } : {}),
       },
     }
@@ -1238,7 +1382,9 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
         busy: false,
         turnStatus: 'failed',
         agentStatus: 'failed',
-        pending: thread.pending.filter((request) => Boolean(request.agentId)),
+        pending: thread.pending.filter(
+          (request) => Boolean(request.agentId) || isMessageQuestionRequest(request),
+        ),
         queue: pauseQueuedMessages(thread.queue),
         messages: [
           ...failed.messages,
@@ -1292,8 +1438,9 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
       ...thread,
       pending: thread.pending.filter(
         (request) =>
-          request.agentId !== event.agentId &&
-          (!event.parentItemId || request.agentId !== event.parentItemId),
+          isMessageQuestionRequest(request) ||
+          (request.agentId !== event.agentId &&
+            (!event.parentItemId || request.agentId !== event.parentItemId)),
       ),
       messages: thread.messages.map((message) => {
         if (
@@ -1303,7 +1450,11 @@ function applyAdmittedEvent(thread: Thread, event: AgentEvent, authorLifecycle =
           return message
         const messageRun = childNativeRun(message.details)
         if (nativeRun && messageRun && messageRun !== nativeRun) return message
-        if (message.kind === 'event' && message.status === 'waiting')
+        if (
+          message.kind === 'event' &&
+          message.status === 'waiting' &&
+          !isMessageQuestionHistory(message)
+        )
           return { ...message, finishedAt, status: 'cancelled' }
         if (message.role === 'assistant')
           return message.finishedAt && message.finishStatus !== 'unknown'

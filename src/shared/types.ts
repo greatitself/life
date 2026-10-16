@@ -103,6 +103,8 @@ export interface StartInput {
   attachments?: AgentAttachment[]
   /** Renderer planner continuation owned durably by the original native session. */
   clientRecovery?: unknown
+  /** An answer to a privately recorded asynchronous native message question. */
+  questionReply?: AgentQuestionReply
 }
 export interface AgentAttachment {
   remotePath: string
@@ -128,6 +130,9 @@ export interface AgentSteerInput {
   sessionId: string
   prompt: string
   attachments?: AgentAttachment[]
+  questionReply?: AgentQuestionReply
+  /** Exact authored followup projection, retained with the native outbox input. */
+  clientRecovery?: unknown
 }
 export interface AgentProviderOptions {
   /** Additional Codex thread/start or thread/resume parameters. */
@@ -186,6 +191,9 @@ export interface AgentEvent {
   requestId?: string
   remoteId?: string
   questions?: AgentQuestion[]
+  /** Message questions continue independently and reply through native start/steer. */
+  responseMode?: 'message'
+  canDismiss?: boolean
   approvalChoices?: import('./approval-decisions').ApprovalChoice[]
   approvalChoicesUnsupported?: string
   status?: string
@@ -253,6 +261,8 @@ export interface NativeRecoveryOwnerState {
   remoteId?: string
   provider?: Provider
   pending?: AgentEvent[]
+  /** Exact authored followups whose bound native message has a durable written receipt. */
+  admittedFollowups?: unknown[]
   currentChildren?: AgentEvent[]
 }
 export interface NativeRecoveryHistoryReceipt {
@@ -298,6 +308,10 @@ export interface AgentQuestion {
   isOther?: boolean
   multiple?: boolean
   allowEmpty?: boolean
+}
+export interface AgentQuestionReply {
+  requestId: string
+  answers: Record<string, string[]>
 }
 export interface HostKeyRequest {
   id: string

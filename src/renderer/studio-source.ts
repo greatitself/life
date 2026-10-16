@@ -1,4 +1,5 @@
 import type { StudioSession } from './studio-history'
+import { isMessageQuestionRequest } from './state'
 
 const valueSource = Symbol('Life Studio recovery occurrence')
 const requestReset = Symbol('Life Studio request reset')
@@ -131,7 +132,13 @@ export function registerStudioValue<T extends object>(normalized: T, raw: Record
 /** A real new run owns its request reset, even when the recovered UI was already empty. */
 export function resetStudioSessionRequests(session: StudioSession): StudioSession {
   assertStudioJson(session)
-  const next = { ...session, thread: { ...session.thread, pending: [] } }
+  const next = {
+    ...session,
+    thread: {
+      ...session.thread,
+      pending: session.thread.pending.filter(isMessageQuestionRequest),
+    },
+  }
   const intent = {}
   requestResetIntents.add(intent)
   put(next, requestReset, intent)

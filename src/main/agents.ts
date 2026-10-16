@@ -79,6 +79,19 @@ import { nativeRecoveryActionIntentHash } from './native-recovery-actions'
 import { planNativeStopRecovery } from './agent-native-stop-recovery'
 import { applyNativeCodexSettings } from './agent-native-codex-settings'
 import {
+  AsyncQuestionError,
+  asyncQuestionBindingSchema,
+  asyncQuestionRequestId,
+  codexAsyncQuestions,
+  collectAsyncQuestions,
+  decodeCodexAsyncMessage,
+  validateAsyncQuestionReplyEffect,
+  validAsyncQuestionFollowup,
+  type AsyncQuestionBinding,
+  type AsyncQuestionOrigin,
+  type AsyncQuestionRecord,
+} from './agent-async-questions'
+import {
   applyNativeClaudeControl,
   type NativeClaudeControlDetails,
 } from './agent-native-claude-controls'
@@ -387,6 +400,10 @@ export class Agents {
     string,
     { sessionId: string; promise: Promise<void> }
   >()
+  private asyncQuestions = new Map<string, AsyncQuestionRecord>()
+  private readonly asyncQuestionAdmission = Semaphore.makeUnsafe(1)
+  private readonly asyncQuestionBindings = new WeakMap<object, AsyncQuestionBinding>()
+  private readonly asyncQuestionAdmissionFailures = new Set<string>()
   private stopCompletions = new Map<string, Deferred.Deferred<void, NativeRecoveryError>>()
   private replayInitialization = new Map<
     string,
@@ -877,6 +894,12 @@ export class Agents {
           ),
       })
       yield* this.recovery.flushEffect()
+      if (
+        Option.isSome(
+          Schema.decodeUnknownOption(asyncQuestionBindingSchema)(input.semantic.responseBinding),
+        )
+      )
+        yield* this.refreshAsyncQuestionsEffect()
       if (!this.replayingTransports.has(id)) {
         yield* this.reconcileNativeAttachmentEffect(id)
         this.queueRecoveredStops(id)
@@ -1200,17 +1223,347 @@ export class Agents {
       this.recoveryReservations.delete(session.input.sessionId)
     }
   }
+  private readonly refreshAsyncQuestionsEffect = Effect.fn('Agents.refreshAsyncQuestions')(
+    function* (
+      this: Agents,
+      suppliedSnapshots?: readonly NativeRecoverySnapshot[],
+      publishProgress = true,
+    ) {
+      if (!this.nativeRecovery) return
+      if (!suppliedSnapshots) yield* this.recovery.flushEffect()
+      const snapshots = suppliedSnapshots || (yield* this.nativeRecovery.listTransports())
+      const questions = yield* Effect.try({
+        try: () => collectAsyncQuestions(snapshots),
+        catch: (cause) =>
+          this.recoveryError(
+            'question-recovery',
+            'Native asynchronous question state could not be verified.',
+            cause,
+          ),
+      })
+      this.asyncQuestions = questions
+      if (!publishProgress) return
+      for (const question of questions.values()) {
+        if (!question.reply || !['responding', 'answered'].includes(question.state)) continue
+        const source = question.source
+        const snapshot = snapshots.find((value) => value.transport.id === source.transportId)
+        if (!snapshot) continue
+        const answered = question.state === 'answered'
+        const event: AgentEvent = answered
+          ? {
+              sessionId: source.sessionId,
+              type: 'request-resolved',
+              requestId: question.event.requestId,
+              status: 'answered',
+              details: { asyncQuestionSource: source },
+            }
+          : {
+              ...question.event,
+              status: 'responding',
+              details: { asyncQuestionProgress: source },
+            }
+        this.recovery.event(
+          source.transportId,
+          event,
+          {
+            generation: source.ownerGeneration,
+            snapshotToken: source.snapshotToken,
+            localTurn: source.localTurn,
+          },
+          {
+            outputCursor: snapshot.outputCursor,
+            replay: this.replayingTransports.has(source.transportId),
+            eventId: `${source.transportId}:async-question:${question.reply.transportId}:input:${question.reply.input.sequence}:${answered ? 'answered' : 'responding'}`,
+          },
+        )
+      }
+      yield* this.recovery.flushEffect()
+    }.bind(this),
+  )
+  private assertAsyncQuestionDestination(
+    session: Session | undefined,
+    source: AsyncQuestionOrigin,
+    allowChild: boolean,
+  ) {
+    if (
+      !session ||
+      session.input.provider !== 'codex' ||
+      session.input.sessionId !== source.sessionId ||
+      session.machineIdentity !== source.machine ||
+      this.machineIdentity() !== source.machine ||
+      this.ssh.state.profile?.id !== source.profileId ||
+      session.workspace !== source.workspace ||
+      session.remoteId !== source.rootNativeThreadId
+    )
+      throw this.recoveryError(
+        'question-reply',
+        'Reconnect the exact original native conversation and workspace before answering this question.',
+      )
+    this.assertEnvironmentAdmission(session.machineIdentity)
+    this.assertRecovered(session.input.sessionId)
+    if (!allowChild && source.nativeThreadId !== session.remoteId)
+      throw new AsyncQuestionError({
+        message:
+          'This question belongs to a native child agent. Life cannot send its answer to the parent conversation; you can dismiss it.',
+      })
+  }
+  private readonly admitAsyncQuestionReplyEffect = Effect.fn('Agents.admitAsyncQuestionReply')(
+    function* (
+      this: Agents,
+      input: StartInput | AgentSteerInput,
+      steering: boolean,
+      submit: () => Promise<void>,
+    ) {
+      yield* Effect.tryPromise({
+        try: () => this.ensureNativeRecovery(),
+        catch: (cause) =>
+          this.recoveryError(
+            'question-reply',
+            'The original native question owner could not be recovered.',
+            cause,
+          ),
+      })
+      yield* this.refreshAsyncQuestionsEffect()
+      const requestId = input.questionReply?.requestId || ''
+      const question = this.asyncQuestions.get(requestId)
+      if (
+        !question ||
+        question.source.sessionId !== input.sessionId ||
+        question.state !== 'open' ||
+        this.asyncQuestionAdmissionFailures.has(requestId)
+      )
+        return yield* new AsyncQuestionError({
+          message: 'This question is no longer open, or its original reply is awaiting delivery.',
+        })
+      const session = this.sessions.get(input.sessionId)
+      yield* Effect.try({
+        try: () => this.assertAsyncQuestionDestination(session, question.source, false),
+        catch: (cause) =>
+          this.recoveryError(
+            'question-reply',
+            cause instanceof Error ? cause.message : 'The native question owner changed.',
+            cause,
+          ),
+      })
+      if (
+        !steering &&
+        'provider' in input &&
+        (input.provider !== 'codex' ||
+          (input.remoteId && input.remoteId !== question.source.nativeThreadId) ||
+          (input.workspace && input.workspace !== question.source.workspace))
+      )
+        return yield* new AsyncQuestionError({
+          message: 'The answer cannot change its original native conversation or workspace.',
+        })
+      const reply = yield* validateAsyncQuestionReplyEffect(
+        question.event,
+        input.questionReply,
+        input.prompt,
+      )
+      let clientRecovery: Schema.Json | undefined
+      if (steering && input.clientRecovery !== undefined) {
+        clientRecovery = yield* Schema.decodeUnknownEffect(Schema.Json)(input.clientRecovery).pipe(
+          Effect.mapError(
+            () => new AsyncQuestionError({ message: 'The authored question answer must be JSON.' }),
+          ),
+        )
+        if (
+          !validAsyncQuestionFollowup(
+            clientRecovery,
+            question.source,
+            input.prompt,
+            session!.input.localTurn ?? 0,
+          )
+        )
+          return yield* new AsyncQuestionError({
+            message:
+              'The authored answer does not match the exact native prompt, turn and workspace.',
+          })
+      }
+      const binding = yield* Schema.decodeUnknownEffect(asyncQuestionBindingSchema)({
+        mode: 'async-question',
+        requestId,
+        source: question.source,
+        prompt: input.prompt,
+        answers: reply.answers,
+        ...(clientRecovery !== undefined ? { clientRecovery } : {}),
+      }).pipe(
+        Effect.mapError(
+          () =>
+            new AsyncQuestionError({ message: 'The native question reply binding is invalid.' }),
+        ),
+      )
+      this.asyncQuestionBindings.set(input, binding)
+      if (!this.nativeRecovery) question.state = 'responding'
+      yield* Effect.tryPromise({
+        try: submit,
+        catch: (cause) =>
+          this.recoveryError(
+            'question-reply',
+            cause instanceof Error ? cause.message : 'The native answer could not be admitted.',
+            cause,
+          ),
+      }).pipe(
+        Effect.ensuring(
+          this.refreshAsyncQuestionsEffect().pipe(
+            Effect.catch((cause) =>
+              Effect.sync(() => {
+                this.asyncQuestionAdmissionFailures.add(requestId)
+                this.markRecoveryUnknown(input.sessionId, cause.message)
+              }),
+            ),
+          ),
+        ),
+      )
+      if (this.nativeRecovery) {
+        const admitted = this.asyncQuestions.get(requestId)
+        if (!admitted?.reply?.input.written || !isDeepStrictEqual(admitted.reply.binding, binding))
+          return yield* this.recoveryError(
+            'question-reply',
+            'The original native answer has not received its exact durable delivery receipt.',
+          )
+        const snapshot = yield* this.nativeRecovery.readTransport(admitted.source.transportId)
+        this.recovery.event(
+          admitted.source.transportId,
+          {
+            sessionId: input.sessionId,
+            type: 'request-resolved',
+            requestId,
+            status: 'answered',
+            details: { asyncQuestionSource: admitted.source },
+          },
+          {
+            generation: admitted.source.ownerGeneration,
+            snapshotToken: admitted.source.snapshotToken,
+            localTurn: admitted.source.localTurn,
+          },
+          {
+            outputCursor: snapshot.outputCursor,
+            eventId: `${admitted.source.transportId}:async-question:${admitted.reply.transportId}:input:${admitted.reply.input.sequence}:answered`,
+          },
+        )
+        yield* this.recovery.flushEffect()
+        admitted.state = 'answered'
+      } else {
+        question.state = 'answered'
+        this.emit({
+          sessionId: input.sessionId,
+          type: 'request-resolved',
+          requestId,
+          status: 'answered',
+        })
+      }
+    }.bind(this),
+    Effect.uninterruptible,
+  )
+  private readonly dismissAsyncQuestionEffect = Effect.fn('Agents.dismissAsyncQuestion')(
+    function* (
+      this: Agents,
+      sessionId: string,
+      requestId: string,
+      accepted: boolean,
+      decisionId?: string,
+    ) {
+      yield* Effect.tryPromise({
+        try: () => this.ensureNativeRecovery(),
+        catch: (cause) =>
+          this.recoveryError(
+            'question-dismiss',
+            'The original native question owner could not be recovered.',
+            cause,
+          ),
+      })
+      yield* this.refreshAsyncQuestionsEffect()
+      const question = this.asyncQuestions.get(requestId)
+      if (
+        !question ||
+        question.source.sessionId !== sessionId ||
+        question.state !== 'open' ||
+        this.asyncQuestionAdmissionFailures.has(requestId)
+      )
+        return yield* new AsyncQuestionError({
+          message: 'This question is no longer open, or its original reply is awaiting delivery.',
+        })
+      if (accepted || decisionId !== undefined)
+        return yield* new AsyncQuestionError({
+          message:
+            'Answer this asynchronous question through the original conversation’s normal message input.',
+        })
+      yield* Effect.try({
+        try: () =>
+          this.assertAsyncQuestionDestination(this.sessions.get(sessionId), question.source, true),
+        catch: (cause) =>
+          this.recoveryError(
+            'question-dismiss',
+            cause instanceof Error ? cause.message : 'The native question owner changed.',
+            cause,
+          ),
+      })
+      const event: AgentEvent = {
+        sessionId,
+        type: 'request-resolved',
+        requestId,
+        status: 'dismissed',
+        details: { asyncQuestionSource: question.source },
+      }
+      if (this.nativeRecovery) {
+        const snapshot = yield* this.nativeRecovery.readTransport(question.source.transportId)
+        this.recovery.event(
+          question.source.transportId,
+          event,
+          {
+            generation: question.source.ownerGeneration,
+            snapshotToken: question.source.snapshotToken,
+            localTurn: question.source.localTurn,
+          },
+          {
+            outputCursor: snapshot.outputCursor,
+            eventId: `${question.source.transportId}:async-question:${requestId}:dismissed`,
+          },
+        )
+        yield* this.recovery.flushEffect()
+      } else this.emit(event)
+      question.state = 'dismissed'
+    }.bind(this),
+    Effect.uninterruptible,
+  )
+  private asyncQuestionRecordsFor(session: Session) {
+    return [...this.asyncQuestions.values()].filter(
+      (question) =>
+        question.source.sessionId === session.input.sessionId &&
+        question.source.rootNativeThreadId === session.remoteId &&
+        question.source.machine === session.machineIdentity &&
+        question.source.profileId === this.ssh.state.profile?.id &&
+        question.source.workspace === session.workspace,
+    )
+  }
   private recoverySemantic(
     session: Session,
     kind: NativeRecoveryInputSemantic['kind'],
     extra: Partial<NativeRecoveryInputSemantic> = {},
   ): NativeRecoveryInputSemantic {
+    let questionBinding: AsyncQuestionBinding | undefined
+    if (kind === 'user-prompt' && session.input.questionReply) {
+      questionBinding = this.asyncQuestionBindings.get(session.input)
+      if (!questionBinding)
+        throw this.recoveryError(
+          'question-reply',
+          'The native question reply has no private admission binding.',
+        )
+      this.assertAsyncQuestionDestination(session, questionBinding.source, false)
+    }
     return {
       kind,
       sessionId: session.input.sessionId,
       ownerGeneration: session.recoveryGeneration ?? 0,
       ...(session.remoteId ? { nativeThreadId: session.remoteId } : {}),
       ...(session.turnId ? { nativeTurnId: session.turnId } : {}),
+      ...(questionBinding
+        ? {
+            responseBinding:
+              questionBinding as unknown as NativeRecoveryInputSemantic['responseBinding'],
+          }
+        : {}),
       ...extra,
     }
   }
@@ -2974,6 +3327,7 @@ export class Agents {
       })
       yield* this.recovery.flushEffect()
       const snapshots = this.nativeRecovery ? yield* this.nativeRecovery.listTransports() : []
+      yield* this.refreshAsyncQuestionsEffect(snapshots, false)
       const newest = new Map<string, NativeRecoverySnapshot>()
       for (const snapshot of snapshots)
         for (const owner of snapshot.transport.owners)
@@ -3086,6 +3440,17 @@ export class Agents {
                   return stored ? [stampRecoveryEvent(stored, snapshot.transport.id)] : []
                 })
               : []
+          const asyncQuestions =
+            !unknown && !reserved && session ? this.asyncQuestionRecordsFor(session) : []
+          pending.push(
+            ...asyncQuestions
+              .filter((question) => question.state === 'open' || question.state === 'responding')
+              .map((question) =>
+                question.state === 'responding'
+                  ? { ...question.event, status: 'responding' }
+                  : question.event,
+              ),
+          )
           const currentChildren =
             !unknown && !reserved
               ? this.runningSessionEvents().filter(
@@ -3143,6 +3508,11 @@ export class Agents {
               (!reserved ? session?.remoteId : undefined),
             provider: snapshot.transport.provider,
             pending,
+            admittedFollowups: asyncQuestions.flatMap((question) =>
+              question.reply?.input.written && question.reply.binding.clientRecovery !== undefined
+                ? [question.reply.binding.clientRecovery]
+                : [],
+            ),
             currentChildren,
             acceptedAppliedRevision: accepted?.appliedRevision ?? 0,
             acceptedAppliedCursor: accepted,
@@ -4286,7 +4656,16 @@ export class Agents {
       if (this.codexConfigStarting === starting) this.codexConfigStarting = undefined
     }
   }
-  async start(input: StartInput) {
+  start(input: StartInput): Promise<void> {
+    return input.questionReply
+      ? runEffect(
+          this.asyncQuestionAdmission.withPermits(1)(
+            this.admitAsyncQuestionReplyEffect(input, false, () => this.startInput(input)),
+          ),
+        )
+      : this.startInput(input)
+  }
+  private async startInput(input: StartInput) {
     this.assertEnvironmentAdmission()
     if (this.pendingStartAdmissions.has(input.sessionId))
       throw new Error('This thread is already starting')
@@ -4597,7 +4976,16 @@ export class Agents {
       })
       .catch(() => {})
   }
-  async steer(input: AgentSteerInput): Promise<void> {
+  steer(input: AgentSteerInput): Promise<void> {
+    return input.questionReply
+      ? runEffect(
+          this.asyncQuestionAdmission.withPermits(1)(
+            this.admitAsyncQuestionReplyEffect(input, true, () => this.steerInput(input)),
+          ),
+        )
+      : this.steerInput(input)
+  }
+  private async steerInput(input: AgentSteerInput): Promise<void> {
     const session = this.sessions.get(input.sessionId)
     this.assertEnvironmentAdmission(session?.machineIdentity)
     const steering = this.steerSession(input)
@@ -4641,7 +5029,16 @@ export class Agents {
         },
         60000,
         undefined,
-        this.recoverySemantic(session, 'steer', { details: { prompt: input.prompt } }),
+        this.recoverySemantic(session, 'steer', {
+          details: { prompt: input.prompt },
+          ...(input.questionReply
+            ? {
+                responseBinding: this.asyncQuestionBindings.get(
+                  input,
+                ) as unknown as NativeRecoveryInputSemantic['responseBinding'],
+              }
+            : {}),
+        }),
       )
     } else {
       const channel = session.channel
@@ -5395,6 +5792,63 @@ export class Agents {
         status: 'replace',
         phase: phase || session.itemPhases.get(itemId),
       })
+    if (method === 'item/completed') {
+      const decoded = decodeCodexAsyncMessage(item)
+      if (Option.isSome(decoded) && session.remoteId) {
+        const stamp = child?.owner || this.recoveryStamp(session)
+        const generation = 'generation' in stamp ? (stamp.generation ?? 0) : 0
+        const token = stamp.snapshotToken || `legacy:${sessionId}`
+        const transportId =
+          session.recoveryTransportId || `legacy:${session.machineIdentity}:${sessionId}`
+        const requestId = asyncQuestionRequestId({
+          transportId,
+          nativeThreadId: remoteId,
+          itemId,
+          ...(turnId ? { nativeTurnId: turnId } : {}),
+          ownerGeneration: generation,
+          snapshotToken: token,
+        })
+        const question: AgentEvent = {
+          sessionId,
+          provider: 'codex',
+          type: 'question',
+          requestId,
+          itemId,
+          responseMode: 'message',
+          canDismiss: true,
+          questions: codexAsyncQuestions(decoded.value),
+          ...(isChild ? { agentId: remoteId, agentName: child?.agentName } : {}),
+          details: {
+            asyncQuestion: {
+              nativeThreadId: remoteId,
+              rootNativeThreadId: session.remoteId,
+              ...(turnId ? { nativeTurnId: turnId } : {}),
+            },
+          },
+        }
+        if (!this.nativeRecovery && !this.asyncQuestions.has(requestId))
+          this.asyncQuestions.set(requestId, {
+            event: question,
+            state: 'open',
+            source: {
+              transportId,
+              eventId: `${transportId}:wire:${rpc.receivedMessageSequence}:1`,
+              sessionId,
+              nativeThreadId: remoteId,
+              rootNativeThreadId: session.remoteId,
+              ...(turnId ? { nativeTurnId: turnId } : {}),
+              itemId,
+              ownerGeneration: generation,
+              snapshotToken: token,
+              localTurn: stamp.localTurn ?? session.input.localTurn ?? 0,
+              machine: session.machineIdentity,
+              profileId: this.ssh.state.profile?.id || '',
+              workspace: session.workspace,
+            },
+          })
+        emit(question)
+      }
+    }
     if (method === 'item/reasoning/summaryTextDelta')
       emit({ type: 'reasoning', itemId, text: string(params.delta) })
     if (method === 'item/reasoning/summaryPartAdded' && Number(params.summaryIndex) > 0)
@@ -6872,6 +7326,12 @@ export class Agents {
     decisionId?: string,
     nativeStop = false,
   ) {
+    if (requestId.startsWith('codex-async:'))
+      return runEffect(
+        this.asyncQuestionAdmission.withPermits(1)(
+          this.dismissAsyncQuestionEffect(sessionId, requestId, accepted, decisionId),
+        ),
+      )
     const key = JSON.stringify([sessionId, requestId])
     if (this.pendingPermissionResponses.has(key))
       throw this.recoveryError(

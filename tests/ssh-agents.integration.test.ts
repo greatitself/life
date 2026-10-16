@@ -1177,6 +1177,7 @@ describe('fixture lifecycle', () => {
       await isolated.close()
       await waitFor(() => client.state.status === 'disconnected')
       expect(existsSync(isolated.root)).toBe(false)
+      await waitFor(() => received.some((event) => event.type === 'error'))
       expect(received.some((event) => event.type === 'error')).toBe(true)
     } finally {
       client.disconnect()

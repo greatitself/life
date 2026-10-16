@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -256,6 +258,111 @@ describe('private active recovery bootstrap', () => {
     expect(() =>
       bootstrap.rewriteLocalCommand('exec codex app-server', '-i', configuration),
     ).toThrow()
+  })
+
+  it('executes bounded native stdin scripts through the private shell and retains exact byte proof', async () => {
+    const paths = await privateHarness()
+    const prepared = await bootstrap.prepare(paths, 'local', {
+      inheritedHome: '/inherited/home',
+      nodePath: process.execPath,
+    })
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+    const script = `cd ${quote(paths.fixture.workspace)} || exit\nprintf '%s\\n' "$HOME" 'café 漢字 🧪'\n\n`
+    const result = spawnSync(prepared.shell, ['-s'], {
+      input: Buffer.from(script),
+      env: bootstrap.launchEnvironment(process.env, prepared),
+      timeout: 5000,
+      encoding: 'utf8',
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(paths.fixture.root + '\ncafé 漢字 🧪\n')
+    const [record] = (await readFile(prepared.commandLog, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    expect(record).toMatchObject({ kind: 'local-command-admitted', option: '-s' })
+    expect(Buffer.from(record.scriptBase64, 'base64')).toEqual(Buffer.from(script))
+    expect(record.commandSha256).toBe(createHash('sha256').update(script).digest('hex'))
+    const rewritten = Buffer.from(record.rewrittenBase64, 'base64')
+    expect(record.rewrittenSha256).toBe(createHash('sha256').update(rewritten).digest('hex'))
+    expect(rewritten.toString()).toBe(script.replaceAll('$HOME', '$RELAY_TEST_HOME'))
+  })
+
+  it('preserves and executes the native machine workspace guard for stdin scripts', async () => {
+    const paths = await privateHarness()
+    const prepared = await bootstrap.prepare(paths, 'local', {
+      inheritedHome: '/inherited/home',
+      nodePath: process.execPath,
+    })
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+    for (const [requested, allowed] of [
+      [paths.fixture.workspace, true],
+      [paths.configurationRoot, false],
+    ] as const) {
+      const nativeGuard = `life_machine_command_home=$(pwd -P) || exit\ncd ${quote(requested)} || exit\nlife_machine_command_workspace=$(pwd -P) || exit\nif [ "$life_machine_command_home" != / ]; then\n  case "$life_machine_command_workspace" in\n    "$life_machine_command_home"|"$life_machine_command_home"/*) ;;\n    *) printf '%s\\n' 'Machine commands must run within the connected home directory.' >&2; exit 1 ;;\n  esac\nfi\nunset life_machine_command_home life_machine_command_workspace\nprintf '%s\\n' 'workspace command executed'\n`
+      const script = "cd '/inherited/home' || exit\n" + nativeGuard
+      const result = spawnSync(prepared.shell, ['-s'], {
+        input: script,
+        env: bootstrap.launchEnvironment(process.env, prepared),
+        timeout: 5000,
+        encoding: 'utf8',
+      })
+      expect(result.error).toBeUndefined()
+      expect(result.status).toBe(allowed ? 0 : 1)
+      expect(result.stdout).toBe(allowed ? 'workspace command executed\n' : '')
+      if (!allowed) expect(result.stderr).toContain('Machine commands must run within')
+      const records = (await readFile(prepared.commandLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      const rewritten = Buffer.from(records.at(-1).rewrittenBase64, 'base64').toString()
+      expect(rewritten).toBe(`cd ${quote(paths.fixture.root)} || exit\n` + nativeGuard)
+    }
+  })
+
+  it('rejects unowned, invalid and oversized stdin scripts without executing partial bytes', async () => {
+    const paths = await privateHarness()
+    const prepared = await bootstrap.prepare(paths, 'local', {
+      inheritedHome: '/inherited/home',
+      nodePath: process.execPath,
+    })
+    const configuration = { ...prepared, inheritedHome: '/inherited/home' }
+    for (const bytes of [
+      Buffer.from("cd '/unowned' || exit\nprintf unexpected"),
+      Buffer.from("cd '/inherited/home' || exit\nprintf '\0'"),
+      Buffer.from([0xff]),
+      Buffer.from("cd '/inherited/home' || exit\nexec /installed/bin/codex app-server"),
+      Buffer.alloc(bootstrap.maximumLocalScriptBytes + 1, 97),
+    ])
+      expect(() => bootstrap.rewriteLocalScript(bytes, configuration)).toThrow()
+    expect(() =>
+      bootstrap.rewriteLocalScript(Buffer.from("cd '/inherited/home' || exit\npwd"), {
+        ...configuration,
+        mode: 'ssh',
+      }),
+    ).toThrow()
+    const result = spawnSync(prepared.shell, ['-s'], {
+      input: Buffer.alloc(bootstrap.maximumLocalScriptBytes + 1, 97),
+      env: bootstrap.launchEnvironment(process.env, prepared),
+      timeout: 5000,
+      encoding: 'utf8',
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(125)
+    expect(result.stdout).toBe('')
+    const [record] = (await readFile(prepared.commandLog, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    expect(record).toMatchObject({
+      kind: 'unexpected-local-command',
+      option: '-s',
+      truncated: true,
+    })
+    expect(Buffer.from(record.scriptBase64, 'base64')).toHaveLength(
+      bootstrap.maximumLocalScriptBytes + 1,
+    )
   })
 
   it('logs and rejects unexpected Local provider use before reading a provider source', async () => {

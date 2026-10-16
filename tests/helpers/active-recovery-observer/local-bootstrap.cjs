@@ -1,7 +1,7 @@
 // Fixture setup only. Native protocols and the frozen recovery assertions stay unchanged.
 const assert = require('node:assert/strict')
 const { createHash, randomUUID } = require('node:crypto')
-const { appendFileSync, readFileSync } = require('node:fs')
+const { appendFileSync, readFileSync, readSync } = require('node:fs')
 const { mkdir, readFile, writeFile } = require('node:fs/promises')
 const { homedir } = require('node:os')
 const { dirname, isAbsolute, join, resolve } = require('node:path')
@@ -321,6 +321,63 @@ function runCommandGuard(environment = process.env, argv = process.argv.slice(3)
   }
 }
 
+const maximumLocalScriptBytes = 112_000
+
+function rewriteLocalScript(bytes, configuration) {
+  assert.ok(Buffer.isBuffer(bytes))
+  assert.ok(bytes.length > 0 && bytes.length <= maximumLocalScriptBytes)
+  const script = bytes.toString('utf8')
+  assert.ok(Buffer.from(script, 'utf8').equals(bytes), 'Local scripts retain valid UTF-8 bytes')
+  const boundary = script.indexOf('\n')
+  assert.ok(boundary > 0, 'Local stdin scripts retain the native workspace prefix')
+  const prefix = script.slice(0, boundary + 1)
+  const prefixes = [configuration.inheritedHome, configuration.root, configuration.workspace].map(
+    (path) => `cd ${quote(path)} || exit\n`,
+  )
+  assert.ok(prefixes.includes(prefix), 'Local stdin scripts begin in their exact private workspace')
+  const privatePrefix = `cd ${quote(configuration.root)} || exit\n`
+  // Only the initial literal home changes. Native realpath and workspace guards
+  // remain in the original script and must still accept its requested directory.
+  const command = (prefix === prefixes[0] ? privatePrefix : prefix) + script.slice(boundary + 1)
+  return rewriteLocalCommand(command, '-c', configuration)
+}
+
+function runScriptGuard(environment = process.env) {
+  const chunks = []
+  let size = 0
+  let original = Buffer.alloc(0)
+  try {
+    while (size <= maximumLocalScriptBytes) {
+      const chunk = Buffer.alloc(Math.min(8192, maximumLocalScriptBytes + 1 - size))
+      const length = readSync(0, chunk, 0, chunk.length, null)
+      if (!length) break
+      chunks.push(chunk.subarray(0, length))
+      size += length
+    }
+    original = Buffer.concat(chunks)
+    const result = rewriteLocalScript(original, commandConfiguration(environment))
+    const rewritten = Buffer.from(result.command, 'utf8')
+    guardRecord(environment, {
+      kind: 'local-command-admitted',
+      option: '-s',
+      commandSha256: hash(original),
+      scriptBase64: original.toString('base64'),
+      rewrittenSha256: hash(rewritten),
+      rewrittenBase64: rewritten.toString('base64'),
+    })
+    process.stdout.write(rewritten)
+  } catch (error) {
+    guardRecord(environment, {
+      kind: 'unexpected-local-command',
+      option: '-s',
+      commandSha256: hash(original),
+      scriptBase64: original.toString('base64'),
+      truncated: size > maximumLocalScriptBytes,
+    })
+    throw error
+  }
+}
+
 function runProviderGuard(
   provider,
   source,
@@ -373,7 +430,7 @@ async function prepare(
   await writeFile(commandLog, '', { mode: 0o600, flag: 'wx' })
   await writeFile(configPath, privateSSHConfig(harness.fixture), { mode: 0o600, flag: 'wx' })
   const shellBody =
-    '#!/bin/bash\nif [[ "$1" != "-c" && "$1" != "-lc" ]]; then\n  "$LIFE_TEST_BOOTSTRAP_NODE" "$LIFE_TEST_BOOTSTRAP_ADAPTER" --guard-command "${2-}" "${1-}"\n  exit 125\nfi\ntask_command="$("$LIFE_TEST_BOOTSTRAP_NODE" "$LIFE_TEST_BOOTSTRAP_ADAPTER" --guard-command "$2" "$1")" || exit $?\nexec /bin/bash --noprofile --norc -c "$task_command"\n'
+    '#!/bin/bash\nif [[ "$#" == 1 && "$1" == "-s" ]]; then\n  set -o pipefail\n  "$LIFE_TEST_BOOTSTRAP_NODE" "$LIFE_TEST_BOOTSTRAP_ADAPTER" --guard-script | /bin/bash --noprofile --norc -s\n  exit $?\nfi\nif [[ "$#" != 2 || ( "$1" != "-c" && "$1" != "-lc" ) ]]; then\n  "$LIFE_TEST_BOOTSTRAP_NODE" "$LIFE_TEST_BOOTSTRAP_ADAPTER" --guard-command "${2-}" "invalid-arguments:${1-}"\n  exit 125\nfi\ntask_command="$("$LIFE_TEST_BOOTSTRAP_NODE" "$LIFE_TEST_BOOTSTRAP_ADAPTER" --guard-command "$2" "$1")" || exit $?\nexec /bin/bash --noprofile --norc -c "$task_command"\n'
   await writeFile(shell, shellBody, { mode: 0o700, flag: 'wx' })
   const localProfileId = 'local:' + randomUUID()
   const seed = seedConnections({ mode, fixture: harness.fixture, localProfileId, configPath })
@@ -583,15 +640,18 @@ module.exports = {
   validateNativeCommand,
   rewriteLocalCommand,
   runCommandGuard,
+  rewriteLocalScript,
+  maximumLocalScriptBytes,
   runProviderGuard,
   prepare,
   connectLocal,
   connectSSH,
   install,
 }
-if (require.main === module && process.argv[2] === '--guard-command') {
+if (require.main === module && ['--guard-command', '--guard-script'].includes(process.argv[2])) {
   try {
-    runCommandGuard()
+    if (process.argv[2] === '--guard-script') runScriptGuard()
+    else runCommandGuard()
   } catch (error) {
     console.error(String(error))
     process.exitCode = 125

@@ -656,15 +656,15 @@ async function launch(userData, fixture, name) {
     env: environment,
     timeout: 45000,
   })
+  const logs = [],
+    rendererErrors = []
   try {
-    const logs = []
     for (const stream of ['stdout', 'stderr'])
       application
         .process()
         [stream]?.on('data', (bytes) => logs.push({ stream, text: String(bytes).slice(-16000) }))
-    const page = await application.firstWindow()
+    const page = await within(() => application.firstWindow(), `${name}: first window`)
     page.setDefaultTimeout(30000)
-    const rendererErrors = []
     page.on('pageerror', (error) => rendererErrors.push(String(error)))
     await page.locator('.app-shell').waitFor()
     assert.match(page.url(), /^file:\/\//, 'The packaged renderer must load from its packaged file')
@@ -673,15 +673,19 @@ async function launch(userData, fixture, name) {
       /\/resources\/app\.asar\/out\/renderer\/index\.html$/,
       'The gate loaded a renderer outside the package',
     )
-    const identity = await application.evaluate(({ app }) => ({
-      platform: process.platform,
-      execPath: process.execPath,
-      resources: process.resourcesPath,
-      userData: app.getPath('userData'),
-      packaged: app.isPackaged,
-      version: app.getVersion(),
-      versions: process.versions,
-    }))
+    const identity = await within(
+      () =>
+        application.evaluate(({ app }) => ({
+          platform: process.platform,
+          execPath: process.execPath,
+          resources: process.resourcesPath,
+          userData: app.getPath('userData'),
+          packaged: app.isPackaged,
+          version: app.getVersion(),
+          versions: process.versions,
+        })),
+      `${name}: Main identity`,
+    )
     assert.equal(identity.platform, 'win32')
     assert.equal(identity.packaged, true)
     assert.equal(identity.execPath.toLowerCase(), executable.toLowerCase())
@@ -691,21 +695,50 @@ async function launch(userData, fixture, name) {
       'Refusing to use an actual user profile',
     )
     assert.equal(resolve(identity.resources).toLowerCase(), resolve(resources).toLowerCase())
-    const isolation = await application.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences(),
+    const isolation = await within(
+      () =>
+        application.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences(),
+        ),
+      `${name}: Main preferences`,
     )
     assert.equal(isolation.contextIsolation, true)
     assert.equal(isolation.nodeIntegration, false)
     assert.equal(isolation.sandbox, true)
-    assert.equal(await page.evaluate(() => typeof window.require), 'undefined')
+    assert.equal(
+      await within(() => page.evaluate(() => typeof window.require), `${name}: renderer isolation`),
+      'undefined',
+    )
     await json(join(output, `${name}-main-runtime.json`), identity)
-    await page.evaluate(() => {
-      window.__windowsNativeEvents = []
-      window.relay.onAgent((event) => window.__windowsNativeEvents.push(event))
-    })
+    await within(
+      () =>
+        page.evaluate(() => {
+          window.__windowsNativeEvents = []
+          window.relay.onAgent((event) => window.__windowsNativeEvents.push(event))
+        }),
+      `${name}: native event observer`,
+    )
     return { application, page, identity, rendererErrors, logs }
   } catch (error) {
-    await application.close().catch(() => {})
+    let cleanupError,
+      forced = false
+    try {
+      await within(() => application.close(), `${name}: failed launch cleanup`, 5000)
+    } catch (cause) {
+      cleanupError = String(cause.stack || cause)
+      const child = application.process()
+      forced = child.exitCode === null && child.signalCode === null
+      if (forced) child.kill('SIGKILL')
+    }
+    await json(join(output, `${name}-launch-failure.json`), {
+      error: String(error.stack || error),
+      mainLogs: logs,
+      rendererErrors,
+      cleanupError,
+      pid: application.process().pid,
+      forcedOwnMain: forced,
+      nativeProtocolExitConfirmed: false,
+    })
     throw error
   }
 }

@@ -214,6 +214,48 @@ describe('Agents asynchronous native Codex message questions', () => {
     })
   })
 
+  it('answers an opaque prefixed native callback ID through its existing approval entry', async () => {
+    const { agents, channel, events } = await fixture()
+    const localId = 'codex-async:opaque-existing-native-approval'
+    const wireId = 'codex-async:opaque-provider-callback'
+    const allocateId = vi
+      .spyOn(
+        agents as unknown as { permissionLocalId: (...args: unknown[]) => string },
+        'permissionLocalId',
+      )
+      .mockReturnValueOnce(localId)
+    try {
+      channel.reply({
+        id: wireId,
+        method: 'item/tool/requestUserInput',
+        params: {
+          threadId: nativeThread,
+          turnId: nativeTurn,
+          itemId: 'native-tool',
+          questions: [{ id: 'native-question', question: 'Keep the native callback?' }],
+        },
+      })
+    } finally {
+      allocateId.mockRestore()
+    }
+    const pending = events.findLast((event) => event.type === 'question')!
+    expect(pending.requestId).toBe(localId)
+    expect(pending).not.toHaveProperty('responseMode')
+    const before = channel.sent.length
+    const exactAnswer = '  Keep this callback\r\n🌍  '
+    await agents.respond('local', localId, true, { 'native-question': [exactAnswer] })
+    expect(channel.sent.slice(before)).toEqual([
+      { id: wireId, result: { answers: { 'native-question': { answers: [exactAnswer] } } } },
+    ])
+    expect(
+      channel.nativeWrites.findLast((write) => write.message.id === wireId)?.semantic,
+    ).toMatchObject({ kind: 'permission-response', permissionRequestId: wireId })
+    expect(events.findLast((event) => event.type === 'request-resolved')).toMatchObject({
+      requestId: localId,
+      status: 'answered',
+    })
+  })
+
   it.each(['start', 'steer'] as const)(
     'answers through normal %s on the exact native thread with a bound native outbox semantic',
     async (mode) => {

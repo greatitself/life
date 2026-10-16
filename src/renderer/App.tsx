@@ -2104,12 +2104,12 @@ export function App() {
         threadSeed: {
           id: thread.id,
           profileId: thread.profileId,
-          workspace: thread.workspace,
+          ...(thread.workspace !== undefined ? { workspace: thread.workspace } : {}),
           provider: thread.provider,
           title: thread.title,
           ...(thread.purpose ? { purpose: thread.purpose } : {}),
           ...(thread.researchContext ? { researchContext: thread.researchContext } : {}),
-          createdAt: thread.createdAt,
+          ...(thread.createdAt !== undefined ? { createdAt: thread.createdAt } : {}),
           updatedAt: userMessage.createdAt,
           turn: thread.turn,
           messages: [],
@@ -2117,8 +2117,10 @@ export function App() {
           pending: [],
           model: thread.model,
           mode: thread.mode,
-          reasoningEffort: thread.reasoningEffort,
-          serviceTier: thread.serviceTier,
+          ...(thread.reasoningEffort !== undefined
+            ? { reasoningEffort: thread.reasoningEffort }
+            : {}),
+          ...(thread.serviceTier !== undefined ? { serviceTier: thread.serviceTier } : {}),
         },
       },
     )

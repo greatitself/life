@@ -52,7 +52,10 @@ async function asyncQuestionChecks(page, checks, settle) {
   }, idleQuestion)
   await panel.waitFor()
   assert.equal(await composer.isVisible(), false)
-  assert.equal(await composer.inputValue(), ordinaryDraft)
+  assert.equal(
+    await page.locator('textarea[aria-label="Message your coding agent"]').inputValue(),
+    ordinaryDraft,
+  )
   await panel.getByRole('textbox', { name: idleQuestion, exact: true }).fill(idleAnswer)
   await panel.getByRole('button', { name: 'Send answers', exact: true }).click()
   await page.waitForFunction(
@@ -72,6 +75,11 @@ async function asyncQuestionChecks(page, checks, settle) {
     answers: { 0: [idleAnswer] },
   })
   if (asyncQuestions) {
+    assert.deepEqual(
+      idleStart.clientRecovery,
+      JSON.parse(JSON.stringify(idleStart.clientRecovery)),
+      'The durable start envelope must contain only JSON-safe fields',
+    )
     assert.equal(idleStart.clientRecovery.kind, 'main')
     assert.equal(idleStart.clientRecovery.userMessage.text, idlePrompt)
     assert.equal(idleStart.clientRecovery.userMessage.turn, idleStart.localTurn)
@@ -231,6 +239,12 @@ async function asyncQuestionChecks(page, checks, settle) {
     answers: { 0: [busyAnswer] },
   })
   assert.equal(busySteer.clientRecovery.kind, 'main')
+  assert.deepEqual(
+    busySteer.clientRecovery,
+    JSON.parse(JSON.stringify(busySteer.clientRecovery)),
+    'The durable steering envelope must omit undefined optional fields on legacy threads',
+  )
+  assert.equal(Object.hasOwn(busySteer.clientRecovery.threadSeed, 'createdAt'), false)
   const authored = busySteer.clientRecovery.userMessage
   assert.equal(authored.text, busyPrompt)
   assert.equal(authored.submission, 'steering')

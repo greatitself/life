@@ -7355,7 +7355,10 @@ export class Agents {
     decisionId?: string,
     nativeStop = false,
   ) {
-    if (requestId.startsWith('codex-async:'))
+    if (
+      requestId.startsWith('codex-async:') &&
+      !this.sessions.get(sessionId)?.approvals.has(requestId)
+    )
       return runEffect(
         this.asyncQuestionAdmission.withPermits(1)(
           this.dismissAsyncQuestionEffect(sessionId, requestId, accepted, decisionId),
